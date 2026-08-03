@@ -10,6 +10,16 @@
 # WEBCONFERENCE_AGENT_EDGE/WEBCONFERENCE_AGENT_CP_URL/WEBCONFERENCE_EDGE_WS to your
 # plane.
 #
+# When co-located on the same host as a CADS-Tunnel self-host deployment (compose
+# project name "ct-selfhost", i.e. docker/deploy/compose.selfhost.yml run from a
+# directory literally named `deploy` -- Compose derives the network name from the
+# project name), this joins that deployment's own `default` network directly
+# (PLANE_NETWORK, external) so `edge`/`control-plane` resolve as plain service
+# hostnames -- no IP-address guessing. Override PLANE_NETWORK if your plane's
+# compose project has a different name, or fall back to IP-based
+# WEBCONFERENCE_AGENT_EDGE/WEBCONFERENCE_AGENT_CP_URL/WEBCONFERENCE_EDGE_WS values
+# (and drop the `networks:` blocks below) for a genuinely remote/non-co-located plane.
+#
 #   ./build-wasm.sh   # build pkg/ first -- Caddy.Dockerfile COPYs it in
 #   docker compose -f compose.webconference-demo.yml --env-file .env up --build -d
 services:
@@ -26,6 +36,9 @@ services:
       - webconference_demo_caddy_data:/data
     expose:
       - "443"   # reachable only via the tunnel/agent, not published to the host
+    networks:
+      - default
+      - plane
     restart: unless-stopped
 
   webconference-demo-agent:
@@ -55,8 +68,17 @@ services:
       - webconference_demo_agent_state:/var/lib/ct-agent
     depends_on:
       - webconference-demo-origin
+    networks:
+      - default
+      - plane
     command: ["ct-agent", "onboard"]
     restart: unless-stopped
+
+networks:
+  default: {}
+  plane:
+    external: true
+    name: ${PLANE_NETWORK:-ct-selfhost_default}
 
 volumes:
   webconference_demo_caddy_data:
