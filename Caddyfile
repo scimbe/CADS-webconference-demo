@@ -20,10 +20,18 @@
 # block is unconditional and safe to leave in even when the gate is off: an ungated
 # hostname's /gate/check always answers 200, so nothing here ever blocks a visitor
 # unless the owner has actually turned the gate on for this hostname.
+#
+# copy_headers forwards /gate/check's X-Gate-Email response header onto the actual
+# request Caddy proxies through -- when the gate is on and a visit is admitted, the
+# app/bridge sees who's really signed in as a normal incoming request header,
+# instead of trusting anything the browser itself could claim. Absent entirely when
+# the gate is off (nothing to report), so app-side code must treat a missing header
+# as "no verified identity available," not an error.
 
 webconference.bunsenbrenner.org {
 	forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
 		uri /gate/check
+		copy_headers X-Gate-Email
 	}
 	handle_errors {
 		@gate_401 expression {http.error.status_code} == 401
