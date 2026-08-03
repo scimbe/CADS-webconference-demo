@@ -27,15 +27,18 @@
 # instead of trusting anything the browser itself could claim. Absent entirely when
 # the gate is off (nothing to report), so app-side code must treat a missing header
 # as "no verified identity available," not an error.
+#
+# No handle_errors block: /gate/check issues the login redirect itself (a 302
+# straight to /gate/start) when the gate blocks a visit -- forward_auth copies
+# that response to the client verbatim. A handle_errors block here never
+# actually fired (confirmed against Caddy's own forward_auth docs: a non-2xx
+# auth-backend response never reaches Caddy's error pipeline at all) -- caught
+# live standing up the first real gated demo, not from re-reading the docs.
 
 webconference.bunsenbrenner.org {
 	forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
 		uri /gate/check
 		copy_headers X-Gate-Email
-	}
-	handle_errors {
-		@gate_401 expression {http.error.status_code} == 401
-		redir @gate_401 https://{$CT_GATE_UPSTREAM_HOST}/gate/start?host={host}&return={uri} 302
 	}
 	reverse_proxy /ws/channel {$WEBCONFERENCE_EDGE_WS}
 	root * /srv
