@@ -30,6 +30,12 @@ services:
     environment:
       # Caddy's {$WEBCONFERENCE_EDGE_WS} substitution in Caddyfile reads this.
       - WEBCONFERENCE_EDGE_WS=${WEBCONFERENCE_EDGE_WS:?set WEBCONFERENCE_EDGE_WS=<plane host>:<CT_EDGE_WS_CHANNEL_LISTEN port, e.g. 4437>}
+      # Browser-Plane login gate (optional, CADS-Tunnel #382-follow): the control
+      # plane's own public host -- e.g. bunsenbrenner.org. Only matters once the
+      # tunnel owner actually enables the login gate from the portal; harmless
+      # (unused) otherwise. Defaults to the operator's own zone so this repo's
+      # default demo works with zero extra config.
+      - CT_GATE_UPSTREAM_HOST=${CT_GATE_UPSTREAM_HOST:-bunsenbrenner.org}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ${WEBCONFERENCE_CERT_DIR:?set WEBCONFERENCE_CERT_DIR=<dir with fullchain.pem+privkey.pem from the operator>}:/certs:ro

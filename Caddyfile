@@ -13,8 +13,22 @@
 # The cert is issued CORE-side (CADS-Tunnel's scripts/authorize-pipeline.sh, deSEC
 # DNS-01 with the operator's zone-wide token) and mounted in as static files -- this
 # Caddyfile only ever reads fullchain.pem/privkey.pem, never holds a DNS credential.
+#
+# Browser-Plane login gate (optional, CADS-Tunnel #382-follow): CT_GATE_UPSTREAM_HOST
+# (e.g. bunsenbrenner.org) points forward_auth at the control plane's own /gate/check.
+# The toggle lives entirely server-side (the tunnel owner's portal checkbox) -- this
+# block is unconditional and safe to leave in even when the gate is off: an ungated
+# hostname's /gate/check always answers 200, so nothing here ever blocks a visitor
+# unless the owner has actually turned the gate on for this hostname.
 
 webconference.bunsenbrenner.org {
+	forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
+		uri /gate/check
+	}
+	handle_errors {
+		@gate_401 expression {http.error.status_code} == 401
+		redir @gate_401 https://{$CT_GATE_UPSTREAM_HOST}/gate/start?host={host}&return={uri} 302
+	}
 	reverse_proxy /ws/channel {$WEBCONFERENCE_EDGE_WS}
 	root * /srv
 	file_server
