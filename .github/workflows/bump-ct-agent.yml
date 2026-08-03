@@ -1,0 +1,54 @@
+name: Bump pinned ct-agent
+
+# Keeps CT_AGENT_REF (compose.webconference-demo.yml's default, Agent.Dockerfile's
+# build arg) from silently going stale -- ct-agent has no tagged release newer than
+# v0.3.0 yet (see Agent.Dockerfile's own comment), so this tracks its default
+# branch's latest commit instead of a tag. Opens a PR rather than auto-merging: an
+# untested upstream commit landing straight in a live production demo is exactly
+# the risk a reviewed bump avoids. Enable auto-merge on this repo (branch
+# protection -> allow auto-merge) if you want it to land with zero manual
+# intervention once CI is green.
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve latest ct-agent commit
+        id: latest
+        run: |
+          sha="$(gh api repos/scimbe/ct-agent/commits/main --jq '.sha')"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Bump the pin
+        run: |
+          sed -i "s/^ARG CT_AGENT_REF=.*/ARG CT_AGENT_REF=${{ steps.latest.outputs.sha }}/" Agent.Dockerfile
+          sed -i "s/CT_AGENT_REF:-[0-9a-f]\{40\}/CT_AGENT_REF:-${{ steps.latest.outputs.sha }}/" compose.webconference-demo.yml
+
+      - name: Open PR if the pin actually changed
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore(deps): bump pinned ct-agent to ${{ steps.latest.outputs.sha }}"
+          title: "chore(deps): bump pinned ct-agent to ${{ steps.latest.outputs.sha }}"
+          body: |
+            Automated: scimbe/ct-agent's `main` moved to
+            https://github.com/scimbe/ct-agent/commit/${{ steps.latest.outputs.sha }}
+            since the last bump.
+
+            Review before merging -- this pin flows straight into the live
+            `webconference-demo-agent` container. `./build-wasm.sh` + a redeploy
+            (`./run-demo.sh up`) after merge exercises the new ct-agent build for
+            real before it reaches production.
+          branch: chore/bump-ct-agent
+          delete-branch: true
