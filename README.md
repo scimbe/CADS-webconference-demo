@@ -67,6 +67,70 @@ script's own header comment for every env var). The TLS certificate is issued
 holds that credential; see CADS-Tunnel's `docs/dns01-desec.md` for the full
 cert-issuance walkthrough.
 
+## Self-hosting: running your own instance (not on the operator's host)
+
+This demo needs a **CADS-Tunnel plane you control** (an edge + control-plane you
+can reach and admin) — it isn't a standalone service. If you don't already run
+one, that's the actual first step, not something specific to this repo:
+
+1. **Stand up your own CADS-Tunnel plane.** In a `CADS-Tunnel` checkout:
+   `./scripts/deploy-selfhost.sh --frontdoor` (see CADS-Tunnel's
+   [`docs/ops/runbook.md`](https://github.com/scimbe/CADS-Tunnel/blob/main/docs/ops/runbook.md)).
+   This is generic, not tied to any specific operator's domain or account — it
+   issues a real Let's Encrypt cert via **deSEC DNS-01**
+   ([`docs/dns01-desec.md`](https://github.com/scimbe/CADS-Tunnel/blob/main/docs/dns01-desec.md)),
+   a free DNS host anyone can sign up for with **their own domain** (or even a
+   free `yourname.dedyn.io` name if you don't have one — no registrar changes
+   needed for that path). Set `DESEC_TOKEN` and `PORTAL_PUBLIC_HOST` to
+   **your own** domain, not the operator's.
+   - The video-conferencing WebSocket listener (`ws_channel.rs`,
+     `CT_EDGE_WS_CHANNEL_LISTEN`) is already wired into the **base**
+     `compose.selfhost.yml` and comes up automatically once
+     `CT_EDGE_ADMIN_TOKEN` is set (a base-stack requirement regardless of this
+     demo) — no extra step for that specifically.
+   - As of CADS-Tunnel's `ws_channel.rs` native-TLS increment, you have two
+     options for the video-call WebSocket traffic itself: (a) let this demo's
+     own Caddy reverse-proxy it (the shape below, and what the operator's
+     instance does), or (b) set `CT_EDGE_WS_CHANNEL_CERT`/`CT_EDGE_WS_CHANNEL_KEY`
+     on your edge so it terminates `wss://` natively and skip proxying that path
+     through Caddy at all. Either is a real, tested option — (a) is what's
+     documented below since it matches this repo's existing `Caddyfile`/
+     `run-demo.sh` shape.
+
+2. **DNS + a cert for YOUR subdomain** (e.g. `webconference.yourdomain.tld`):
+   point an `A` record at your plane's host, then get a cert the same way the
+   front door got its own (deSEC DNS-01, or any ACME method you prefer) into a
+   local directory with `fullchain.pem` + `privkey.pem`.
+
+3. **Build and run this demo against your plane:**
+
+   ```bash
+   ./build-wasm.sh   # builds pkg/ from the pinned scimbe/ct-agent commit
+
+   HOSTNAME_FQDN=webconference.yourdomain.tld \
+   WEBCONFERENCE_CERT_DIR=/path/to/your/cert-dir \
+   WEBCONFERENCE_EDGE_WS=<your-plane-host>:<CT_EDGE_WS_CHANNEL_LISTEN port, default 4437> \
+   CP_URL=http://<your-plane-host>:8090 \
+   EDGE=<your-plane-host>:4433 \
+   ./run-demo.sh up
+   ```
+
+   `run-demo.sh` mints a join token from your own control-plane, brings up the
+   Caddy origin + a Browser-Plane `ct-agent` bound to your hostname, and polls
+   until the page serves over real HTTPS. If your plane's edge gates
+   host-authorization, also set `CT_CP_EDGE_ADMIN_URL`/`CT_CP_EDGE_ADMIN_TOKEN`
+   (see the script's own header comment for the full var list — every one is
+   documented there, not just the ones above).
+
+4. **Verify it's real**, the same way the operator's instance was verified: mint
+   two grants (`video-call-grant/`), open the page as two browser tabs, and
+   confirm both reach `RTCPeerConnection` state `connected` — not just that the
+   page loads.
+
+Once this is confirmed stable and working end-to-end on your own infrastructure,
+the operator's own copy of this demo can be taken down — this repo, your plane,
+and your subdomain are the durable home for it going forward.
+
 ## Provenance
 
 Extracted from [scimbe/CADS-Tunnel](https://github.com/scimbe/CADS-Tunnel) — the
