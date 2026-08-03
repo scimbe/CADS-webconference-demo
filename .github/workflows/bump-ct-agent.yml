@@ -1,13 +1,20 @@
 name: Bump pinned ct-agent
 
-# Keeps CT_AGENT_REF (compose.webconference-demo.yml's default, Agent.Dockerfile's
-# build arg) from silently going stale -- ct-agent has no tagged release newer than
-# v0.3.0 yet (see Agent.Dockerfile's own comment), so this tracks its default
-# branch's latest commit instead of a tag. Opens a PR rather than auto-merging: an
-# untested upstream commit landing straight in a live production demo is exactly
-# the risk a reviewed bump avoids. Enable auto-merge on this repo (branch
-# protection -> allow auto-merge) if you want it to land with zero manual
-# intervention once CI is green.
+# Keeps this repo's three scimbe/ct-agent pins from silently going stale --
+# Agent.Dockerfile's build arg and compose.webconference-demo.yml's default (the
+# native onboarding agent) AND build-wasm.sh's CT_AGENT_REF (ct-agent-wasm, the
+# browser build -- moved into scimbe/ct-agent's own wasm/ workspace member, see
+# that repo's workspace restructure commit). All three now track the SAME repo,
+# so one commit bump updates all of them together. ct-agent has no tagged release
+# newer than v0.3.0 yet (see Agent.Dockerfile's own comment), so this tracks its
+# default branch's latest commit instead of a tag.
+#
+# Verifies the wasm build actually still succeeds against the new commit BEFORE
+# opening a PR -- opens a PR rather than auto-merging either way: an untested
+# upstream commit landing straight in a live production demo is exactly the risk
+# a reviewed bump avoids. Enable auto-merge on this repo (branch protection ->
+# allow auto-merge) if you want it to land with zero manual intervention once CI
+# is green.
 on:
   schedule:
     - cron: "17 6 * * *" # daily
@@ -31,12 +38,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Bump the pin
+      - name: Check if the pin actually changed
+        id: diff
+        run: |
+          current="$(sed -n 's/^CT_AGENT_REF="\${CT_AGENT_REF:-\([0-9a-f]\{40\}\)}".*/\1/p' build-wasm.sh)"
+          echo "current=$current"
+          echo "changed=$([ "$current" != "${{ steps.latest.outputs.sha }}" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Bump the pins
+        if: steps.diff.outputs.changed == 'true'
         run: |
           sed -i "s/^ARG CT_AGENT_REF=.*/ARG CT_AGENT_REF=${{ steps.latest.outputs.sha }}/" Agent.Dockerfile
-          sed -i "s/CT_AGENT_REF:-[0-9a-f]\{40\}/CT_AGENT_REF:-${{ steps.latest.outputs.sha }}/" compose.webconference-demo.yml
+          sed -i "s/CT_AGENT_REF:-[0-9a-f]\{40\}/CT_AGENT_REF:-${{ steps.latest.outputs.sha }}/" compose.webconference-demo.yml build-wasm.sh
 
-      - name: Open PR if the pin actually changed
+      - name: Verify -- wasm build against the new commit
+        if: steps.diff.outputs.changed == 'true'
+        run: ./build-wasm.sh
+
+      - name: Open PR if it changed and verification passed
+        if: steps.diff.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           commit-message: "chore(deps): bump pinned ct-agent to ${{ steps.latest.outputs.sha }}"
@@ -44,11 +64,12 @@ jobs:
           body: |
             Automated: scimbe/ct-agent's `main` moved to
             https://github.com/scimbe/ct-agent/commit/${{ steps.latest.outputs.sha }}
-            since the last bump.
+            since the last bump. The wasm build (ct-agent-wasm, `wasm/` in that repo)
+            was verified against it BEFORE this PR was opened (see the workflow run).
 
             Review before merging -- this pin flows straight into the live
-            `webconference-demo-agent` container. `./build-wasm.sh` + a redeploy
-            (`./run-demo.sh up`) after merge exercises the new ct-agent build for
-            real before it reaches production.
+            `webconference-demo-agent` container AND `pkg/`'s wasm bundle. A redeploy
+            (`./run-demo.sh up`) after merge exercises the new native ct-agent build
+            for real before it reaches production.
           branch: chore/bump-ct-agent
           delete-branch: true

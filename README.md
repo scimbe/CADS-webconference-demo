@@ -2,8 +2,9 @@
 
 `https://webconference.bunsenbrenner.org` (once deployed) is two browser tabs
 joining a real [CADS-Tunnel](https://github.com/scimbe/CADS-Tunnel) Agent-Fabric
-channel entirely in-browser: `ct-agent-wasm` (CADS-Tunnel's channel-join/Noise_IK
-handshake/WebRTC-signaling primitives, compiled to WASM) drives a real WebSocket
+channel entirely in-browser: `ct-agent-wasm` ([scimbe/ct-agent](https://github.com/scimbe/ct-agent)'s
+browser build -- channel-join/Noise_IK-handshake/WebRTC-signaling primitives
+against CADS-Tunnel's `ct-common` core, compiled to WASM) drives a real WebSocket
 connection to the edge's `ws_channel.rs` listener, runs a real Noise_IK handshake,
 and exchanges real encrypted WebRTC signaling messages to establish a real
 `RTCPeerConnection` — genuine browser-native audio/video, not a reimplementation.
@@ -31,11 +32,11 @@ and exchanges real encrypted WebRTC signaling messages to establish a real
   params (`ws`, `grant`, `holderPriv`, `noisePriv`, `role`) — no build step, no
   bundler.
 - `pkg/` — `ct-agent-wasm` compiled for the browser (`wasm-bindgen --target web`),
-  built by `./build-wasm.sh` from a pinned CADS-Tunnel release tag. `ct-agent-wasm`
-  is core CADS-Tunnel platform code (the browser port of its Agent-Fabric channel
-  primitives) — genuinely useful to any browser-based Agent-Fabric application, not
-  specific to this demo — so it stays in that repo; this one only ever builds
-  against a tagged release, never vendors its source.
+  built by `./build-wasm.sh` from a pinned `scimbe/ct-agent` commit (see that repo's
+  `wasm/` workspace member — `ct-agent-wasm` IS `ct-agent` for the browser,
+  sharing one `ct-common` version with the native binary; not specific to this
+  demo, so it stays there) — this repo only ever builds against that pin, never
+  vendors its source.
 - `video-call-grant/` — `ct-video-call-grant`, the operator-side CLI that mints the
   `SignedChannelGrant`s this demo's two peers need (a browser peer can't mint its
   own grant — that needs the channel operator's private key). Pure local signing,
@@ -74,6 +75,8 @@ demo page, grant-minting CLI, and deployment scaffolding lived at
 there during development; moved here once the underlying protocol was proven (this
 repo is a demo, not core platform code, matching `CADS-auction-demo`/
 `CADS-a2a-demo`'s own separate-repo convention). The core primitives this demo
-depends on — `ct-agent-wasm`, the edge's `ws_channel.rs` browser channel listener,
-and cross-transport pairing with the `:443`/QUIC channel brokers — remain in
-CADS-Tunnel itself.
+depends on — the edge's `ws_channel.rs` browser channel listener and cross-transport
+pairing with the `:443`/QUIC channel brokers — remain in CADS-Tunnel itself.
+`ct-agent-wasm` itself moved a step further, from CADS-Tunnel into
+[scimbe/ct-agent](https://github.com/scimbe/ct-agent)'s own `wasm/` workspace
+member (it's `ct-agent` for the browser, not CADS-Tunnel platform code).

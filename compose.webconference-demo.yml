@@ -46,7 +46,7 @@ services:
       context: .
       dockerfile: Agent.Dockerfile
       args:
-        - CT_AGENT_REF=${CT_AGENT_REF:-3a53877407cd4f72b9afa32b748549297f43732b}
+        - CT_AGENT_REF=${CT_AGENT_REF:-b03f2efd1ab5ec34d745a98336593fa6d9791ff1}
     environment:
       - CT_AGENT_MODE=browser
       - CT_AGENT_HOSTNAME=webconference.bunsenbrenner.org

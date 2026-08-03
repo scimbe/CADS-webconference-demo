@@ -8,16 +8,16 @@ FROM rust:1-slim-bookworm AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
-# Which ct-agent commit/tag to build -- bump deliberately. No tag newer than v0.3.0
-# exists yet, and this pins past it to pick up fixes landed since (the --docker
-# install path's GLIBC mismatch fix, --docker --green, setup.ps1 parity) -- switch
-# to a `vX.Y.Z` tag once one is cut that includes them.
-ARG CT_AGENT_REF=3a53877407cd4f72b9afa32b748549297f43732b
+# Which ct-agent commit/tag to build -- bump deliberately (bump-ct-agent.yml
+# automates checking for a newer one). No tag newer than v0.3.0 exists yet; pinned
+# past the workspace restructure that added wasm/ (ct-agent-wasm, this demo's
+# browser build -- see build-wasm.sh) as a sibling of this native binary.
+ARG CT_AGENT_REF=b03f2efd1ab5ec34d745a98336593fa6d9791ff1
 RUN git clone https://github.com/scimbe/ct-agent.git /build && cd /build && git checkout "${CT_AGENT_REF}"
 WORKDIR /build
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release --locked \
+    cargo build --release --locked -p ct-agent \
     && cp target/release/ct-agent /tmp/ct-agent
 
 FROM debian:bookworm-slim AS runtime

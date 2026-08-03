@@ -1,13 +1,14 @@
 name: Bump pinned CADS-Tunnel tag
 
-# CADS-Tunnel is where the actual protocol code this demo depends on lives
-# (ct-agent-wasm, ct-common) -- this repo only ever builds against a pinned
-# release tag (CADS_TUNNEL_TAG in build-wasm.sh, the `tag =` in
-# video-call-grant/Cargo.toml), never main, so a breaking core change can't land
-# here unnoticed. Checks for a newer CADS-Tunnel tag daily; if one exists, verifies
-# THIS demo still builds and its grant-minting tests still pass against it BEFORE
-# opening a PR -- a red run means the new tag broke something this demo relies on,
-# surfaced here rather than discovered live.
+# CADS-Tunnel is where ct-common (the protocol/crypto core video-call-grant links
+# directly) lives -- this repo only ever builds against a pinned release tag
+# (the `tag =` in video-call-grant/Cargo.toml), never main, so a breaking core
+# change can't land here unnoticed. (ct-agent-wasm itself moved to
+# scimbe/ct-agent's own wasm/ workspace member -- see bump-ct-agent.yml for that
+# pin instead.) Checks for a newer CADS-Tunnel tag daily; if one exists, verifies
+# video-call-grant's own tests still pass against it BEFORE opening a PR -- a red
+# run means the new tag broke something this demo relies on, surfaced here rather
+# than discovered live.
 on:
   schedule:
     - cron: "43 6 * * *" # daily
@@ -34,21 +35,18 @@ jobs:
       - name: Check if the pin actually changed
         id: diff
         run: |
-          current="$(sed -n 's/^CADS_TUNNEL_TAG="\${CADS_TUNNEL_TAG:-\([^}]*\)}".*/\1/p' build-wasm.sh)"
+          current="$(sed -n 's/.*tag = "\(v[0-9.]*\)".*/\1/p' video-call-grant/Cargo.toml)"
           echo "current=$current"
           echo "changed=$([ "$current" != "${{ steps.latest.outputs.tag }}" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Bump the pin
         if: steps.diff.outputs.changed == 'true'
-        run: |
-          sed -i "s/CADS_TUNNEL_TAG:-[^}]*/CADS_TUNNEL_TAG:-${{ steps.latest.outputs.tag }}/" build-wasm.sh
-          sed -i "s/tag = \"v[0-9.]*\"/tag = \"${{ steps.latest.outputs.tag }}\"/" video-call-grant/Cargo.toml
+        run: sed -i "s/tag = \"v[0-9.]*\"/tag = \"${{ steps.latest.outputs.tag }}\"/" video-call-grant/Cargo.toml
 
-      - name: Verify -- wasm build + grant CLI tests against the new tag
+      - name: Verify -- grant CLI tests against the new tag
         if: steps.diff.outputs.changed == 'true'
         run: |
           rm -f video-call-grant/Cargo.lock
-          ./build-wasm.sh
           docker run --rm -v "$PWD/video-call-grant":/work -w /work rust:1-slim cargo test
 
       - name: Open PR if it changed and verification passed
@@ -59,9 +57,9 @@ jobs:
           title: "chore(deps): bump pinned CADS-Tunnel to ${{ steps.latest.outputs.tag }}"
           body: |
             Automated: a newer CADS-Tunnel release, `${{ steps.latest.outputs.tag }}`,
-            exists. This demo's own wasm build + `video-call-grant`'s tests were
-            verified against it BEFORE this PR was opened (see the workflow run) --
-            a red run here means something skipped opening the PR at all.
+            exists. `video-call-grant`'s own tests were verified against it BEFORE
+            this PR was opened (see the workflow run) -- a red run here means
+            something skipped opening the PR at all.
 
             Still review before merging: passing tests confirm the wire protocol
             didn't break, not that nothing else changed.
