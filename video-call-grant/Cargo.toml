@@ -1,0 +1,17 @@
+[package]
+name = "ct-video-call-grant"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+[[bin]]
+name = "ct-video-call-grant"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned to a real CADS-Tunnel release tag (matches CADS-auction-demo's own
+# convention) -- no local path, this demo repo is standalone. Bump deliberately
+# when a newer tag is needed.
+ct-common = { git = "https://github.com/scimbe/CADS-Tunnel", tag = "v0.4.12" }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"

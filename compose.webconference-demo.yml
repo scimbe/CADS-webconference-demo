@@ -1,0 +1,63 @@
+# webconference.bunsenbrenner.org: the real ct-agent-wasm video-conferencing demo
+# (channel-join + Noise_IK handshake + encrypted WebRTC signaling, driving a real
+# RTCPeerConnection), reachable over a real Let's Encrypt certificate obtained at
+# the origin via deSEC DNS-01 (issued CORE-side, relayed in -- see README).
+#
+# Runs ALONGSIDE an already-running CADS-Tunnel plane (ct-edge with
+# CT_EDGE_BROWSER_LISTEN=:443 for this compose's own Browser-Plane tunnel, AND
+# CT_EDGE_WS_CHANNEL_LISTEN published for the video-call WebSocket traffic itself --
+# see CADS-Tunnel's docker/deploy/compose.selfhost.yml). Adapt
+# WEBCONFERENCE_AGENT_EDGE/WEBCONFERENCE_AGENT_CP_URL/WEBCONFERENCE_EDGE_WS to your
+# plane.
+#
+#   ./build-wasm.sh   # build pkg/ first -- Caddy.Dockerfile COPYs it in
+#   docker compose -f compose.webconference-demo.yml --env-file .env up --build -d
+services:
+  webconference-demo-origin:
+    build:
+      context: .
+      dockerfile: Caddy.Dockerfile
+    environment:
+      # Caddy's {$WEBCONFERENCE_EDGE_WS} substitution in Caddyfile reads this.
+      - WEBCONFERENCE_EDGE_WS=${WEBCONFERENCE_EDGE_WS:?set WEBCONFERENCE_EDGE_WS=<plane host>:<CT_EDGE_WS_CHANNEL_LISTEN port, e.g. 4437>}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${WEBCONFERENCE_CERT_DIR:?set WEBCONFERENCE_CERT_DIR=<dir with fullchain.pem+privkey.pem from the operator>}:/certs:ro
+      - webconference_demo_caddy_data:/data
+    expose:
+      - "443"   # reachable only via the tunnel/agent, not published to the host
+    restart: unless-stopped
+
+  webconference-demo-agent:
+    build:
+      context: .
+      dockerfile: Agent.Dockerfile
+      args:
+        - CT_AGENT_REF=${CT_AGENT_REF:-3a53877407cd4f72b9afa32b748549297f43732b}
+    environment:
+      - CT_AGENT_MODE=browser
+      - CT_AGENT_HOSTNAME=webconference.bunsenbrenner.org
+      - CT_AGENT_TOKEN=${WEBCONFERENCE_AGENT_TOKEN:-}
+      - CT_AGENT_ORIGIN=webconference-demo-origin:443
+      - CT_AGENT_ORIGIN_PROTO=tcp
+      - CT_AGENT_CAPABILITY_OUT=/tmp/capability.bin
+      - CT_AGENT_EDGE=${WEBCONFERENCE_AGENT_EDGE:?edge host:port, e.g. edge:4433}
+      - CT_AGENT_CP_URL=${WEBCONFERENCE_AGENT_CP_URL:?control-plane URL for onboarding}
+      - CT_AGENT_JOIN_TOKEN=${WEBCONFERENCE_JOIN_TOKEN:?single-use join token}
+      - CT_AGENT_ID=webconference-demo
+      - CT_AGENT_EDGE_CERT_URL=${WEBCONFERENCE_AGENT_EDGE_CERT_URL:-}
+      # Restart-safe onboarding: persist the bound identity so a container restart
+      # restores it instead of re-redeeming the single-use join token (same fix
+      # help-site/CADS-auction-demo needed for #141).
+      - CT_AGENT_STATE_DIR=/var/lib/ct-agent
+      - CT_AGENT_RECONNECT_MAX_ATTEMPTS=0
+    volumes:
+      - webconference_demo_agent_state:/var/lib/ct-agent
+    depends_on:
+      - webconference-demo-origin
+    command: ["ct-agent", "onboard"]
+    restart: unless-stopped
+
+volumes:
+  webconference_demo_caddy_data:
+  webconference_demo_agent_state:

@@ -1,0 +1,27 @@
+# Origin for the webconference.bunsenbrenner.org demo. Caddy terminates TLS, so it
+# needs NO inbound :80/:443 of its own (reachable only through the tunnel, same as
+# CADS-auction-demo/CADS-a2a-demo). Serves the static demo page directly (file_server
+# -- no backend bridge, unlike those demos) and reverse-proxies the one dynamic path,
+# /ws/channel, to the edge's dedicated browser channel listener
+# (ws_channel.rs, CT_EDGE_WS_CHANNEL_LISTEN) on the plane host -- Caddy proxies the
+# WebSocket Upgrade transparently, no special config needed.
+#
+# WEBCONFERENCE_EDGE_WS (env-substituted at container start via Caddy's {$VAR}
+# syntax) is the plane host's published ws_channel port, e.g. 203.0.113.10:4437 --
+# see CADS-Tunnel's docker/deploy/compose.selfhost.yml EDGE_WS_CHANNEL_PORT.
+#
+# The cert is issued CORE-side (CADS-Tunnel's scripts/authorize-pipeline.sh, deSEC
+# DNS-01 with the operator's zone-wide token) and mounted in as static files -- this
+# Caddyfile only ever reads fullchain.pem/privkey.pem, never holds a DNS credential.
+
+webconference.bunsenbrenner.org {
+	reverse_proxy /ws/channel {$WEBCONFERENCE_EDGE_WS}
+	root * /srv
+	file_server
+	encode gzip
+	tls /certs/fullchain.pem /certs/privkey.pem
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+	}
+}
