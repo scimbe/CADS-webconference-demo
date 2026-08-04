@@ -15,7 +15,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Agent.Dockerfile comment) and its wasm/ member didn't exist before the workspace
 # restructure commit -- pinned by commit SHA until a release tag covers it. Bump
 # deliberately (bump-ct-agent.yml automates checking for a newer commit).
-CT_AGENT_REF="${CT_AGENT_REF:-b03f2efd1ab5ec34d745a98336593fa6d9791ff1}"
+CT_AGENT_REF="${CT_AGENT_REF:-86ab198ffc70d6dcb9ee1bb55efa2191dbd8d408}"
 OUT_DIR="$REPO_ROOT/pkg"
 
 docker run --rm -m 2g --cpus 2 \
