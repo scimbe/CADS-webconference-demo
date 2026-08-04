@@ -17,11 +17,17 @@
 //
 // Registering a freshly-minted channel with the control plane (POST
 // /me/channels + .../members) authenticates as the workflow-maintainer
-// portal account, via EITHER CT_OIDC_TOKEN (bearer) or CT_PORTAL_SESSION_COOKIE
-// (the portal's own session cookie value -- now accepted directly per
-// CADS-Tunnel#214's dual-auth fix, `subject_of_channel` mirroring the
-// Topology Editor's existing pattern). Read fresh on every attempt so either
-// can be rotated without a restart.
+// account. Preferred: CT_OIDC_CLIENT_ID/CT_OIDC_CLIENT_SECRET, a durable
+// service-account credential (POST /me/service-accounts) this bridge
+// exchanges for a fresh 5-minute bearer token itself, on demand -- doesn't
+// expire on its own the way the two fallbacks below do, which is what kept
+// breaking real calls ("POST /me/channels -> 401 missing bearer token")
+// every few hours whenever a manually-minted credential expired. Fallback
+// (only if no service account is configured): CT_OIDC_TOKEN (a raw,
+// manually-obtained bearer token) or CT_PORTAL_SESSION_COOKIE (the portal's
+// own session cookie value, ~8h TTL -- also the ONLY option for the
+// login-allowlist add/remove routes below, which are cookie-only and don't
+// accept a bearer token at all, service-account or otherwise).
 
 const http = require('http');
 const { execFile } = require('child_process');
@@ -172,8 +178,41 @@ function mintGrants(holderAPub, holderBPub) {
   });
 }
 
+// Durable service-account credentials (POST /me/service-accounts, minted
+// once via the portal, never expiring on their own -- only on rotate/
+// revoke). Preferred over CT_OIDC_TOKEN/CT_PORTAL_SESSION_COOKIE below:
+// both of those are short-lived (a client_credentials access_token is
+// good for 5 minutes; the portal session cookie for 8 hours) and were
+// only ever manual stopgaps -- this repeatedly broke real calls
+// ("POST /me/channels -> 401 missing bearer token") every time whichever
+// human-minted credential happened to expire between manual refreshes.
+const OIDC_CLIENT_ID = process.env.CT_OIDC_CLIENT_ID;
+const OIDC_CLIENT_SECRET = process.env.CT_OIDC_CLIENT_SECRET;
+const OIDC_TOKEN_URL = process.env.CT_OIDC_TOKEN_URL || 'https://auth.bunsenbrenner.org/realms/ct-demo/protocol/openid-connect/token';
+
+let cachedToken = null; // { value, expiresAt } -- expiresAt in epoch ms
+async function getBearerToken() {
+  if (!OIDC_CLIENT_ID || !OIDC_CLIENT_SECRET) return null;
+  // 30s safety margin so a token never gets used right as it's expiring
+  // (the request would land server-side after expiry and 401 anyway).
+  if (cachedToken && cachedToken.expiresAt - 30_000 > Date.now()) return cachedToken.value;
+  const resp = await fetch(OIDC_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'client_credentials', client_id: OIDC_CLIENT_ID, client_secret: OIDC_CLIENT_SECRET }).toString(),
+  });
+  if (!resp.ok) {
+    console.error(`bridge: service-account token exchange failed: ${resp.status} ${await resp.text().catch(() => '')}`);
+    return null;
+  }
+  const body = await resp.json();
+  cachedToken = { value: body.access_token, expiresAt: Date.now() + body.expires_in * 1000 };
+  return cachedToken.value;
+}
+
 async function cpFetch(path, body) {
-  const token = process.env.CT_OIDC_TOKEN;
+  const serviceToken = await getBearerToken();
+  const token = serviceToken || process.env.CT_OIDC_TOKEN;
   const sessionCookie = process.env.CT_PORTAL_SESSION_COOKIE;
   const headers = { 'content-type': 'application/json' };
   if (token) headers['authorization'] = `Bearer ${token}`;
@@ -464,6 +503,12 @@ server.on('upgrade', (req, socket, head) => {
 
 const [host, port] = LISTEN.split(':');
 server.listen(Number(port), host, () => {
-  const authMode = process.env.CT_OIDC_TOKEN ? 'bearer token' : process.env.CT_PORTAL_SESSION_COOKIE ? 'portal session cookie' : 'NONE -- registration will fail';
+  const authMode = OIDC_CLIENT_ID && OIDC_CLIENT_SECRET
+    ? 'service-account (self-refreshing)'
+    : process.env.CT_OIDC_TOKEN
+      ? 'static bearer token (will expire, no refresh)'
+      : process.env.CT_PORTAL_SESSION_COOKIE
+        ? 'portal session cookie (will expire in ~8h, no refresh; login-allowlist add/remove needs this regardless)'
+        : 'NONE -- registration will fail';
   console.log(`webconference-demo-bridge listening on ${LISTEN} (cp=${CP_URL}, registration auth: ${authMode})`);
 });

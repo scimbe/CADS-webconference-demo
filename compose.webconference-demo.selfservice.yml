@@ -54,11 +54,17 @@ services:
       # itself works without it.
       - WEBCONFERENCE_TUNNEL_ID=${WEBCONFERENCE_TUNNEL_ID:-}
       - CT_CHANNEL_OPERATOR_KEY=${WEBCONFERENCE_OPERATOR_KEY:?this demo's channel operator private key, 64-hex, from ct-agent channel operator-init}
-      # Either auth path works (CADS-Tunnel#214's dual-auth fix): a bearer
-      # token, or -- what's actually wired up -- the portal's own session
-      # cookie value, captured via a real login as the workflow-maintainer
-      # account. Rotate WEBCONFERENCE_PORTAL_SESSION_COOKIE when the session
-      # expires (re-login, extract `ct_portal_session` from the cookie jar).
+      # Preferred: a durable service-account credential (POST
+      # /me/service-accounts from the portal) -- doesn't expire on its own,
+      # unlike the two fallbacks below, which both did (repeatedly broke
+      # real calls with "401 missing bearer token" every few hours).
+      - CT_OIDC_CLIENT_ID=${WEBCONFERENCE_OIDC_CLIENT_ID:-}
+      - CT_OIDC_CLIENT_SECRET=${WEBCONFERENCE_OIDC_CLIENT_SECRET:-}
+      # Fallbacks, only used when no service account is configured above.
+      # CT_PORTAL_SESSION_COOKIE is ALSO the only option for the
+      # login-allowlist add/remove routes (cookie-only, no bearer support at
+      # all) -- rotate it when it expires (~8h TTL): re-login, extract
+      # `ct_portal_session` from the cookie jar.
       - CT_OIDC_TOKEN=${WEBCONFERENCE_OIDC_TOKEN:-}
       - CT_PORTAL_SESSION_COOKIE=${WEBCONFERENCE_PORTAL_SESSION_COOKIE:-}
     expose:
