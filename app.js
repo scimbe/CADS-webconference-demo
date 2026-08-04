@@ -21,6 +21,7 @@
 // simulation layered on top.
 
 import init, * as wasm from './pkg/ct_agent_wasm.js';
+import { ChatStore } from './chatStore.js';
 
 const setupScreen = document.getElementById('setup-screen');
 const callScreen = document.getElementById('call-screen');
@@ -355,7 +356,22 @@ const NO_CAMERA_SENTINEL = '\u0000no-camera';
 // VP8/VP9/Opus at all) -- telling them "no camera" here would be flat wrong.
 const NO_CODEC_SENTINEL = '\u0000no-codec';
 
-function setupChatChannel(channel, localHasCamera) {
+// chatStore/peerEmail are both optional (see startCallFromIdentity's
+// comment -- a manually-built call link has no identity to key a store to).
+// When present: past history for this contact is loaded and rendered
+// before any live message, every send/receive is persisted (encrypted,
+// Lamport-ordered), and a message recorded by this SAME
+// identity's OTHER open tab (via chatStore's BroadcastChannel) also renders
+// live here if it's for this same conversation.
+function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
+  if (chatStore && peerEmail) {
+    chatStore.history(peerEmail).then((history) => {
+      for (const m of history) addChatMessage(m.text, m.from);
+    });
+    chatStore.onMessage((msg) => {
+      if (msg.peerEmail === peerEmail.toLowerCase()) addChatMessage(msg.text, msg.from);
+    });
+  }
   channel.addEventListener('open', () => {
     chatInput.disabled = false;
     chatSend.disabled = false;
@@ -372,13 +388,29 @@ function setupChatChannel(channel, localHasCamera) {
       remoteEmpty.textContent = 'peer has no camera';
       return;
     }
-    addChatMessage(ev.data, 'peer');
+    // JSON envelope carries the sender's Lamport seq so record({received:true})
+    // can preserve causal order -- tolerate a plain-text payload too (e.g. an
+    // older/manual-link peer with no chatStore of its own) by just showing it.
+    let seq, text;
+    try {
+      ({ seq, text } = JSON.parse(ev.data));
+    } catch (_) {
+      text = ev.data;
+    }
+    addChatMessage(text, 'peer');
+    if (chatStore && peerEmail && seq != null) chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
   });
   chatForm.addEventListener('submit', (ev) => {
     ev.preventDefault();
     const text = chatInput.value.trim();
     if (!text || channel.readyState !== 'open') return;
-    channel.send(text);
+    if (chatStore && peerEmail) {
+      const seq = chatStore.nextSeqForSend();
+      channel.send(JSON.stringify({ seq, text }));
+      chatStore.record({ peerEmail, from: 'me', text, seq });
+    } else {
+      channel.send(JSON.stringify({ text }));
+    }
     addChatMessage(text, 'me');
     chatInput.value = '';
   });
@@ -597,9 +629,17 @@ async function pollCallStatus(channel, { onDone, timeoutMs = 15000, intervalMs =
   return onDone(false, { state: 'timeout' });
 }
 
-function startCallFromIdentity(identity, { role, channel, grant, ws, transport }) {
+function startCallFromIdentity(identity, { role, channel, grant, ws, transport, peerEmail }) {
   const params = new URLSearchParams({ ws, grant, holderPriv: identity.holderPriv, noisePriv: identity.noisePriv, role });
   if (transport === 'channel') params.set('transport', 'channel');
+  // Optional: only used to key the encrypted local chat store (chatStore.js)
+  // to the right (me, peer) conversation. A hand-built manual call link
+  // (see index.html's "manual call link" fallback) won't have these -- chat
+  // persistence just quietly stays off for that link, same as it always has.
+  if (peerEmail) {
+    params.set('myEmail', identity.email);
+    params.set('peerEmail', peerEmail);
+  }
   location.search = params.toString(); // reload into the call screen -- keeps run() as the single entry point
 }
 
@@ -709,7 +749,7 @@ async function runDialer(identity, { verified = false } = {}) {
       return;
     }
     if (attestResp.status?.state === 'accepted_and_registered') {
-      startCallFromIdentity(identity, { role: 'caller', channel: resp.channel, grant: resp.grant, ws: resp.ws, transport: resp.transport });
+      startCallFromIdentity(identity, { role: 'caller', channel: resp.channel, grant: resp.grant, ws: resp.ws, transport: resp.transport, peerEmail: toEmail });
       return;
     }
     setCallNote('info', `Ringing ${toEmail}… waiting for them to accept.`);
@@ -722,7 +762,7 @@ async function runDialer(identity, { verified = false } = {}) {
         btnCancelCall.hidden = true;
         outgoingChannel = null;
         if (ok) {
-          startCallFromIdentity(identity, { role: 'caller', channel: resp.channel, grant: resp.grant, ws: resp.ws, transport: resp.transport });
+          startCallFromIdentity(identity, { role: 'caller', channel: resp.channel, grant: resp.grant, ws: resp.ws, transport: resp.transport, peerEmail: toEmail });
         } else if (status.state === 'pending_core_credential') {
           setCallNote('warn', `Couldn't complete channel registration: ${status.detail || 'unknown reason'}`);
         } else if (status.state === 'declined') {
@@ -846,7 +886,7 @@ async function runDialer(identity, { verified = false } = {}) {
       timeoutMs: 10000, // just waiting on the registration round-trip, not on a human
       onDone: (ok, status) => {
         if (ok) {
-          startCallFromIdentity(identity, { role: 'callee', channel: incoming.channel, grant: incoming.grant, ws: incoming.ws, transport: incoming.transport });
+          startCallFromIdentity(identity, { role: 'callee', channel: incoming.channel, grant: incoming.grant, ws: incoming.ws, transport: incoming.transport, peerEmail: incoming.fromEmail });
         } else {
           setCallNote('warn', status.state === 'pending_core_credential'
             ? `Couldn't complete channel registration: ${status.detail || 'unknown reason'}`
@@ -909,9 +949,18 @@ const TAG_MEDIA_CHUNK = 2;
 const TAG_CHAT = 3;
 const TAG_BYE = 4;
 
-async function runChannelMediaCall(byteStream, noiseTransport, isCaller) {
+async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatStore, peerEmail) {
   setStatus('connecting-media');
   routeWebrtc.classList.add('live');
+
+  if (chatStore && peerEmail) {
+    chatStore.history(peerEmail).then((history) => {
+      for (const m of history) addChatMessage(m.text, m.from);
+    });
+    chatStore.onMessage((msg) => {
+      if (msg.peerEmail === peerEmail.toLowerCase()) addChatMessage(msg.text, msg.from);
+    });
+  }
 
   function sendTagged(tag, payloadBytes) {
     writeFramed(byteStream, noiseTransport.encrypt(concatBytes(new Uint8Array([tag]), payloadBytes)));
@@ -972,7 +1021,13 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller) {
     ev.preventDefault();
     const text = chatInput.value.trim();
     if (!text) return;
-    sendText(TAG_CHAT, text);
+    if (chatStore && peerEmail) {
+      const seq = chatStore.nextSeqForSend();
+      sendText(TAG_CHAT, JSON.stringify({ seq, text }));
+      chatStore.record({ peerEmail, from: 'me', text, seq });
+    } else {
+      sendText(TAG_CHAT, JSON.stringify({ text }));
+    }
     addChatMessage(text, 'me');
     chatInput.value = '';
   });
@@ -1021,15 +1076,24 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller) {
       } else if (tag === TAG_MEDIA_CHUNK) {
         appendChunk(payload);
       } else if (tag === TAG_CHAT) {
-        const text = new TextDecoder().decode(payload);
-        if (text === NO_CAMERA_SENTINEL) {
+        const raw = new TextDecoder().decode(payload);
+        if (raw === NO_CAMERA_SENTINEL) {
           addChatMessage('Your peer joined without a working camera/microphone -- that\'s why you can\'t see or hear them, not a bug.', 'system');
           remoteEmpty.textContent = 'peer has no camera';
-        } else if (text === NO_CODEC_SENTINEL) {
+        } else if (raw === NO_CODEC_SENTINEL) {
           addChatMessage('Your peer has a camera, but their browser can\'t encode video for this transport (e.g. Safari doesn\'t support the codecs used here) -- try WebRTC mode instead.', 'system');
           remoteEmpty.textContent = "peer's browser can't encode video here";
         } else {
+          // Real chat rides as a {seq, text} JSON envelope -- see the send
+          // side's comment. Tolerate plain text too (an older/manual-link peer).
+          let seq, text;
+          try {
+            ({ seq, text } = JSON.parse(raw));
+          } catch (_) {
+            text = raw;
+          }
           addChatMessage(text, 'peer');
+          if (chatStore && peerEmail && seq != null) chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
         }
       } else if (tag === TAG_BYE) {
         setStatus('peer-hung-up');
@@ -1109,6 +1173,10 @@ async function run() {
   const noisePrivHex = params.get('noisePriv');
   const role = params.get('role'); // 'caller' | 'callee'
   const transportMode = params.get('transport') === 'channel' ? 'channel' : 'webrtc';
+  // Optional -- see startCallFromIdentity's comment. A manually-built call
+  // link won't have these; chat just isn't persisted for that session.
+  const myEmail = params.get('myEmail');
+  const peerEmail = params.get('peerEmail');
 
   if (!wsUrl || !grantHex || !holderPrivHex || !noisePrivHex || !role) {
     await runIdentityScreen();
@@ -1141,8 +1209,13 @@ async function run() {
   log('Noise_IK handshake complete -- signaling channel is now authenticated + encrypted');
   routeSignal.classList.add('live');
 
+  // Only constructed when both emails are known (see startCallFromIdentity) --
+  // a manually-built call link has no identity to key the store to, and
+  // chat for that session just isn't persisted, same as always.
+  const chatStore = myEmail && peerEmail ? new ChatStore({ email: myEmail, holderPriv: holderPrivHex }) : null;
+
   if (transportMode === 'channel') {
-    await runChannelMediaCall(stream, noiseTransport, isCaller);
+    await runChannelMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail);
     return;
   }
 
@@ -1245,13 +1318,13 @@ async function run() {
   let chatChannel;
   if (isCaller) {
     chatChannel = pc.createDataChannel('chat');
-    setupChatChannel(chatChannel, media.kind === 'media');
+    setupChatChannel(chatChannel, media.kind === 'media', chatStore, peerEmail);
     setupHeartbeatChannel(pc.createDataChannel('heartbeat'));
   } else {
     pc.ondatachannel = (ev) => {
       if (ev.channel.label === 'chat') {
         chatChannel = ev.channel;
-        setupChatChannel(chatChannel, media.kind === 'media');
+        setupChatChannel(chatChannel, media.kind === 'media', chatStore, peerEmail);
       } else if (ev.channel.label === 'heartbeat') {
         setupHeartbeatChannel(ev.channel);
       }
