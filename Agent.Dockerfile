@@ -12,7 +12,7 @@ RUN apt-get update \
 # automates checking for a newer one). No tag newer than v0.3.0 exists yet; pinned
 # past the workspace restructure that added wasm/ (ct-agent-wasm, this demo's
 # browser build -- see build-wasm.sh) as a sibling of this native binary.
-ARG CT_AGENT_REF=b03f2efd1ab5ec34d745a98336593fa6d9791ff1
+ARG CT_AGENT_REF=86ab198ffc70d6dcb9ee1bb55efa2191dbd8d408
 RUN git clone https://github.com/scimbe/ct-agent.git /build && cd /build && git checkout "${CT_AGENT_REF}"
 WORKDIR /build
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
