@@ -2,4 +2,5 @@
 /pkg/
 target/
 .env
+.env.*
 .claude-flow/

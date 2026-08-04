@@ -2,26 +2,280 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>CADS-Tunnel video-call demo</title>
+<title>CADS-Tunnel video call</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
-  h1 { font-size: 1.1rem; }
-  dl { display: grid; grid-template-columns: auto 1fr; gap: .25rem 1rem; }
-  dt { font-weight: 600; }
-  #log { font-family: ui-monospace, monospace; font-size: .8rem; white-space: pre-wrap; background: #f4f4f4; padding: .5rem; border-radius: 4px; max-height: 12rem; overflow-y: auto; }
+ :root{
+  --bg:#0c111d; --panel:#141b2c; --panel2:#1a2338; --line:#2a3450; --line-soft:#212a41;
+  --text:#eef1f7; --muted:#8a93ad; --muted2:#c3c9db;
+  --accent:#d98a4f; --accent-soft:#a8683a; --accent2:#5fb8ab;
+  --danger:#e2685f;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
+  --serif:ui-serif,Georgia,"Iowan Old Style","Palatino Linotype",serif;
+ }
+ @media (prefers-color-scheme: light){
+  :root{
+   --bg:#f5f7fb; --panel:#ffffff; --panel2:#eef1f8; --line:#d7deec; --line-soft:#e3e8f3;
+   --text:#131a2c; --muted:#5b6478; --muted2:#333d54;
+   --accent:#b8672f; --accent-soft:#8f4f24; --accent2:#2f8a7d;
+   --danger:#c8443a;
+  }
+ }
+ *{box-sizing:border-box}
+ html{scroll-behavior:smooth}
+ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;margin:0;background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased}
+ a{color:inherit}
+ code{font-family:var(--mono)}
+ h1,h2,h3{font-family:var(--serif);font-weight:600;letter-spacing:-.01em;margin:0}
+
+ .hero{border-bottom:1px solid var(--line);
+  background-image:linear-gradient(var(--line-soft) 1px, transparent 1px),linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
+  background-size:34px 34px}
+ .wrap{max-width:64rem;margin:0 auto;padding:0 1.5rem}
+ .hero-top{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;row-gap:.6rem;column-gap:.75rem;padding:1.4rem 0}
+ .brand{font-size:1.1rem;font-weight:700;letter-spacing:-.01em;display:flex;align-items:center;gap:.55rem;font-family:var(--serif)}
+ .brand .flame{width:9px;height:9px;border-radius:50%;background:var(--accent2);flex-shrink:0;box-shadow:0 0 0 3px rgba(95,184,171,.22)}
+ .brand .tld{color:var(--muted);font-weight:400}
+ .hero-nav{display:flex;align-items:center;gap:1.1rem;font-size:.88rem}
+ .hero-nav a{text-decoration:none;color:var(--muted2)}
+ .hero-nav a:hover{color:var(--text)}
+
+ main{padding:2.2rem 0 3rem}
+
+ .eyebrow{font-family:var(--mono);font-size:.74rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent2);
+  display:flex;align-items:center;gap:.5rem;margin:0 0 1rem}
+ .eyebrow::before{content:"";width:1.4rem;height:1px;background:var(--accent2)}
+
+ h1{font-size:clamp(1.6rem,3.4vw,2.15rem);line-height:1.2;margin:0 0 .7rem}
+ .lede{font-size:.98rem;color:var(--muted2);max-width:38rem;margin:0 0 1.6rem}
+
+ /* ---- setup screen ---- */
+ .panel-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1.5rem}
+ .setup-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:1.5rem;align-items:start}
+ @media (max-width:760px){.setup-grid{grid-template-columns:1fr}}
+ .setup-grid h2{font-size:1.05rem;margin-bottom:.75rem}
+ .step-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:.9rem}
+ .step-list li{display:flex;gap:.75rem}
+ .step-num{flex-shrink:0;width:1.5rem;height:1.5rem;border-radius:50%;background:var(--panel2);border:1px solid var(--line);
+  display:flex;align-items:center;justify-content:center;font-size:.75rem;font-family:var(--mono);color:var(--accent2)}
+ pre.cmd{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:.7rem .85rem;font-size:.78rem;overflow-x:auto;margin:.5rem 0 0}
+ .trust-strip{display:flex;flex-wrap:wrap;gap:1.1rem;margin:1.3rem 0 0;font-size:.8rem;color:var(--muted)}
+ .trust-strip span{display:flex;align-items:center;gap:.45rem}
+ .trust-strip .dot{width:6px;height:6px;border-radius:50%;background:var(--accent2);flex-shrink:0}
+ .badge{display:inline-block;font-family:var(--mono);font-size:.7rem;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--accent2);background:rgba(95,184,171,.12);border:1px solid rgba(95,184,171,.3);border-radius:99px;padding:.2rem .6rem;margin-bottom:.9rem}
+
+ /* ---- call screen ---- */
+ .call-header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.6rem;margin-bottom:1.1rem}
+ .status-pill{font-family:var(--mono);font-size:.76rem;padding:.3rem .7rem;border-radius:99px;border:1px solid var(--line);color:var(--muted2);display:flex;align-items:center;gap:.4rem}
+ .status-pill .dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+ .status-pill[data-live="1"] .dot{background:var(--accent2);box-shadow:0 0 0 3px rgba(95,184,171,.2)}
+ .status-pill[data-live="0"] .dot{background:var(--danger)}
+
+ .call-grid{display:grid;grid-template-columns:2fr 1fr;gap:1.1rem;align-items:start}
+ @media (max-width:820px){.call-grid{grid-template-columns:1fr}}
+
+ .video-grid{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}
+ @media (max-width:520px){.video-grid{grid-template-columns:1fr}}
+ .video-tile{position:relative;background:#000;border:1px solid var(--line);border-radius:10px;overflow:hidden;aspect-ratio:4/3}
+ .video-tile video{width:100%;height:100%;object-fit:cover;display:block;background:#05070d}
+ .video-tile .tile-label{position:absolute;left:.6rem;bottom:.6rem;font-family:var(--mono);font-size:.72rem;color:#fff;
+  background:rgba(0,0,0,.45);padding:.15rem .55rem;border-radius:99px;backdrop-filter:blur(2px)}
+ .video-tile .tile-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:.85rem;font-family:var(--mono)}
+
+ .controls{display:flex;gap:.6rem;justify-content:center;margin-top:1rem}
+ button.ctl{font-family:inherit;font-size:.85rem;border-radius:99px;border:1px solid var(--line);background:var(--panel2);
+  color:var(--text);padding:.55rem 1rem;cursor:pointer;display:flex;align-items:center;gap:.45rem;transition:background .12s,border-color .12s}
+ button.ctl:hover{border-color:var(--accent2)}
+ button.ctl[data-off="1"]{background:rgba(226,104,95,.14);border-color:rgba(226,104,95,.4);color:var(--danger)}
+ button.ctl.hangup{background:var(--danger);border-color:var(--danger);color:#fff}
+ button.ctl.hangup:hover{filter:brightness(1.08)}
+
+ .chat-panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;display:flex;flex-direction:column;height:100%;min-height:22rem}
+ .chat-header{padding:.8rem 1rem;border-bottom:1px solid var(--line);font-size:.85rem;font-weight:600;color:var(--muted2)}
+ .chat-log{flex:1;overflow-y:auto;padding:.8rem 1rem;display:flex;flex-direction:column;gap:.5rem;font-size:.86rem}
+ .chat-msg{max-width:85%;padding:.45rem .7rem;border-radius:10px;background:var(--panel2);border:1px solid var(--line);word-break:break-word}
+ .chat-msg.me{align-self:flex-end;background:rgba(95,184,171,.14);border-color:rgba(95,184,171,.3)}
+ .chat-msg .meta{font-family:var(--mono);font-size:.68rem;color:var(--muted);margin-top:.15rem}
+ .chat-msg.system{align-self:center;background:transparent;border:none;color:var(--muted);font-size:.78rem;font-family:var(--mono)}
+ .chat-form{display:flex;gap:.5rem;padding:.7rem;border-top:1px solid var(--line)}
+ .chat-form input{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:.5rem .7rem;font:inherit;font-size:.85rem}
+ .chat-form input:focus{outline:none;border-color:var(--accent2)}
+ .chat-form button{font-family:inherit;background:var(--accent2);color:#08211d;border:none;border-radius:8px;padding:.5rem .9rem;font-size:.85rem;font-weight:600;cursor:pointer}
+ .chat-form button:disabled{opacity:.5;cursor:not-allowed}
+
+ details.tech{margin-top:1.4rem;font-size:.82rem;color:var(--muted)}
+ details.tech summary{cursor:pointer;font-family:var(--mono);font-size:.76rem;letter-spacing:.03em;color:var(--muted2)}
+ .route{display:flex;align-items:center;gap:.5rem;font-family:var(--mono);font-size:.78rem;margin:.8rem 0}
+ .route .node{width:9px;height:9px;border-radius:50%;border:1.5px solid var(--line);flex-shrink:0}
+ .route .node.live{background:var(--accent2);border-color:var(--accent2)}
+ .route .seg{flex:1;height:1px;background:var(--line)}
+ #log{font-family:var(--mono);font-size:.74rem;white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);padding:.6rem .7rem;border-radius:6px;max-height:9rem;overflow-y:auto;margin-top:.6rem}
+
+ /* ---- identity / dialer screen ---- */
+ .id-form{display:flex;gap:.6rem;max-width:26rem}
+ .id-form input{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:.6rem .8rem;font:inherit;font-size:.9rem}
+ .id-form input:focus{outline:none;border-color:var(--accent2)}
+ .id-form button, a.btn{font-family:inherit;background:var(--accent2);color:#08211d;border:none;border-radius:8px;padding:.6rem 1.1rem;font-size:.88rem;font-weight:600;cursor:pointer;white-space:nowrap}
+ .id-form button:disabled{opacity:.5;cursor:not-allowed}
+ .online-badge{display:flex;align-items:center;gap:.5rem;font-size:.88rem;color:var(--muted2);margin-bottom:1.2rem}
+ .online-badge .dot{width:8px;height:8px;border-radius:50%;background:var(--accent2);box-shadow:0 0 0 3px rgba(95,184,171,.2)}
+ .dialer-row{display:flex;gap:.6rem;max-width:26rem;margin-top:.5rem}
+ .dialer-row input{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:.6rem .8rem;font:inherit;font-size:.9rem}
+ .dialer-row input:focus{outline:none;border-color:var(--accent2)}
+ .call-note{margin-top:.9rem;font-size:.85rem;padding:.7rem .9rem;border-radius:8px;border:1px solid var(--line);background:var(--panel2);max-width:26rem}
+ .call-note.warn{border-color:rgba(217,138,79,.4);color:var(--accent)}
+ .call-note.info{color:var(--muted2)}
+ .incoming-card{margin-top:1.2rem;padding:1rem 1.1rem;border-radius:10px;border:1px solid var(--accent2);background:rgba(95,184,171,.08);max-width:26rem}
+ .incoming-card .row{display:flex;gap:.6rem;margin-top:.7rem}
+ button.accept{font-family:inherit;background:var(--accent2);color:#08211d;border:none;border-radius:8px;padding:.5rem 1rem;font-weight:600;cursor:pointer}
+ button.decline{font-family:inherit;background:transparent;color:var(--muted2);border:1px solid var(--line);border-radius:8px;padding:.5rem 1rem;cursor:pointer}
+ details.manual-fallback{margin-top:2rem;font-size:.85rem;color:var(--muted)}
+ details.manual-fallback summary{cursor:pointer;color:var(--muted2)}
 </style>
 </head>
 <body>
-<h1>CADS-Tunnel video-call demo</h1>
-<p>Real ct-agent-wasm channel-join + Noise_IK handshake + encrypted WebRTC signaling, driving a real
-<code>RTCPeerConnection</code>. Configured entirely via URL query params (<code>ws</code>, <code>grant</code>,
-<code>holderPriv</code>, <code>noisePriv</code>, <code>role</code>) -- see app.js's header comment.</p>
-<dl>
-  <dt>status</dt><dd id="status">idle</dd>
-  <dt>ICE state</dt><dd id="ice-state">new</dd>
-</dl>
-<div id="log"></div>
+<div class="hero">
+  <div class="wrap hero-top">
+    <div class="brand"><span class="flame"></span>CADS-Tunnel <span class="tld">video call</span></div>
+    <nav class="hero-nav">
+      <a href="https://bunsenbrenner.org/">bunsenbrenner.org</a>
+      <a href="https://github.com/scimbe/CADS-webconference-demo">Source →</a>
+    </nav>
+  </div>
+</div>
+
+<main class="wrap">
+  <div class="eyebrow">REAL WEBRTC · NOISE_IK ENCRYPTED · ZERO-KNOWLEDGE SIGNALING</div>
+
+  <!-- ============ IDENTITY / DIALER SCREEN (shown until ws/grant/holderPriv/noisePriv/role are all present) ============ -->
+  <section id="setup-screen" hidden>
+    <h1>A real video call, actually encrypted.</h1>
+    <p class="lede">Enter your e-mail to go online, then call anyone else who's online by theirs. Two browser
+    tabs join a real Agent-Fabric channel, run a genuine Noise_IK handshake, and exchange encrypted WebRTC
+    signaling to open a real <code>RTCPeerConnection</code> — the operator never sees your audio, video, or
+    chat text, at any point. (It does learn who's calling whom, the same way a phone exchange routes a call
+    without hearing it — see "what's real" alongside.)</p>
+
+    <div class="panel-card setup-grid">
+      <div>
+        <span class="badge" id="id-badge">Go online</span>
+
+        <div id="id-entry">
+          <h2>Enter your e-mail</h2>
+          <form class="id-form" id="id-form">
+            <input id="id-email" type="email" placeholder="you@example.com" required autocomplete="email" />
+            <button type="submit">Go online →</button>
+          </form>
+          <p style="margin:.7rem 0 0;font-size:.8rem;color:var(--muted)">Generates a real key pair in this
+            browser (never leaves it) and registers only its <em>public</em> half against your e-mail.</p>
+        </div>
+
+        <div id="id-dialer" hidden>
+          <div class="online-badge"><span class="dot"></span>Online as <b id="my-email">&nbsp;</b></div>
+          <a id="logout-link" href="https://bunsenbrenner.org/portal/logout" hidden style="display:inline-block;margin-top:.4rem;font-size:.8rem;color:var(--muted2);text-decoration:underline;cursor:pointer">Log out</a>
+          <h2>Call someone</h2>
+          <form class="dialer-row" id="dial-form">
+            <input id="dial-email" type="email" placeholder="their@email.com" required autocomplete="off" />
+            <button type="submit" class="btn">Call →</button>
+          </form>
+          <label style="display:flex;align-items:center;gap:.5rem;margin-top:.6rem;font-size:.8rem;color:var(--muted)">
+            <input type="checkbox" id="transport-channel" style="accent-color:var(--accent2)" />
+            Use direct-channel media (experimental) — tunnels audio/video/chat through the
+            same Noise_IK-encrypted Agent-Fabric channel instead of negotiating WebRTC/ICE;
+            no STUN/TURN needed, works behind stricter NATs/firewalls, at the cost of higher latency.
+          </label>
+          <div id="call-note"></div>
+          <button class="decline" id="btn-cancel-call" type="button" hidden style="margin-top:.6rem">Cancel call</button>
+          <div id="incoming-card" class="incoming-card" hidden>
+            <div>Incoming call from <b id="incoming-from"></b></div>
+            <div class="row">
+              <button class="accept" id="btn-accept" type="button">Accept</button>
+              <button class="decline" id="btn-decline" type="button">Decline</button>
+            </div>
+          </div>
+        </div>
+
+        <details class="manual-fallback">
+          <summary>Have a manual call link instead?</summary>
+          <p>Someone can also mint a call offline with <code>ct-video-call-grant &lt;your_holder_pub&gt;
+            &lt;their_holder_pub&gt;</code> (pure local signing, keys never leave their machine) and hand you
+            back a full <code>?ws=&amp;grant=&amp;holderPriv=&amp;noisePriv=&amp;role=</code> link — opening
+            it drops you straight into the call below.</p>
+        </details>
+      </div>
+      <div class="panel-card" style="background:var(--panel2)">
+        <h2 style="font-size:.95rem;margin-bottom:.6rem">What's real, what's not</h2>
+        <div class="trust-strip" style="flex-direction:column;gap:.7rem;margin-top:0">
+          <span><span class="dot"></span>Every cryptographic step is genuine — same primitives CADS-Tunnel verifies end-to-end</span>
+          <span><span class="dot"></span>Noise_IK handshake, then WebRTC signaling travels only inside that encrypted tunnel</span>
+          <span><span class="dot"></span>The directory/presence layer is metadata only — who's calling whom, never the call content</span>
+          <span><span class="dot"></span>Camera/mic are the only thing ever simulated (in headless test environments)</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CALL SCREEN ============ -->
+  <section id="call-screen" hidden>
+    <div class="call-header">
+      <h1 style="font-size:1.3rem">Your call</h1>
+      <div style="display:flex;gap:.6rem;align-items:center">
+        <span class="badge" id="transport-badge">webrtc</span>
+        <div class="status-pill" id="status-pill" data-live="0">
+          <span class="dot"></span><span id="status-text">idle</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="call-grid">
+      <div>
+        <div class="video-grid">
+          <div class="video-tile">
+            <video id="local-video" autoplay playsinline muted></video>
+            <div class="tile-empty" id="local-empty">waiting for camera…</div>
+            <div class="tile-label">You</div>
+          </div>
+          <div class="video-tile">
+            <video id="remote-video" autoplay playsinline></video>
+            <div class="tile-empty" id="remote-empty">waiting for peer…</div>
+            <div class="tile-label">Peer</div>
+          </div>
+        </div>
+        <div class="controls">
+          <button class="ctl" id="btn-mic" type="button">🎤 Mute</button>
+          <button class="ctl" id="btn-cam" type="button">📷 Camera off</button>
+          <button class="ctl hangup" id="btn-hangup" type="button">Hang up</button>
+        </div>
+
+        <details class="tech">
+          <summary>Technical readout</summary>
+          <div class="route">
+            <div class="node" id="route-you"></div><div class="seg"></div>
+            <div class="node" id="route-signal"></div><div class="seg"></div>
+            <div class="node" id="route-webrtc"></div><div class="seg"></div>
+            <div class="node" id="route-peer"></div>
+          </div>
+          <div style="display:flex;gap:1.5rem;font-family:var(--mono);font-size:.76rem;color:var(--muted2)">
+            <span>ICE: <b id="ice-state">new</b></span>
+            <span>signaling: <b id="status">idle</b></span>
+          </div>
+          <div id="log"></div>
+        </details>
+      </div>
+
+      <div class="chat-panel">
+        <div class="chat-header">Chat <span style="color:var(--muted);font-weight:400" id="chat-transport-note">— over a real WebRTC data channel</span></div>
+        <div class="chat-log" id="chat-log"></div>
+        <form class="chat-form" id="chat-form">
+          <input id="chat-input" type="text" placeholder="Message your peer…" autocomplete="off" disabled />
+          <button type="submit" id="chat-send" disabled>Send</button>
+        </form>
+      </div>
+    </div>
+  </section>
+</main>
+
 <script type="module" src="./app.js"></script>
 </body>
 </html>

@@ -1,0 +1,72 @@
+# Self-service variant: served through the workflow-maintainer portal account's
+# own free-tier tunnel (site-34a13a96.bunsenbrenner.org), not the operator-issued
+# webconference.bunsenbrenner.org hostname the base Caddyfile targets. While the
+# tunnel is in Gelb (see CADS-Tunnel docs/agent-onboarding.md "Certificate
+# status"), the edge terminates external TLS itself with a shared cert and
+# relays plain HTTP to the origin -- so this listens on plain :80, no `tls`
+# directive, until `ct-agent certificate` reaches Grün and this file gets
+# updated to serve its own fullchain.pem/privkey.pem on :443 like the base
+# Caddyfile does.
+:80 {
+	# Browser-Plane login gate (CADS-Tunnel#214): calls the control-plane's
+	# public /gate/check for every request. Caddy sets X-Forwarded-Host to
+	# this vhost's own Host header automatically, which is exactly what
+	# gate_check() reads. Whether this actually enforces anything lives
+	# entirely server-side (this tunnel's "Require login" + allow-list
+	# setting) -- this call is unconditional, per gate.rs's own doc comment.
+	#
+	# This is forward_auth's own expanded form (see its Caddyfile docs), not
+	# the `forward_auth` shorthand: the shorthand copies a non-2xx auth
+	# response straight back to the client, bypassing handle_errors entirely.
+	# The @denied branch below converts a 401 into a real Caddy HTTP error so
+	# handle_errors can turn it into the Keycloak-login redirect; the @good
+	# branch is an intentionally-empty handle_response so a 200 falls through
+	# to the actual site content instead of writing gate_check's empty body.
+	# Caddyfile directives execute in Caddy's own implicit priority order,
+	# NOT textual order -- `route { }` forces these two to run literally
+	# in the sequence written. Without it, the second (forward_auth)
+	# directive was observed running interleaved with the first, breaking
+	# the anonymous-request redirect (verified: a raw 401 with no Location
+	# came back instead of the expected 302 once both directives were
+	# declared at the top level).
+	route {
+		reverse_proxy https://bunsenbrenner.org {
+			method GET
+			rewrite /gate/check
+			@good status 2xx
+			handle_response @good {
+			}
+			@denied status 401
+			handle_response @denied {
+				error 401
+			}
+		}
+
+		# Second pass, using forward_auth's own shorthand + its documented
+		# copy_headers (core's own tested pattern) purely to land
+		# X-Gate-Email on the request. `request_header` inside the
+		# expanded form's handle_response above resolves {rp.header.*}
+		# correctly but does NOT persist past that reverse_proxy handler's
+		# own scope (a known Caddy limitation, confirmed both empirically
+		# and via the Caddy community) -- this shorthand does. By the time
+		# we reach here the block above has already guaranteed a 2xx (or
+		# aborted via `error 401` first), so the shorthand's own "return
+		# raw failure to client" behavior can't actually trigger here.
+		forward_auth https://bunsenbrenner.org {
+			uri /gate/check
+			copy_headers X-Gate-Email
+		}
+	}
+	handle_errors 401 {
+		redir "https://bunsenbrenner.org/gate/start?host={http.request.host}&return={http.request.orig_uri}" 302
+	}
+
+	reverse_proxy /ws/channel {$WEBCONFERENCE_EDGE_WS}
+	reverse_proxy /api/* {$WEBCONFERENCE_BRIDGE_ADDR}
+	root * /srv
+	file_server
+	encode gzip
+	header {
+		X-Content-Type-Options "nosniff"
+	}
+}

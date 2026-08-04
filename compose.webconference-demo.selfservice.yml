@@ -1,0 +1,93 @@
+# Self-service variant: deploys webconference-demo on the workflow-maintainer
+# portal account's own free-tier tunnel (site-34a13a96.bunsenbrenner.org)
+# instead of the operator-issued webconference.bunsenbrenner.org hostname the
+# base compose.webconference-demo.yml targets. Differences from the base file:
+#   - origin serves plain HTTP on :80 (Caddyfile.selfservice), no cert volume --
+#     the tunnel is in Gelb, so the edge terminates TLS with a shared cert and
+#     relays plaintext here (docs/agent-onboarding.md "Certificate status").
+#     Once `ct-agent certificate` reaches Grün, switch back to the base
+#     Caddyfile + a cert volume and reissue on :443.
+#   - no external `plane` docker network: this account's tunnel connects out to
+#     the public bunsenbrenner.org:4433 edge over the network, the same shape
+#     already proven by flappy-demo/cookbook-demo's own compose files, not by
+#     joining the local ct-selfhost_default network.
+#
+#   ./build-wasm.sh
+#   docker compose -f compose.webconference-demo.selfservice.yml --env-file .env.selfservice up --build -d
+services:
+  webconference-demo-origin:
+    build:
+      context: .
+      dockerfile: Caddy.Dockerfile
+    environment:
+      - WEBCONFERENCE_EDGE_WS=${WEBCONFERENCE_EDGE_WS:?set WEBCONFERENCE_EDGE_WS=<plane host>:<CT_EDGE_WS_CHANNEL_LISTEN port, e.g. 4437>}
+      - WEBCONFERENCE_BRIDGE_ADDR=webconference-demo-bridge:8791
+    volumes:
+      - ./Caddyfile.selfservice:/etc/caddy/Caddyfile:ro
+      - webconference_demo_caddy_data_ss:/data
+    expose:
+      - "80"
+    depends_on:
+      - webconference-demo-bridge
+    restart: unless-stopped
+
+  webconference-demo-bridge:
+    # Directory + presence + call-signaling service (email-based dialing) --
+    # see bridge/server.js's own header comment for the full design and the
+    # one gated step (control-plane channel registration, CADS-Tunnel#214).
+    build:
+      context: ./bridge
+      additional_contexts:
+        grant-bin: ./video-call-grant/target/release
+    environment:
+      - WEBCONFERENCE_BRIDGE_LISTEN=0.0.0.0:8791
+      - CT_AGENT_CP_URL=${CT_AGENT_CP_URL:?control-plane URL}
+      - WEBCONFERENCE_WS_URL=${WEBCONFERENCE_WS_URL:?wss:// URL the browser reaches /ws/channel at, e.g. wss://site-34a13a96.bunsenbrenner.org/ws/channel}
+      - CT_CHANNEL_OPERATOR_KEY=${WEBCONFERENCE_OPERATOR_KEY:?this demo's channel operator private key, 64-hex, from ct-agent channel operator-init}
+      # Either auth path works (CADS-Tunnel#214's dual-auth fix): a bearer
+      # token, or -- what's actually wired up -- the portal's own session
+      # cookie value, captured via a real login as the workflow-maintainer
+      # account. Rotate WEBCONFERENCE_PORTAL_SESSION_COOKIE when the session
+      # expires (re-login, extract `ct_portal_session` from the cookie jar).
+      - CT_OIDC_TOKEN=${WEBCONFERENCE_OIDC_TOKEN:-}
+      - CT_PORTAL_SESSION_COOKIE=${WEBCONFERENCE_PORTAL_SESSION_COOKIE:-}
+    expose:
+      - "8791"
+    restart: unless-stopped
+
+  webconference-demo-agent:
+    build:
+      context: .
+      dockerfile: Agent.Dockerfile
+      args:
+        - CT_AGENT_REF=${CT_AGENT_REF:-b03f2efd1ab5ec34d745a98336593fa6d9791ff1}
+    environment:
+      - CT_AGENT_MODE=browser
+      - CT_AGENT_HOSTNAME=${CT_AGENT_HOSTNAME:?this tunnel's assigned hostname, e.g. site-34a13a96.bunsenbrenner.org}
+      - CT_AGENT_TOKEN=${CT_AGENT_TOKEN:?this tunnel's routing token, from the portal Install page}
+      - CT_AGENT_ORIGIN=webconference-demo-origin:80
+      - CT_AGENT_ORIGIN_PROTO=tcp
+      - CT_AGENT_CAPABILITY_OUT=/tmp/capability.bin
+      - CT_AGENT_EDGE=${CT_AGENT_EDGE:?edge host:port, e.g. bunsenbrenner.org:4433}
+      - "CT_AGENT_EDGE_CERT_URL=${CT_AGENT_EDGE_CERT_URL:?needed while Gelb -- fetches the shared cert the agent terminates TLS with}"
+      - CT_AGENT_CP_URL=${CT_AGENT_CP_URL:?control-plane URL for onboarding}
+      - CT_AGENT_JOIN_TOKEN=${CT_AGENT_JOIN_TOKEN:?single-use join token from the portal Install page}
+      - CT_AGENT_ID=webconference-demo-selfservice
+      # Restart-safe onboarding: persist the bound identity so a container restart
+      # restores it instead of re-redeeming the single-use join token.
+      - CT_AGENT_STATE_DIR=/var/lib/ct-agent
+      - CT_AGENT_RECONNECT_MAX_ATTEMPTS=0
+    volumes:
+      - webconference_demo_agent_state_ss:/var/lib/ct-agent
+    depends_on:
+      - webconference-demo-origin
+    command: ["ct-agent", "onboard"]
+    restart: unless-stopped
+
+networks:
+  default:
+    name: webconference-demo-selfservice_default
+
+volumes:
+  webconference_demo_caddy_data_ss:
+  webconference_demo_agent_state_ss:

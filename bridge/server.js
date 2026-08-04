@@ -1,0 +1,395 @@
+// webconference-demo-bridge: a small directory + presence + call-signaling
+// service so two browser tabs can find each other by email and place a call
+// without any manual ct-video-call-grant/CLI step. Plain Node, zero deps,
+// matching CADS-flappy-demo/CADS-cookbook-demo's own bridge convention.
+//
+// What this holds server-side: the channel OPERATOR's private key (pure
+// local ed25519 signing, same as ct-video-call-grant -- never a DNS/TLS
+// credential) and an in-memory directory (email -> holder/noise PUBLIC keys
+// + last-seen). It never sees or needs anyone's holder/noise PRIVATE key --
+// those stay in the browser's localStorage, generated locally.
+//
+// Real, disclosed trade-off: this bridge (the operator) necessarily learns
+// call metadata -- which two emails are connecting, and when -- the same way
+// a phone exchange knows who's calling whom. It never sees the call's actual
+// audio/video/chat content, which stays end-to-end encrypted exactly as
+// without this directory layer.
+//
+// Registering a freshly-minted channel with the control plane (POST
+// /me/channels + .../members) authenticates as the workflow-maintainer
+// portal account, via EITHER CT_OIDC_TOKEN (bearer) or CT_PORTAL_SESSION_COOKIE
+// (the portal's own session cookie value -- now accepted directly per
+// CADS-Tunnel#214's dual-auth fix, `subject_of_channel` mirroring the
+// Topology Editor's existing pattern). Read fresh on every attempt so either
+// can be rotated without a restart.
+
+const http = require('http');
+const { execFile } = require('child_process');
+const crypto = require('crypto');
+
+const LISTEN = process.env.WEBCONFERENCE_BRIDGE_LISTEN || '0.0.0.0:8791';
+const CP_URL = process.env.CT_AGENT_CP_URL || 'https://bunsenbrenner.org';
+const WS_URL = process.env.WEBCONFERENCE_WS_URL || 'wss://site-34a13a96.bunsenbrenner.org/ws/channel';
+const OPERATOR_KEY = process.env.CT_CHANNEL_OPERATOR_KEY; // 64-hex private key, from `ct-agent channel operator-init`
+const GRANT_BIN = process.env.CT_VIDEO_CALL_GRANT_BIN || '/usr/local/bin/ct-video-call-grant';
+const PRESENCE_TTL_MS = 45_000;
+const CALL_TTL_MS = 60_000;
+
+if (!OPERATOR_KEY || !/^[0-9a-f]{64}$/i.test(OPERATOR_KEY)) {
+  console.error('bridge: CT_CHANNEL_OPERATOR_KEY (64-hex) is required');
+  process.exit(1);
+}
+
+// email -> { holderPub, noisePub, lastSeen }
+const directory = new Map();
+// channel -> { callerEmail, calleeEmail, grantForCaller, grantForCallee, createdAt,
+//              callerAttest, calleeAttest, status }
+const pendingCalls = new Map();
+// email -> channel (the most recent incoming call offered to this email)
+const incomingByEmail = new Map();
+
+// Incoming-call push over a raw WebSocket (GET /api/ws?email=...), so a
+// callee learns about a ring immediately instead of waiting for the next
+// /api/incoming poll tick. Hand-rolled (RFC 6455 handshake + minimal framing)
+// rather than an `ws` npm dependency, matching this bridge's own "plain
+// Node, zero deps" convention from the header comment above. The existing
+// poll in app.js is deliberately left in place as a fallback -- if a socket
+// never connects, drops, or this code has a bug, the callee still gets the
+// call within one poll interval, just not instantly.
+const WS_MAGIC = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+// email -> raw net.Socket already upgraded to a WebSocket connection
+const wsClients = new Map();
+
+function wsAcceptKey(clientKey) {
+  return crypto.createHash('sha1').update(clientKey + WS_MAGIC).digest('base64');
+}
+
+function wsFrame(obj) {
+  const payload = Buffer.from(JSON.stringify(obj));
+  const len = payload.length;
+  let header;
+  if (len < 126) {
+    header = Buffer.from([0x81, len]);
+  } else if (len < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 126;
+    header.writeUInt16BE(len, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x81;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(len), 2);
+  }
+  return Buffer.concat([header, payload]);
+}
+
+function wsPush(email, obj) {
+  const socket = wsClients.get(email);
+  if (!socket || socket.destroyed) return false;
+  try {
+    socket.write(wsFrame(obj));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Drains client->server frames (unmasking per spec, since client frames are
+// always masked) just enough to keep the TCP stream flowing and detect a
+// close frame -- this channel is push-only (server->client), the client
+// never sends application data over it.
+function wsAttachReader(socket, onClose) {
+  let buf = Buffer.alloc(0);
+  const onData = (chunk) => {
+    buf = Buffer.concat([buf, chunk]);
+    while (buf.length >= 2) {
+      const b1 = buf[1];
+      const masked = (b1 & 0x80) !== 0;
+      let len = b1 & 0x7f;
+      let offset = 2;
+      if (len === 126) {
+        if (buf.length < 4) return;
+        len = buf.readUInt16BE(2);
+        offset = 4;
+      } else if (len === 127) {
+        if (buf.length < 10) return;
+        len = Number(buf.readBigUInt64BE(2));
+        offset = 10;
+      }
+      const maskLen = masked ? 4 : 0;
+      if (buf.length < offset + maskLen + len) return; // wait for the rest
+      const opcode = buf[0] & 0x0f;
+      buf = buf.slice(offset + maskLen + len);
+      if (opcode === 0x8) {
+        onClose();
+        try { socket.end(); } catch (_) {}
+        return;
+      }
+    }
+  };
+  socket.on('data', onData);
+  socket.on('close', onClose);
+  socket.on('error', onClose);
+}
+
+function isOnline(entry) {
+  return !!entry && Date.now() - entry.lastSeen < PRESENCE_TTL_MS;
+}
+
+function mintGrants(holderAPub, holderBPub) {
+  return new Promise((resolve, reject) => {
+    execFile(GRANT_BIN, [holderAPub, holderBPub, '--operator-private', OPERATOR_KEY, '--ttl-secs', '3600'], (err, stdout) => {
+      if (err) return reject(err);
+      const out = {};
+      for (const line of stdout.trim().split('\n')) {
+        const idx = line.indexOf('=');
+        if (idx === -1) continue;
+        out[line.slice(0, idx)] = line.slice(idx + 1);
+      }
+      if (!out.channel_id_hex || !out.grant_a_hex || !out.grant_b_hex) {
+        return reject(new Error(`unexpected ct-video-call-grant output: ${stdout}`));
+      }
+      resolve({ channel: out.channel_id_hex, grantA: out.grant_a_hex, grantB: out.grant_b_hex, operatorPub: out.operator_public_hex });
+    });
+  });
+}
+
+async function cpFetch(path, body) {
+  const token = process.env.CT_OIDC_TOKEN;
+  const sessionCookie = process.env.CT_PORTAL_SESSION_COOKIE;
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers['authorization'] = `Bearer ${token}`;
+  else if (sessionCookie) headers['cookie'] = `ct_portal_session=${sessionCookie}`;
+  const resp = await fetch(`${CP_URL}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
+  return { status: resp.status, text: await resp.text().catch(() => '') };
+}
+
+// Attempts real control-plane registration for a pending call once both
+// sides' attestations are in. Never fabricates success: reports the exact
+// failure (almost always 401 today, see header comment) rather than
+// pretending the channel is usable.
+async function tryRegister(call) {
+  if (!call.callerAttest || !call.calleeAttest) return; // wait for both sides
+  const reg = await cpFetch('/me/channels', { channel: call.channel, operator_pubkey: call.operatorPub });
+  if (reg.status !== 200) {
+    call.status = { state: 'pending_core_credential', detail: `POST /me/channels -> ${reg.status} ${reg.text}`.slice(0, 300) };
+    console.error(`bridge: channel registration failed for ${call.channel}: ${call.status.detail}`);
+    return;
+  }
+  const memA = await cpFetch(`/me/channels/${call.channel}/members`, call.callerAttest);
+  const memB = await cpFetch(`/me/channels/${call.channel}/members`, call.calleeAttest);
+  if (memA.status !== 200 || memB.status !== 200) {
+    call.status = {
+      state: 'pending_core_credential',
+      detail: `members -> caller=${memA.status} callee=${memB.status} ${memA.text || memB.text}`.slice(0, 300),
+    };
+    console.error(`bridge: channel registration failed for ${call.channel}: ${call.status.detail}`);
+    return;
+  }
+  call.status = { state: 'accepted_and_registered' };
+  // The "ringing" phase is over the moment a call is genuinely accepted --
+  // without this, incomingByEmail keeps pointing at this (now long-finished)
+  // channel forever, since sweepExpired() deliberately never expires an
+  // accepted_and_registered call. Every subsequent /api/incoming poll (or a
+  // page reload after hangup re-subscribing to the same poll) then kept
+  // re-surfacing this already-completed call as a brand-new incoming ring,
+  // requiring a manual Decline just to clear it before a new call could be
+  // placed at all.
+  if (incomingByEmail.get(call.calleeEmail) === call.channel) incomingByEmail.delete(call.calleeEmail);
+}
+
+function json(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+  res.end(body);
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (c) => (data += c));
+    req.on('end', () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function sweepExpired() {
+  const now = Date.now();
+  for (const [channel, call] of pendingCalls) {
+    if (now - call.createdAt > CALL_TTL_MS && call.status?.state !== 'accepted_and_registered') {
+      pendingCalls.delete(channel);
+      if (incomingByEmail.get(call.calleeEmail) === channel) incomingByEmail.delete(call.calleeEmail);
+    }
+  }
+}
+setInterval(sweepExpired, 10_000).unref();
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://bridge');
+  try {
+    if (req.method === 'GET' && url.pathname === '/api/whoami') {
+      // CADS-Tunnel#214: X-Gate-Email is set by the origin's Caddyfile from
+      // the login gate's verified /gate/check response -- never client-set,
+      // absent entirely when the tunnel isn't gated. Null here means "no
+      // verified identity available", not an error.
+      const email = req.headers['x-gate-email'] || null;
+      return json(res, 200, { email });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/register') {
+      const { email, holderPub, noisePub } = await readBody(req);
+      if (!email || !holderPub || !noisePub) return json(res, 400, { error: 'email, holderPub, noisePub required' });
+      directory.set(email.toLowerCase(), { holderPub, noisePub, lastSeen: Date.now() });
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/heartbeat') {
+      const { email } = await readBody(req);
+      const entry = directory.get((email || '').toLowerCase());
+      if (!entry) return json(res, 404, { error: 'not registered' });
+      entry.lastSeen = Date.now();
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/presence') {
+      const email = (url.searchParams.get('email') || '').toLowerCase();
+      return json(res, 200, { online: isOnline(directory.get(email)) });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/call') {
+      const { fromEmail, toEmail, transport } = await readBody(req);
+      const from = (fromEmail || '').toLowerCase();
+      const to = (toEmail || '').toLowerCase();
+      const caller = directory.get(from);
+      const callee = directory.get(to);
+      if (!caller) return json(res, 400, { error: 'caller not registered' });
+      if (!isOnline(callee)) return json(res, 200, { status: 'offline' });
+      let minted;
+      try {
+        minted = await mintGrants(caller.holderPub, callee.holderPub);
+      } catch (e) {
+        return json(res, 500, { error: `grant minting failed: ${e.message}` });
+      }
+      const call = {
+        channel: minted.channel,
+        operatorPub: minted.operatorPub,
+        callerEmail: from,
+        calleeEmail: to,
+        grantForCaller: minted.grantA,
+        grantForCallee: minted.grantB,
+        // 'webrtc' (default) or 'channel' -- caller's choice, both sides use
+        // the same value so they agree on how media/chat travel (see app.js).
+        transport: transport === 'channel' ? 'channel' : 'webrtc',
+        createdAt: Date.now(),
+        callerAttest: null,
+        calleeAttest: null,
+        status: { state: 'ringing' },
+      };
+      pendingCalls.set(call.channel, call);
+      incomingByEmail.set(to, call.channel);
+      // Push immediately if the callee has a live WS connection -- falls back
+      // to their own /api/incoming poll (still running regardless) if not.
+      wsPush(to, { type: 'incoming', channel: call.channel, fromEmail: call.callerEmail, grant: call.grantForCallee, ws: WS_URL, transport: call.transport });
+      return json(res, 200, { status: 'ringing', channel: call.channel, grant: call.grantForCaller, ws: WS_URL, transport: call.transport });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/attest') {
+      // {channel, role: 'caller'|'callee', holderPub, noisePub, attestation}
+      const { channel, role, holderPub, noisePub, attestation } = await readBody(req);
+      const call = pendingCalls.get(channel);
+      if (!call) return json(res, 404, { error: 'no such pending call' });
+      const rec = { holder: holderPub, noise_pubkey: noisePub, noise_attestation: attestation };
+      if (role === 'caller') call.callerAttest = rec;
+      else if (role === 'callee') call.calleeAttest = rec;
+      else return json(res, 400, { error: 'role must be caller or callee' });
+      await tryRegister(call);
+      return json(res, 200, { status: call.status });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/cancel') {
+      // Caller-initiated hangup of a still-ringing call (gave up, closed the
+      // tab, etc). Mirrors /api/decline's fix in the other direction: without
+      // this, the callee's incoming-call card had no way to learn the caller
+      // moved on, so it kept ringing for the full 60s CALL_TTL_MS regardless.
+      // Pushes an explicit dismissal over the callee's WS (if connected) so an
+      // already-displayed card disappears immediately, not just on next poll.
+      const { channel } = await readBody(req);
+      const call = pendingCalls.get(channel);
+      if (!call) return json(res, 404, { error: 'no such pending call' });
+      call.status = { state: 'cancelled' };
+      if (incomingByEmail.get(call.calleeEmail) === channel) incomingByEmail.delete(call.calleeEmail);
+      wsPush(call.calleeEmail, { type: 'cancelled', channel });
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/decline') {
+      // Callee-initiated hangup of a still-ringing/pending call. Without this,
+      // Decline only hid the card client-side -- the bridge kept the channel
+      // in incomingByEmail until its 60s TTL, so the callee's own fallback
+      // poll (every 3s) kept re-fetching and re-showing the same call,
+      // looping regardless of whether the caller was still calling.
+      const { channel } = await readBody(req);
+      const call = pendingCalls.get(channel);
+      if (!call) return json(res, 404, { error: 'no such pending call' });
+      call.status = { state: 'declined' };
+      if (incomingByEmail.get(call.calleeEmail) === channel) incomingByEmail.delete(call.calleeEmail);
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/call-status') {
+      const channel = url.searchParams.get('channel');
+      const call = pendingCalls.get(channel);
+      if (!call) return json(res, 404, { error: 'no such pending call' });
+      return json(res, 200, { status: call.status });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/incoming') {
+      const email = (url.searchParams.get('email') || '').toLowerCase();
+      const channel = incomingByEmail.get(email);
+      if (!channel) return json(res, 200, { incoming: null });
+      const call = pendingCalls.get(channel);
+      if (!call) {
+        incomingByEmail.delete(email);
+        return json(res, 200, { incoming: null });
+      }
+      return json(res, 200, { incoming: { channel: call.channel, fromEmail: call.callerEmail, grant: call.grantForCallee, ws: WS_URL, transport: call.transport } });
+    }
+
+    json(res, 404, { error: 'not found' });
+  } catch (e) {
+    json(res, 500, { error: e.message });
+  }
+});
+
+server.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url, 'http://bridge');
+  const email = (url.searchParams.get('email') || '').toLowerCase();
+  const key = req.headers['sec-websocket-key'];
+  if (url.pathname !== '/api/ws' || !email || !key) {
+    socket.destroy();
+    return;
+  }
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\r\n' +
+      'Upgrade: websocket\r\n' +
+      'Connection: Upgrade\r\n' +
+      `Sec-WebSocket-Accept: ${wsAcceptKey(key)}\r\n\r\n`
+  );
+  wsClients.set(email, socket);
+  wsAttachReader(socket, () => {
+    if (wsClients.get(email) === socket) wsClients.delete(email);
+  });
+});
+
+const [host, port] = LISTEN.split(':');
+server.listen(Number(port), host, () => {
+  const authMode = process.env.CT_OIDC_TOKEN ? 'bearer token' : process.env.CT_PORTAL_SESSION_COOKIE ? 'portal session cookie' : 'NONE -- registration will fail';
+  console.log(`webconference-demo-bridge listening on ${LISTEN} (cp=${CP_URL}, registration auth: ${authMode})`);
+});
