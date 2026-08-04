@@ -45,6 +45,10 @@ if (!AGENT_HOSTNAME) {
 const WS_URL = `wss://${AGENT_HOSTNAME}/ws/channel`;
 const OPERATOR_KEY = process.env.CT_CHANNEL_OPERATOR_KEY; // 64-hex private key, from `ct-agent channel operator-init`
 const GRANT_BIN = process.env.CT_VIDEO_CALL_GRANT_BIN || '/usr/local/bin/ct-video-call-grant';
+// This tunnel's own portal id (the UUID-ish string in /portal/tunnels/:id/...),
+// needed only for the login-allowlist add/remove proxy below -- optional
+// because the address book's contact *list* (presence-based) works without it.
+const TUNNEL_ID = process.env.WEBCONFERENCE_TUNNEL_ID || '';
 const PRESENCE_TTL_MS = 45_000;
 const CALL_TTL_MS = 60_000;
 
@@ -178,6 +182,26 @@ async function cpFetch(path, body) {
   return { status: resp.status, text: await resp.text().catch(() => '') };
 }
 
+// Like cpFetch, but for the portal's own HTML-form routes (login-allowlist
+// add/remove) -- cookie-only, no bearer fallback: those handlers call
+// portal::session_subject_for directly, not the dual-auth subject_of_channel
+// /me/channels gets, so a future CT_OIDC_TOKEN (once core's service-account
+// API lands) won't cover this specific pair of endpoints on its own.
+// `redirect: 'manual'` avoids needlessly following the 302 back to the full
+// /portal/tunnels HTML page -- an opaque redirect (status 0) means success.
+async function cpFetchForm(path, fields) {
+  const sessionCookie = process.env.CT_PORTAL_SESSION_COOKIE;
+  if (!sessionCookie) return { status: 401, text: 'CT_PORTAL_SESSION_COOKIE not configured' };
+  const resp = await fetch(`${CP_URL}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: `ct_portal_session=${sessionCookie}` },
+    body: new URLSearchParams(fields).toString(),
+    redirect: 'manual',
+  });
+  const status = resp.status === 0 ? 200 : resp.status;
+  return { status, text: await resp.text().catch(() => '') };
+}
+
 // Attempts real control-plane registration for a pending call once both
 // sides' attestations are in. Never fabricates success: reports the exact
 // failure (almost always 401 today, see header comment) rather than
@@ -274,6 +298,43 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/presence') {
       const email = (url.searchParams.get('email') || '').toLowerCase();
       return json(res, 200, { online: isOnline(directory.get(email)) });
+    }
+
+    // Address-book contact list -- everyone who has ever registered presence
+    // here (not the gate's login allow-list, which this bridge can write to
+    // below but has no JSON API to read; see login_allowlist_add_route in
+    // CADS-Tunnel). "online" reuses the same PRESENCE_TTL_MS freshness check
+    // /api/presence already applies to a single email.
+    if (req.method === 'GET' && url.pathname === '/api/contacts') {
+      const contacts = [...directory.entries()]
+        .map(([email, entry]) => ({ email, online: isOnline(entry) }))
+        .sort((a, b) => a.email.localeCompare(b.email));
+      return json(res, 200, { contacts });
+    }
+
+    // Add/remove an email on the tunnel's login allow-list (who's permitted
+    // to pass the gate at all) -- proxies the control plane's own portal
+    // form-POST routes (login_allowlist_add_route/_remove_route in
+    // CADS-Tunnel's portal_api.rs), reusing the exact same session-cookie
+    // credential cpFetch() already holds for channel registration. Any
+    // gate-verified caller can reach these two endpoints; there's no separate
+    // "admin" tier here, matching this demo's existing trust model (a small
+    // account-managed tunnel, not a public multi-tenant service).
+    if (req.method === 'POST' && url.pathname === '/api/allowlist/add') {
+      if (!TUNNEL_ID) return json(res, 503, { error: 'WEBCONFERENCE_TUNNEL_ID not configured' });
+      const { email } = await readBody(req);
+      if (!email) return json(res, 400, { error: 'email required' });
+      const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email });
+      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}` });
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/allowlist/remove') {
+      if (!TUNNEL_ID) return json(res, 503, { error: 'WEBCONFERENCE_TUNNEL_ID not configured' });
+      const { email } = await readBody(req);
+      if (!email) return json(res, 400, { error: 'email required' });
+      const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist/${encodeURIComponent(email)}/remove`, {});
+      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}` });
+      return json(res, 200, { ok: true });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/call') {

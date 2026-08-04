@@ -48,6 +48,11 @@ services:
       # second, independently-set hostname/URL: that's what let this drift
       # stale (pointed at the tunnel's old hostname) after a rebind.
       - CT_AGENT_HOSTNAME=${CT_AGENT_HOSTNAME:?this tunnel's assigned hostname, e.g. site-34a13a96.bunsenbrenner.org}
+      # This tunnel's portal id (the UUID-ish segment in /portal/tunnels/:id/...,
+      # visible in the portal's own Install link) -- only used for the address
+      # book's login-allowlist add/remove proxy. Optional: the contact list
+      # itself works without it.
+      - WEBCONFERENCE_TUNNEL_ID=${WEBCONFERENCE_TUNNEL_ID:-}
       - CT_CHANNEL_OPERATOR_KEY=${WEBCONFERENCE_OPERATOR_KEY:?this demo's channel operator private key, 64-hex, from ct-agent channel operator-init}
       # Either auth path works (CADS-Tunnel#214's dual-auth fix): a bearer
       # token, or -- what's actually wired up -- the portal's own session

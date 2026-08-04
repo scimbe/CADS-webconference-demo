@@ -90,6 +90,42 @@
  button.ctl[data-off="1"]{background:rgba(226,104,95,.14);border-color:rgba(226,104,95,.4);color:var(--danger)}
  button.ctl.hangup{background:var(--danger);border-color:var(--danger);color:#fff}
  button.ctl.hangup:hover{filter:brightness(1.08)}
+ button.ctl[hidden]{display:none}
+
+ /* ---- mobile call view: full-screen remote + small tappable self PiP, ----
+    ---- floating overlay controls, WhatsApp-style. Only kicks in once      ----
+    ---- #call-screen is actually showing AND the viewport is narrow -- the ----
+    ---- desktop side-by-side .video-grid above is untouched otherwise.     ---- */
+ @media (max-width:640px){
+  body:has(#call-screen:not([hidden])){overflow:hidden}
+  #call-screen:not([hidden]){position:fixed;inset:0;z-index:20;background:#000;padding:0;display:flex;flex-direction:column}
+  #call-screen .call-header{position:absolute;top:0;left:0;right:0;z-index:2;margin:0;padding:.9rem 1rem;
+   background:linear-gradient(rgba(0,0,0,.65),transparent);color:#fff}
+  #call-screen .call-header h1{color:#fff}
+  #call-screen .call-grid{display:block;height:100%}
+  #call-screen .call-grid>div:first-child{height:100%;display:flex;flex-direction:column}
+  #call-screen .video-grid{position:relative;flex:1;display:block}
+  #call-screen .video-tile{position:absolute;border-radius:0;border:none}
+  #call-screen #remote-tile{inset:0;aspect-ratio:auto}
+  #call-screen #local-tile{width:28vw;max-width:9.5rem;aspect-ratio:3/4;top:4.2rem;right:.8rem;
+   border-radius:10px;border:1.5px solid rgba(255,255,255,.35);box-shadow:0 4px 18px rgba(0,0,0,.4);z-index:3;cursor:pointer}
+  /* Tapping the small PiP swaps which stream is big -- pure CSS via a class
+     toggled on #video-grid, no DOM reordering (keeps element ids/refs stable
+     for the rest of app.js, which never has to know which tile is "big"). */
+  #call-screen #video-grid.swapped #remote-tile{width:28vw;max-width:9.5rem;aspect-ratio:3/4;
+   top:4.2rem;right:.8rem;inset:auto;border-radius:10px;border:1.5px solid rgba(255,255,255,.35);
+   box-shadow:0 4px 18px rgba(0,0,0,.4);z-index:3;cursor:pointer}
+  #call-screen #video-grid.swapped #local-tile{inset:0;width:auto;max-width:none;aspect-ratio:auto;
+   top:auto;right:auto;border:none;box-shadow:none;z-index:1;cursor:default}
+  #call-screen .tile-label{display:none}
+  #call-screen details.tech,#call-screen .chat-panel{display:none} /* full-screen call view has no room for these on mobile */
+  #call-screen .controls{position:absolute;left:0;right:0;bottom:0;z-index:2;margin:0;padding:1.1rem 1rem calc(1.1rem + env(safe-area-inset-bottom));
+   gap:1rem;background:linear-gradient(transparent,rgba(0,0,0,.7))}
+  #call-screen button.ctl{width:3.1rem;height:3.1rem;padding:0;border-radius:50%;font-size:1.25rem;justify-content:center;
+   background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.25);color:#fff;backdrop-filter:blur(4px)}
+  #call-screen button.ctl span.ctl-label{display:none} /* icon-only on mobile; full label kept for desktop/screen readers via aria-label */
+  #call-screen button.ctl.hangup{width:3.6rem;height:3.6rem;font-size:1.4rem}
+ }
 
  .chat-panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;display:flex;flex-direction:column;height:100%;min-height:22rem}
  .chat-header{padding:.8rem 1rem;border-bottom:1px solid var(--line);font-size:.85rem;font-weight:600;color:var(--muted2)}
@@ -132,6 +168,38 @@
  button.decline{font-family:inherit;background:transparent;color:var(--muted2);border:1px solid var(--line);border-radius:8px;padding:.5rem 1rem;cursor:pointer}
  details.manual-fallback{margin-top:2rem;font-size:.85rem;color:var(--muted)}
  details.manual-fallback summary{cursor:pointer;color:var(--muted2)}
+
+ /* ---- contacts / address book ---- */
+ .contacts-list{list-style:none;margin:0;padding:0;max-width:26rem;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+ .contacts-list li{display:flex;align-items:center;gap:.7rem;padding:.65rem .8rem;border-bottom:1px solid var(--line-soft);cursor:pointer;transition:background .12s}
+ .contacts-list li[hidden]{display:none} /* author `display:flex` above otherwise beats the UA stylesheet's [hidden] rule */
+ .contacts-list li:last-child{border-bottom:none}
+ .contacts-list li:hover{background:var(--panel2)}
+ .contacts-list li.contacts-empty{cursor:default;color:var(--muted);font-size:.85rem;justify-content:center}
+ .contacts-list li.contacts-empty:hover{background:transparent}
+ .contact-avatar{flex-shrink:0;width:2.1rem;height:2.1rem;border-radius:50%;background:var(--panel2);border:1px solid var(--line);
+  display:flex;align-items:center;justify-content:center;font-family:var(--serif);font-weight:600;font-size:.9rem;color:var(--accent2)}
+ .contact-info{flex:1;min-width:0}
+ .contact-email{font-size:.87rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .contact-status{font-size:.74rem;font-family:var(--mono);color:var(--muted);display:flex;align-items:center;gap:.35rem}
+ .contact-status .dot{width:6px;height:6px;border-radius:50%;background:var(--muted)}
+ .contacts-list li[data-online="1"] .contact-status .dot{background:var(--accent2);box-shadow:0 0 0 2px rgba(95,184,171,.2)}
+ .contacts-list li[data-online="1"] .contact-status{color:var(--accent2)}
+
+ details.manage-access{margin-top:1rem;font-size:.85rem;color:var(--muted);max-width:26rem}
+ details.manage-access summary{cursor:pointer;color:var(--muted2)}
+ .access-form{display:flex;gap:.5rem;margin-top:.6rem}
+ .access-form input{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:.5rem .7rem;font:inherit;font-size:.85rem;min-width:0}
+ .access-form input:focus{outline:none;border-color:var(--accent2)}
+ .access-form button{font-family:inherit;background:var(--accent2);color:#08211d;border:none;border-radius:8px;padding:.5rem .9rem;font-size:.82rem;font-weight:600;cursor:pointer;white-space:nowrap}
+ .access-form button.danger{background:transparent;color:var(--danger);border:1px solid rgba(226,104,95,.4)}
+ #access-note{margin-top:.6rem;font-size:.8rem}
+ #access-note[data-kind="error"]{color:var(--danger)}
+ #access-note[data-kind="ok"]{color:var(--accent2)}
+
+ @media (max-width:640px){
+  .contacts-list,.access-form,details.manage-access{max-width:none}
+ }
 </style>
 </head>
 <body>
@@ -194,6 +262,29 @@
               <button class="decline" id="btn-decline" type="button">Decline</button>
             </div>
           </div>
+
+          <div class="contacts-panel">
+            <h2 style="font-size:.95rem;margin:1.3rem 0 .6rem">Contacts</h2>
+            <ul class="contacts-list" id="contacts-list">
+              <li class="contacts-empty" id="contacts-empty">No one else has gone online yet.</li>
+            </ul>
+            <details class="manage-access">
+              <summary>Manage who's allowed to log in</summary>
+              <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">Adds/removes an email on this
+                tunnel's login allow-list. There's no read-back here (the portal itself is the source of
+                truth for who's currently listed) — this just lets you grant or revoke access without
+                leaving the call app.</p>
+              <form class="access-form" id="access-add-form">
+                <input id="access-add-email" type="email" placeholder="someone@example.com" required autocomplete="off" />
+                <button type="submit">Grant access</button>
+              </form>
+              <form class="access-form" id="access-remove-form">
+                <input id="access-remove-email" type="email" placeholder="someone@example.com" required autocomplete="off" />
+                <button type="submit" class="danger">Revoke access</button>
+              </form>
+              <div id="access-note"></div>
+            </details>
+          </div>
         </div>
 
         <details class="manual-fallback">
@@ -230,22 +321,23 @@
 
     <div class="call-grid">
       <div>
-        <div class="video-grid">
-          <div class="video-tile">
+        <div class="video-grid" id="video-grid">
+          <div class="video-tile" id="local-tile">
             <video id="local-video" autoplay playsinline muted></video>
             <div class="tile-empty" id="local-empty">waiting for camera…</div>
             <div class="tile-label">You</div>
           </div>
-          <div class="video-tile">
+          <div class="video-tile" id="remote-tile">
             <video id="remote-video" autoplay playsinline></video>
             <div class="tile-empty" id="remote-empty">waiting for peer…</div>
             <div class="tile-label">Peer</div>
           </div>
         </div>
         <div class="controls">
-          <button class="ctl" id="btn-mic" type="button">🎤 Mute</button>
-          <button class="ctl" id="btn-cam" type="button">📷 Camera off</button>
-          <button class="ctl hangup" id="btn-hangup" type="button">Hang up</button>
+          <button class="ctl" id="btn-mic" type="button" aria-label="Mute"><span class="ctl-icon">🎤</span><span class="ctl-label">Mute</span></button>
+          <button class="ctl" id="btn-cam" type="button" aria-label="Camera off"><span class="ctl-icon">📷</span><span class="ctl-label">Camera off</span></button>
+          <button class="ctl" id="btn-switch-camera" type="button" aria-label="Switch camera" hidden><span class="ctl-icon">🔄</span><span class="ctl-label">Switch camera</span></button>
+          <button class="ctl hangup" id="btn-hangup" type="button" aria-label="Hang up"><span class="ctl-icon">📞</span><span class="ctl-label">Hang up</span></button>
         </div>
 
         <details class="tech">

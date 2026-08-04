@@ -68,5 +68,18 @@
 	encode gzip
 	header {
 		X-Content-Type-Options "nosniff"
+		# app.js/index.html ship no explicit Cache-Control at all -- Chrome
+		# applies RFC 7234 heuristic freshness off Last-Modified alone (can
+		# treat a resource as fresh for hours with zero revalidation),
+		# meaning a real deploy silently keeps serving whatever JS an open
+		# tab already cached. Confirmed live: after a rebuild, several
+		# consecutive navigations in the SAME browser profile ran visibly
+		# different cached app.js versions depending on per-resource cache
+		# state, not the tab's own reload. `no-cache` forces a conditional
+		# request (If-None-Match/If-Modified-Since) on every load instead of
+		# trusting the heuristic -- Caddy's own ETag/Last-Modified still
+		# makes that revalidation cheap (304s, not a full re-fetch) when
+		# nothing actually changed.
+		Cache-Control "no-cache"
 	}
 }

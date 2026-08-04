@@ -257,9 +257,40 @@ async function joinChannel(wsUrl, grantHex, holderPrivHex) {
   return { ws, stream, peerNoiseHex };
 }
 
-async function getLocalMedia() {
+// Acquired as soon as the dialer screen is up (preloadLocalMedia, called from
+// runDialer) instead of only once a call actually starts -- getUserMedia's
+// permission prompt + device spin-up is the single slowest step between
+// "Call" and seeing yourself, and there's no reason to pay that latency
+// AFTER the callee has already started ringing. getLocalMedia() below
+// consumes this (one-shot: cleared on use) if it's ready, and transparently
+// falls back to acquiring fresh otherwise -- callers never need to know
+// which happened.
+let preloadedMedia = null;
+// 'user' (front/selfie) is the sane default on a device with two cameras;
+// meaningless-but-harmless on a desktop webcam, which just ignores facingMode.
+let currentFacingMode = 'user';
+let cameraSwitchAvailable = false;
+
+async function preloadLocalMedia() {
+  if (preloadedMedia) return;
+  preloadedMedia = await acquireLocalMedia();
+  if (preloadedMedia.kind === 'media') {
+    localVideo.srcObject = preloadedMedia.stream;
+    localEmpty.style.display = 'none';
+  }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    cameraSwitchAvailable = devices.filter((d) => d.kind === 'videoinput').length > 1;
+  } catch (_) {
+    // enumerateDevices itself failing isn't fatal -- the switch button just
+    // stays hidden, same as genuinely having only one camera.
+  }
+  btnSwitchCamera.hidden = !cameraSwitchAvailable;
+}
+
+async function acquireLocalMedia() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: currentFacingMode } });
     log('real camera/microphone acquired');
     return { kind: 'media', stream };
   } catch (e) {
@@ -267,6 +298,46 @@ async function getLocalMedia() {
 the same RTCPeerConnection/ICE machinery a real audio/video call uses, just without a \
 capture device attached in this environment`);
     return { kind: 'probe' };
+  }
+}
+
+async function getLocalMedia() {
+  if (preloadedMedia) {
+    const m = preloadedMedia;
+    preloadedMedia = null; // one-shot: consumed here, never reused stale
+    return m;
+  }
+  return acquireLocalMedia();
+}
+
+// Live front/back swap. Always correct for the local preview (video elements
+// track live additions/removals on the SAME MediaStream object). For an
+// active WebRTC call, also pushes the new track to the peer via
+// RTCRtpSender.replaceTrack -- the API this exists for, no renegotiation
+// needed. The experimental direct-channel transport (MediaRecorder-based, no
+// RTCPeerConnection) only gets the corrected LOCAL preview here -- its
+// recorder was already told a fixed stream, so switching mid-call keeps
+// sending the callee the outgoing track (before the swap), not a hard bug.
+async function switchCamera(media) {
+  if (media.kind !== 'media' || !cameraSwitchAvailable) return;
+  const nextFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
+  try {
+    const newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: nextFacingMode } });
+    const newTrack = newStream.getVideoTracks()[0];
+    const oldTrack = media.stream.getVideoTracks()[0];
+    if (oldTrack) {
+      media.stream.removeTrack(oldTrack);
+      oldTrack.stop();
+    }
+    media.stream.addTrack(newTrack);
+    currentFacingMode = nextFacingMode;
+    const pc = window.__ctVideoCallDemo?.pc;
+    if (pc) {
+      const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+      if (sender) await sender.replaceTrack(newTrack);
+    }
+  } catch (e) {
+    log(`camera switch failed: ${e.message || e}`);
   }
 }
 
@@ -313,6 +384,12 @@ function setupChatChannel(channel, localHasCamera) {
   });
 }
 
+function setCtlLabel(btn, icon, label) {
+  btn.querySelector('.ctl-icon').textContent = icon;
+  btn.querySelector('.ctl-label').textContent = label;
+  btn.setAttribute('aria-label', label);
+}
+
 function setupControls(media, onHangup) {
   let micOn = true;
   let camOn = true;
@@ -320,16 +397,17 @@ function setupControls(media, onHangup) {
     if (media.kind !== 'media') return;
     micOn = !micOn;
     for (const t of media.stream.getAudioTracks()) t.enabled = micOn;
-    btnMic.textContent = micOn ? '🎤 Mute' : '🔇 Unmute';
+    setCtlLabel(btnMic, micOn ? '🎤' : '🔇', micOn ? 'Mute' : 'Unmute');
     btnMic.dataset.off = micOn ? '0' : '1';
   });
   btnCam.addEventListener('click', () => {
     if (media.kind !== 'media') return;
     camOn = !camOn;
     for (const t of media.stream.getVideoTracks()) t.enabled = camOn;
-    btnCam.textContent = camOn ? '📷 Camera off' : '📷 Camera on';
+    setCtlLabel(btnCam, '📷', camOn ? 'Camera off' : 'Camera on');
     btnCam.dataset.off = camOn ? '0' : '1';
   });
+  btnSwitchCamera.addEventListener('click', () => switchCamera(media));
   btnHangup.addEventListener('click', () => {
     try { onHangup(); } catch {}
     setStatus('you-hung-up');
@@ -413,6 +491,16 @@ const btnDecline = document.getElementById('btn-decline');
 const btnCancelCall = document.getElementById('btn-cancel-call');
 const logoutLink = document.getElementById('logout-link');
 const transportChannelCheckbox = document.getElementById('transport-channel');
+const contactsList = document.getElementById('contacts-list');
+const contactsEmpty = document.getElementById('contacts-empty');
+const accessAddForm = document.getElementById('access-add-form');
+const accessAddEmail = document.getElementById('access-add-email');
+const accessRemoveForm = document.getElementById('access-remove-form');
+const accessRemoveEmail = document.getElementById('access-remove-email');
+const accessNote = document.getElementById('access-note');
+const videoGrid = document.getElementById('video-grid');
+const localTile = document.getElementById('local-tile');
+const btnSwitchCamera = document.getElementById('btn-switch-camera');
 
 // A real account switch needs BOTH halves cleared -- confirmed live (2026-08-03):
 // /gate/logout alone clears ct_gate_session, but the gate's own check silently
@@ -514,6 +602,77 @@ function startCallFromIdentity(identity, { role, channel, grant, ws, transport }
   if (transport === 'channel') params.set('transport', 'channel');
   location.search = params.toString(); // reload into the call screen -- keeps run() as the single entry point
 }
+
+// ============ Contacts / address book ============
+// The list itself is presence data (who has actually registered here, same
+// directory /api/call already checks) -- NOT the gate's login allow-list,
+// which this bridge can write to (grant/revoke below) but has no JSON API to
+// read yet. See CADS-Tunnel request for a GET .../login-allowlist endpoint.
+async function refreshContacts() {
+  const resp = await api('/contacts');
+  if (resp.error) return; // best-effort -- leave whatever list is already showing
+  renderContacts(resp.contacts || []);
+}
+
+function renderContacts(contacts) {
+  contactsList.querySelectorAll('li:not(#contacts-empty)').forEach((li) => li.remove());
+  contactsEmpty.hidden = contacts.length > 0;
+  for (const { email, online } of contacts) {
+    const li = document.createElement('li');
+    li.dataset.online = online ? '1' : '0';
+    const avatar = document.createElement('div');
+    avatar.className = 'contact-avatar';
+    avatar.textContent = (email[0] || '?').toUpperCase();
+    const info = document.createElement('div');
+    info.className = 'contact-info';
+    const emailEl = document.createElement('div');
+    emailEl.className = 'contact-email';
+    emailEl.textContent = email;
+    const statusEl = document.createElement('div');
+    statusEl.className = 'contact-status';
+    statusEl.innerHTML = '<span class="dot"></span>';
+    statusEl.append(online ? 'online' : 'offline');
+    info.append(emailEl, statusEl);
+    li.append(avatar, info);
+    li.addEventListener('click', () => {
+      dialEmailInput.value = email;
+      dialForm.requestSubmit();
+    });
+    contactsList.appendChild(li);
+  }
+}
+
+function setAccessNote(kind, text) {
+  accessNote.textContent = text;
+  accessNote.dataset.kind = kind;
+}
+
+accessAddForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const email = accessAddEmail.value.trim();
+  if (!email) return;
+  setAccessNote('info', `Granting access to ${email}…`);
+  const resp = await api('/allowlist/add', { body: { email } });
+  if (resp.error) return setAccessNote('error', `Couldn't grant access: ${resp.error}`);
+  setAccessNote('ok', `${email} can now log in.`);
+  accessAddEmail.value = '';
+});
+
+accessRemoveForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const email = accessRemoveEmail.value.trim();
+  if (!email) return;
+  setAccessNote('info', `Revoking access for ${email}…`);
+  const resp = await api('/allowlist/remove', { body: { email } });
+  if (resp.error) return setAccessNote('error', `Couldn't revoke access: ${resp.error}`);
+  setAccessNote('ok', `${email} can no longer log in.`);
+  accessRemoveEmail.value = '';
+});
+
+// Mobile full-screen call view: tapping the small self PiP swaps it with the
+// big remote video (pure CSS, see index.html's #video-grid.swapped rules) --
+// no-op on desktop, which never applies that class visually.
+localTile.addEventListener('click', () => videoGrid.classList.toggle('swapped'));
 
 async function runDialer(identity, { verified = false } = {}) {
   idEntry.hidden = true;
@@ -656,6 +815,10 @@ async function runDialer(identity, { verified = false } = {}) {
   setInterval(() => api(`/incoming?email=${encodeURIComponent(identity.email)}`).then((r) => {
     if (r.incoming) showIncoming(r.incoming);
   }).catch(() => {}), 3000);
+
+  refreshContacts();
+  setInterval(refreshContacts, 5000);
+  preloadLocalMedia();
 
   btnDecline.addEventListener('click', () => {
     const declined = currentIncoming;
