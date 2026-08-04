@@ -14,6 +14,19 @@
 # DNS-01 with the operator's zone-wide token) and mounted in as static files -- this
 # Caddyfile only ever reads fullchain.pem/privkey.pem, never holds a DNS credential.
 #
+# 2026-08-04: the tunnel was re-provisioned after its hostname binding was deleted
+# (a "Revoke" click on the portal deleted the whole binding, not just reset the cert
+# status). A freshly (re-)provisioned tunnel always starts at Rot/Gelb -- the shared
+# wildcard tier where the EDGE terminates the customer-facing TLS itself and forwards
+# PLAINTEXT to the origin (docs/agent-onboarding.md "Certificate status: Rot/Gelb/
+# Grün") -- regardless of whether a valid core-issued cert already sits in
+# /certs, since Grün is specifically about the *tunnel's* admission-broker state, not
+# about a cert file merely existing. `tls ...` here would make Caddy reject the
+# edge's forwarded plaintext as a protocol mismatch ("Client sent an HTTP request to
+# an HTTPS server") -- confirmed live. Matches the exact same gotcha
+# devsystem-demo's own Caddyfile already documents. Switch back to
+# `tls /certs/fullchain.pem /certs/privkey.pem` once this tunnel reaches Grün.
+#
 # Browser-Plane login gate (optional, CADS-Tunnel #382-follow): CT_GATE_UPSTREAM_HOST
 # (e.g. bunsenbrenner.org) points forward_auth at the control plane's own /gate/check.
 # The toggle lives entirely server-side (the tunnel owner's portal checkbox) -- this
@@ -34,8 +47,20 @@
 # actually fired (confirmed against Caddy's own forward_auth docs: a non-2xx
 # auth-backend response never reaches Caddy's error pipeline at all) -- caught
 # live standing up the first real gated demo, not from re-reading the docs.
+#
+# auto_https off + the bare `:443` address (rather than the hostname) while
+# Gelb: with no `tls` directive, Caddy's default auto_https would otherwise try
+# to obtain its OWN Let's Encrypt cert for this hostname on startup -- which
+# can never succeed here (this origin has no direct public inbound
+# connectivity, only reachable through the tunnel) and would just spam failed
+# ACME attempts. `CT_AGENT_ORIGIN=webconference-demo-origin:443` is what the
+# tunnel actually forwards to, so this must keep listening on :443, just
+# without TLS of its own while Gelb.
+{
+	auto_https off
+}
 
-webconference.bunsenbrenner.org {
+:443 {
 	forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
 		uri /gate/check
 		copy_headers X-Gate-Email
@@ -44,7 +69,6 @@ webconference.bunsenbrenner.org {
 	root * /srv
 	file_server
 	encode gzip
-	tls /certs/fullchain.pem /certs/privkey.pem
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options "nosniff"
