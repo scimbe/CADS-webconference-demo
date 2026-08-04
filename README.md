@@ -144,3 +144,21 @@ pairing with the `:443`/QUIC channel brokers — remain in CADS-Tunnel itself.
 `ct-agent-wasm` itself moved a step further, from CADS-Tunnel into
 [scimbe/ct-agent](https://github.com/scimbe/ct-agent)'s own `wasm/` workspace
 member (it's `ct-agent` for the browser, not CADS-Tunnel platform code).
+
+## Related: a native Android client is in progress
+
+[`CADS-webconference-android`](https://github.com/scimbe/CADS-webconference-android)
+is a separate, in-progress effort to build a native counterpart to this demo — a
+real Agent-Fabric channel-join + Noise_IK handshake + WebRTC client matching this
+repo's own protocol behavior, but as a Kotlin/Android app rather than
+`ct-agent-wasm` in a browser tab. It's also the flagship proof for
+[The Development System](https://github.com/scimbe/CADS-devsystem)
+([CADS-Tunnel#382](https://github.com/scimbe/CADS-Tunnel/issues/382)), a
+self-optimizing, agent-driven development pipeline being built alongside it.
+
+As of this writing: real Gradle scaffold, hermetically-verified signed debug APK,
+a real unit test, CI, and a full toolchain modernization pass are done —
+`MainActivity` is still a placeholder, not a working client. The actual bridge to
+this protocol needs a Rust→Android JNI layer (CADS-Tunnel's Noise_IK/Agent-Fabric
+code, same as `ct-agent-wasm` depends on here, has no existing Android path) —
+an architecture decision currently open on CADS-Tunnel#382, not yet started.
