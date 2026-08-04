@@ -29,7 +29,20 @@ const crypto = require('crypto');
 
 const LISTEN = process.env.WEBCONFERENCE_BRIDGE_LISTEN || '0.0.0.0:8791';
 const CP_URL = process.env.CT_AGENT_CP_URL || 'https://bunsenbrenner.org';
-const WS_URL = process.env.WEBCONFERENCE_WS_URL || 'wss://site-34a13a96.bunsenbrenner.org/ws/channel';
+// Derived from CT_AGENT_HOSTNAME -- the SAME variable the agent service is
+// given, both ultimately sourced from one value in .env.selfservice. Never a
+// separately-specified URL: a prior hardcoded fallback here
+// (wss://site-34a13a96.bunsenbrenner.org/ws/channel, this tunnel's OLD
+// hostname from before it was rebound to the real one) silently pointed the
+// browser at a dead tunnel for hours after the rebind, because nothing forced
+// this value to move in lockstep with the agent's own hostname. There is now
+// exactly one place this hostname is configured.
+const AGENT_HOSTNAME = process.env.CT_AGENT_HOSTNAME;
+if (!AGENT_HOSTNAME) {
+  console.error('bridge: CT_AGENT_HOSTNAME is required (same value passed to the agent service)');
+  process.exit(1);
+}
+const WS_URL = `wss://${AGENT_HOSTNAME}/ws/channel`;
 const OPERATOR_KEY = process.env.CT_CHANNEL_OPERATOR_KEY; // 64-hex private key, from `ct-agent channel operator-init`
 const GRANT_BIN = process.env.CT_VIDEO_CALL_GRANT_BIN || '/usr/local/bin/ct-video-call-grant';
 const PRESENCE_TTL_MS = 45_000;

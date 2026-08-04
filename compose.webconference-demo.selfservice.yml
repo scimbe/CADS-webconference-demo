@@ -42,7 +42,12 @@ services:
     environment:
       - WEBCONFERENCE_BRIDGE_LISTEN=0.0.0.0:8791
       - CT_AGENT_CP_URL=${CT_AGENT_CP_URL:?control-plane URL}
-      - WEBCONFERENCE_WS_URL=${WEBCONFERENCE_WS_URL:?wss:// URL the browser reaches /ws/channel at, e.g. wss://site-34a13a96.bunsenbrenner.org/ws/channel}
+      # Same var + same value as webconference-demo-agent's CT_AGENT_HOSTNAME
+      # below, both sourced from this one top-level ${CT_AGENT_HOSTNAME} --
+      # server.js derives wss://<host>/ws/channel from it directly. Never a
+      # second, independently-set hostname/URL: that's what let this drift
+      # stale (pointed at the tunnel's old hostname) after a rebind.
+      - CT_AGENT_HOSTNAME=${CT_AGENT_HOSTNAME:?this tunnel's assigned hostname, e.g. site-34a13a96.bunsenbrenner.org}
       - CT_CHANNEL_OPERATOR_KEY=${WEBCONFERENCE_OPERATOR_KEY:?this demo's channel operator private key, 64-hex, from ct-agent channel operator-init}
       # Either auth path works (CADS-Tunnel#214's dual-auth fix): a bearer
       # token, or -- what's actually wired up -- the portal's own session
