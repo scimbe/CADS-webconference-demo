@@ -143,7 +143,7 @@ dependencies = [
 [[package]]
 name = "ct-common"
 version = "0.0.0"
-source = "git+https://github.com/scimbe/CADS-Tunnel?tag=v0.4.12#71a59e24835af557340d2d538062b8e285f644ea"
+source = "git+https://github.com/scimbe/CADS-Tunnel?tag=v0.4.13#ce262516c07ba23d6f2f3c3541a0e21ed8249ac5"
 dependencies = [
  "ed25519-dalek",
  "getrandom",
