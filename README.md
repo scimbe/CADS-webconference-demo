@@ -25,12 +25,25 @@ and exchanges real encrypted WebRTC signaling messages to establish a real
   testing is the camera/microphone hardware itself (Chromium's synthetic test
   pattern) — the capture, encoding, and peer connection around it are real. A human
   visiting with a real camera/microphone gets the genuine thing.
+- **Known gap (CADS-webconference-demo#18/#37): the WebRTC path is LAN-only
+  without a TURN relay.** `RTCPeerConnection` is configured with a public STUN
+  server, which resolves the common case (each side discovers its own reflexive
+  address), but STUN alone can't traverse symmetric NAT or a locked-down
+  corporate network — that needs a real TURN relay, which this demo has no
+  infrastructure/credentials to offer. The `direct-channel` transport (chat/media
+  tunneled over this app's own already-open WebSocket channel instead of raw
+  ICE) is the reliable fallback for exactly those networks — not just "one
+  option" among equals the way earlier revisions of this README implied, but the
+  one that actually works off-LAN today.
 
 ## Architecture
 
-- `index.html` / `app.js` — the demo page. Configured entirely via URL query
-  params (`ws`, `grant`, `holderPriv`, `noisePriv`, `role`) — no build step, no
-  bundler.
+- `index.html` / `app.js` — the demo page. The original call screen is
+  configured via URL query params (`ws`, `grant`, `holderPriv`, `noisePriv`,
+  `role`); a full messenger-style shell (contacts, persistent encrypted chat,
+  an admin panel) was layered on top afterward, backed by `chatStore.js` and
+  `bridge/server.js` below — see those files' own header comments for the
+  detail this README doesn't duplicate. Still no build step, no bundler.
 - `pkg/` — `ct-agent-wasm` compiled for the browser (`wasm-bindgen --target web`),
   built by `./build-wasm.sh` from a pinned `scimbe/ct-agent` commit (see that repo's
   `wasm/` workspace member — `ct-agent-wasm` IS `ct-agent` for the browser,
@@ -49,6 +62,25 @@ and exchanges real encrypted WebRTC signaling messages to establish a real
   `CT_EDGE_WS_CHANNEL_LISTEN` port; a Browser-Plane `ct-agent` tunnels
   `webconference.bunsenbrenner.org` traffic to that Caddy, terminating TLS with a
   cert issued CORE-side via deSEC DNS-01.
+- `bridge/server.js` (CADS-webconference-demo#37 — previously undocumented
+  here despite being the largest component in the repo). A directory +
+  presence + call-signaling service so two browser tabs can find each other
+  by email and place a call without a manual `ct-video-call-grant` step: holds
+  the channel operator's private key, mints `SignedChannelGrant`s on demand
+  (shelling out to `video-call-grant/`), proxies control-plane channel
+  registration, and — layered on well after the original two-tab-URL-param
+  call flow above — backs a full messenger-style UI (persistent encrypted
+  chat via `chatStore.js`, contacts, an admin-gated login-allowlist,
+  background message delivery). **Trust model, stated plainly**: every
+  mutating endpoint currently takes the caller's email as a client-supplied
+  field with no cryptographic verification against who's actually
+  authenticated (tracked as CADS-webconference-demo#9) — the browser-plane
+  login gate verifies access to the *origin*, but that verification isn't yet
+  threaded through as a per-request credential the bridge itself checks. Real
+  secrets (the channel operator key, OIDC client credentials) live in this
+  process's environment for its entire lifetime. Treat this demo's identity
+  model as "good enough for a small, curated set of participants who trust
+  each other and the operator," not as a hardened multi-tenant service.
 
 ## Running it
 
