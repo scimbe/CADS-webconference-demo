@@ -675,13 +675,23 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
         } catch {
           continue; // malformed header -- nothing to reassemble
         }
-        if (typeof header.size === 'number' && header.size > MAX_FILE_BYTES) {
-          log(`incoming file from ${peerEmail} exceeds the ${MAX_FILE_BYTES} byte cap (${header.size}) -- refusing to buffer it`);
+        // CADS-webconference-demo#58 (secondary finding): the cap check
+        // only ever rejected a `size` that WAS a number and over the cap --
+        // a missing/non-number/negative size skipped the check entirely,
+        // and `received < size` (below) is immediately false for a
+        // negative/zero/undefined size, so the very first chunk completed
+        // reassembly with the declared size never actually validated
+        // against anything. Coerced to a safe non-negative integer up
+        // front instead; anything that doesn't coerce cleanly is treated
+        // as a hostile/malformed header, same as exceeding the cap.
+        const declaredSize = Number(header.size);
+        if (!Number.isInteger(declaredSize) || declaredSize < 0 || declaredSize > MAX_FILE_BYTES) {
+          log(`incoming file from ${peerEmail} has an invalid or over-cap declared size (${header.size}) -- refusing to buffer it`);
           incomingFile = null;
           continue;
         }
-        incomingFile = { seq: header.seq, name: header.name, mimeType: header.mimeType, size: header.size, chunks: [], received: 0 };
-        deadline = Math.max(deadline, Date.now() + fileTransferWindowMs(header.size || 0));
+        incomingFile = { seq: header.seq, name: header.name, mimeType: header.mimeType, size: declaredSize, chunks: [], received: 0 };
+        deadline = Math.max(deadline, Date.now() + fileTransferWindowMs(declaredSize));
         continue;
       }
       if (tag === TAG_FILE_CHUNK) {
@@ -695,10 +705,16 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
         incomingFile.chunks.push(payload);
         if (incomingFile.received < incomingFile.size) continue; // more chunks still coming
         const fileBytes = concatBytes(...incomingFile.chunks);
-        const { seq, name, mimeType, size } = incomingFile;
+        const { seq, name, mimeType } = incomingFile;
         incomingFile = null;
         if (chatStore && peerEmail) {
-          const recorded = await chatStore.record({ peerEmail, from: 'peer', seq, received: true, kind: 'file', fileName: name, fileMimeType: mimeType, fileSize: size, fileBytes });
+          // CADS-webconference-demo#58 (secondary finding): record the
+          // ACTUAL reassembled byte length, not the sender's declared
+          // size -- a sender can freely lie about the header (declare 100,
+          // send 200), and storing the declared value would persist that
+          // mismatch as fileSize metadata forever. fileBytes.length is
+          // exactly what's really there.
+          const recorded = await chatStore.record({ peerEmail, from: 'peer', seq, received: true, kind: 'file', fileName: name, fileMimeType: mimeType, fileSize: fileBytes.length, fileBytes });
           send(JSON.stringify({ ack: seq }));
           if (currentConversationEmail === peerEmail.toLowerCase()) appendConvMessage(recorded);
           refreshContacts();
@@ -1624,6 +1640,23 @@ async function openConversation(email) {
 // onDelivered for why that's needed now.
 // CADS-webconference-demo#50: formats a byte count the same way any real
 // file-transfer UI does (nearest sensible unit, not a raw byte count).
+// CADS-webconference-demo#58: an explicit allowlist of raster formats that
+// can NEVER carry executable content, not a blocklist of the one bad case
+// found so far. `startsWith('image/')` let image/svg+xml through -- SVG is
+// XML, can embed <script>, and blob: URLs inherit the ORIGIN of the page
+// that created them (this app's own origin). The inline <img src=blob:>
+// itself is safe (browsers sandbox SVG loaded that way, no script runs) --
+// the actual hole was the "open full-size" link doing a top-level
+// target=_blank NAVIGATION to that same blob: URL, which for an SVG
+// document DOES execute its script, in this app's own origin, with full
+// access to localStorage (identity private keys), IndexedDB, and the gate
+// session. A real PoC confirmed this exfiltrates ct-webconference-
+// identity:<email> (holderPriv/noisePriv) via one click on a peer-sent
+// "image". Anything not in this allowlist (SVG included) now falls
+// through to the existing download-only branch below, which never
+// navigates to or renders the blob at all -- safe regardless of content,
+// same as any other unrecognized file type already was.
+const SAFE_INLINE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/avif', 'image/x-icon']);
 function formatFileSize(bytes) {
   if (bytes == null) return '';
   if (bytes < 1024) return `${bytes} B`;
@@ -1648,7 +1681,7 @@ function appendConvMessage({ from, text, pending, corrupted, seq, kind, fileName
     // anything else renders as a filename + size + download link -- no
     // in-page preview attempted for arbitrary file types.
     const url = URL.createObjectURL(blob);
-    if ((fileMimeType || '').startsWith('image/')) {
+    if (SAFE_INLINE_IMAGE_MIME_TYPES.has(fileMimeType || '')) {
       const link = document.createElement('a');
       link.href = url;
       link.target = '_blank';
