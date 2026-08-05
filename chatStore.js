@@ -204,9 +204,19 @@ export class ChatStore {
   // dbPromise forever meant every operation after that point awaited a
   // promise that resolved to an already-closed db and just failed. Reopen
   // on demand instead.
+  // CADS-webconference-demo#45: a rejected promise is still truthy, so
+  // `if (!this._dbPromise)` alone doesn't catch the onblocked path above
+  // rejecting -- the SAME rejected promise then got returned forever,
+  // wedging this instance until a page reload created a fresh ChatStore.
+  // Clearing the cache on rejection too (not just on the onblocked
+  // callback's own close-triggered reset) means the next call retries
+  // instead of replaying a stale failure.
   _getDb() {
     if (!this._dbPromise) {
-      this._dbPromise = openDb(() => { this._dbPromise = null; });
+      this._dbPromise = openDb(() => { this._dbPromise = null; }).catch((e) => {
+        this._dbPromise = null;
+        throw e;
+      });
     }
     return this._dbPromise;
   }

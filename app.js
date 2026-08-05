@@ -672,8 +672,19 @@ function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
     if (!text || channel.readyState !== 'open') return;
     if (chatStore && peerEmail) {
       const seq = await chatStore.nextSeqForSend();
+      // CADS-webconference-demo#44: used to record(...) with pending left
+      // at its default (false, i.e. "delivered") immediately after send(),
+      // the same silent-loss class #21 already fixed for the outbox path --
+      // a channel/tab/network death in the small window between send()
+      // succeeding locally and the peer actually persisting the message
+      // marked it delivered and dropped it for good, with no retry. Record
+      // pending, same as the outbox does, and only flip it once the peer's
+      // own {ack:seq} reply actually arrives -- a dead channel before that
+      // just leaves it in the outbox for the normal background-delivery
+      // sweep to pick up later, instead of losing it.
+      chatStore.record({ peerEmail, from: 'me', text, seq, pending: true });
       channel.send(JSON.stringify({ seq, text }));
-      chatStore.record({ peerEmail, from: 'me', text, seq });
+      ackWaiter.wait(seq).then(() => chatStore.markDelivered(peerEmail, seq)).catch(() => {});
     } else {
       channel.send(JSON.stringify({ text }));
     }
@@ -1863,8 +1874,12 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
     if (!text) return;
     if (chatStore && peerEmail) {
       const seq = await chatStore.nextSeqForSend();
+      // CADS-webconference-demo#44 -- see the WebRTC-path chatForm handler's
+      // matching comment (setupChatChannel) for why: record pending, only
+      // mark delivered once the peer's own {ack:seq} actually arrives.
+      chatStore.record({ peerEmail, from: 'me', text, seq, pending: true });
       sendText(TAG_CHAT, JSON.stringify({ seq, text }));
-      chatStore.record({ peerEmail, from: 'me', text, seq });
+      ackWaiter.wait(seq).then(() => chatStore.markDelivered(peerEmail, seq)).catch(() => {});
     } else {
       sendText(TAG_CHAT, JSON.stringify({ text }));
     }
