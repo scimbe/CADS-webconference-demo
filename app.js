@@ -449,7 +449,20 @@ function createAckWaiter() {
 // delivered once its ack actually arrives; stops flushing (leaving the rest
 // pending) the moment one doesn't -- a dead channel mid-flush shouldn't
 // spray the remaining queue into the void, just leave it for next time.
-async function flushOutbox(chatStore, peerEmail, send, ackWaiter) {
+// CADS-webconference-demo#49: onDelivered is an optional callback fired
+// with each message's seq right after it's actually confirmed delivered --
+// added specifically so the messenger conversation pane (appendConvMessage)
+// can flip an already-rendered "sending…" bubble to delivered live,
+// without this function needing to know anything about that DOM. Before
+// this, a message delivered entirely in the background (no call, no page
+// reload -- the whole point of the async chat-delivery feature) left its
+// bubble showing "sending…" forever, even though it had genuinely gone
+// through -- the only way to see the correct state was to close and reopen
+// the conversation (a fresh history() read). Not wired into the in-call
+// chat panels' own two flushOutbox call sites (a separate DOM, #chat-log,
+// that doesn't have a "pending" concept at all -- addChatMessage renders
+// a live send immediately, no bubble to update).
+async function flushOutbox(chatStore, peerEmail, send, ackWaiter, onDelivered) {
   if (!chatStore || !peerEmail) return;
   const outbox = await chatStore.pendingOutbox(peerEmail);
   for (const m of outbox) {
@@ -469,6 +482,7 @@ async function flushOutbox(chatStore, peerEmail, send, ackWaiter) {
       break;
     }
     await chatStore.markDelivered(peerEmail, m.seq);
+    onDelivered?.(m.seq);
   }
 }
 
@@ -526,7 +540,18 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
   // now awaits an ack for each send, and that ack can only ever arrive via
   // this same function's own receive loop, so awaiting the flush first would
   // deadlock waiting for a reply nothing is listening for yet.
-  const flushPromise = flushOutbox(chatStore, peerEmail, send, ackWaiter);
+  // CADS-webconference-demo#49: this is the async/background delivery path
+  // (no call, no page reload) -- exactly the case a message could go from
+  // pending to delivered while the messenger conversation pane is sitting
+  // open, so it's the one flushOutbox call site that needs to keep an
+  // already-rendered bubble in sync. Scoped to the currently-open
+  // conversation only -- markConvMessageDelivered itself already no-ops if
+  // its bubble isn't on screen, but checking here too avoids searching the
+  // DOM at all for the (common) case where a different or no conversation
+  // is open.
+  const flushPromise = flushOutbox(chatStore, peerEmail, send, ackWaiter, (seq) => {
+    if (currentConversationEmail === peerEmail.toLowerCase()) markConvMessageDelivered(seq);
+  });
   const deadline = Date.now() + BACKGROUND_CHAT_WINDOW_MS;
   try {
     while (Date.now() < deadline) {
@@ -1404,14 +1429,15 @@ async function openConversation(email) {
 // Shared by history load (openConversation) and a just-composed message
 // (msgComposeForm below) so both render identically. `pending` (queued,
 // not yet sent over any live channel -- see chatStore's outbox) shows a
-// dimmed bubble with "sending…" instead of "you"; there's no separate
-// live-update path to flip it once delivered because sending only actually
-// happens after startCallFromIdentity's location.search reload takes the
-// page to #call-screen -- a fresh load of this conversation pane re-reads
-// history from chatStore (now delivered) next time it's opened.
-function appendConvMessage({ from, text, pending, corrupted }) {
+// dimmed bubble with "sending…" instead of "you". data-seq (only set for
+// my own messages, where seq is always present and unique per
+// conversation) lets markConvMessageDelivered below find this exact bubble
+// again later and flip it live -- see #49's comment on flushOutbox's
+// onDelivered for why that's needed now.
+function appendConvMessage({ from, text, pending, corrupted, seq }) {
   const div = document.createElement('div');
   div.className = `chat-msg ${from}${pending ? ' pending' : ''}`;
+  if (from === 'me' && seq != null) div.dataset.seq = seq;
   const body = document.createElement('div');
   // CADS-webconference-demo#24: a record chatStore.history() couldn't
   // decrypt (corrupted/tampered row) comes back with corrupted:true and no
@@ -1425,6 +1451,21 @@ function appendConvMessage({ from, text, pending, corrupted }) {
   div.append(body, meta);
   convMessages.appendChild(div);
   convMessages.scrollTop = convMessages.scrollHeight;
+}
+
+// CADS-webconference-demo#49: flips a specific "sending…" bubble to
+// delivered once flushOutbox's onDelivered callback confirms its ack --
+// finds it by the data-seq appendConvMessage sets above. No-ops quietly if
+// the bubble isn't on screen right now (a different conversation is open,
+// or this pane hasn't been opened at all this session) -- chatStore itself
+// already has the correct pending:false state either way; this only keeps
+// whatever's currently rendered in sync with it.
+function markConvMessageDelivered(seq) {
+  const bubble = convMessages.querySelector(`.chat-msg.me[data-seq="${seq}"]`);
+  if (!bubble) return;
+  bubble.classList.remove('pending');
+  const meta = bubble.querySelector('.meta');
+  if (meta) meta.textContent = 'you';
 }
 
 function closeConversation() {
