@@ -42,6 +42,29 @@ EDGE_ADMIN_TOKEN="${CT_CP_EDGE_ADMIN_TOKEN:-}"
 say() { printf '\033[36m▶ %s\033[0m\n' "$*"; }
 die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# CADS-webconference-demo#35: the admin token (x-ct-admin-token, below) and
+# the edge routing token travel over whatever $CP_URL/$EDGE_ADMIN_URL
+# resolve to -- fine when that's the http://127.0.0.1 default (loopback
+# never leaves the host), but an operator pointing CP_URL at a REMOTE
+# control plane over plain http:// (e.g. reaching another host on a LAN
+# without bothering with TLS) would silently send the admin token in the
+# clear over the network. Reject that combination outright rather than
+# just hoping whoever sets CP_URL remembers to use https:// -- set
+# ALLOW_INSECURE_REMOTE_CP=1 to override for a deliberately-trusted
+# private network. (Must come after say()/die() are defined above, and
+# after EDGE_ADMIN_URL is actually assigned -- an earlier version of this
+# check ran before either, so die() would have failed as an unknown
+# command and EDGE_ADMIN_URL was always still empty at that point.)
+for _url in "$CP_URL" "$EDGE_ADMIN_URL"; do
+  case "$_url" in
+    http://127.0.0.1*|http://localhost*|http://\[::1\]*|""|https://*) ;;
+    http://*)
+      [ "${ALLOW_INSECURE_REMOTE_CP:-0}" = "1" ] \
+        || die "$_url is http:// (plaintext) and not loopback -- the admin token would travel in the clear. Use https://, or set ALLOW_INSECURE_REMOTE_CP=1 if this is a deliberately-trusted private network."
+      ;;
+  esac
+done
+
 if [ "$CMD" = "down" ] || [ "$CMD" = "disable" ] || [ "$CMD" = "off" ]; then
   say "Taking webconference-demo offline (stopping origin + agent)"
   $COMPOSE down
