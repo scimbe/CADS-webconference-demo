@@ -331,6 +331,17 @@
       <div>
         <span class="badge" id="id-badge">Go online</span>
 
+        <!-- CADS-webconference-demo#32: a network failure verifying the
+             login-gate identity must NOT silently fall through to the
+             unverified free-text/localStorage path -- that path is exactly
+             what the gate identity is supposed to always win over. Shown
+             only when /api/whoami itself couldn't be reached; a genuine
+             "you're not gated" answer from a reachable server skips this
+             entirely and goes straight to id-entry below. -->
+        <div id="id-verify-error" hidden style="background:var(--panel2);border:1px solid var(--danger);border-radius:10px;padding:1rem;margin-bottom:1rem">
+          <p style="margin:0 0 .6rem;font-size:.9rem">Couldn't verify your login just now (<span id="id-verify-error-detail"></span>). Not proceeding as an unverified identity — retry, or reload once your connection's back.</p>
+          <button type="button" id="id-verify-retry">Retry</button>
+        </div>
         <div id="id-entry">
           <h2>Enter your e-mail</h2>
           <form class="id-form" id="id-form">

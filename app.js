@@ -720,6 +720,9 @@ function computeAttestation(channelHex, holderPrivHex, holderPubHex, noisePubHex
 const idEntry = document.getElementById('id-entry');
 const idForm = document.getElementById('id-form');
 const idEmailInput = document.getElementById('id-email');
+const idVerifyError = document.getElementById('id-verify-error');
+const idVerifyErrorDetail = document.getElementById('id-verify-error-detail');
+const idVerifyRetry = document.getElementById('id-verify-retry');
 const myEmailEl = document.getElementById('my-email');
 const dialForm = document.getElementById('dial-form');
 const dialEmailInput = document.getElementById('dial-email');
@@ -1551,9 +1554,36 @@ async function runIdentityScreen() {
   // by the origin's Caddyfile from the control-plane's /gate/check) always
   // wins over free-text entry or a stale localStorage identity -- otherwise
   // a gate-authenticated user could still go online as anyone they type in.
-  // Null here just means the tunnel isn't gated (or the gate isn't enforcing
-  // yet), not an error -- falls through to the existing free-text flow.
-  const { email: verifiedEmail } = await api('/whoami').catch(() => ({ email: null }));
+  // A genuine {email: null} response just means the tunnel isn't gated (or
+  // the gate isn't enforcing yet), not an error -- falls through to the
+  // existing free-text flow below, same as always.
+  //
+  // CADS-webconference-demo#32: api() never actually rejects (it catches
+  // fetch failures internally and resolves to {error: '...'} instead), so
+  // the `.catch(() => ({email: null}))` this used to have was dead code --
+  // a genuine network failure reaching /whoami still resolved successfully
+  // to {error: '...'}, destructured to verifiedEmail === undefined, and
+  // fell through to this SAME unverified path silently. That's exactly
+  // backwards: "couldn't determine whether there's a gate identity" was
+  // being treated identically to "determined there isn't one," letting a
+  // flaky network silently downgrade a real gate-verified user to a stale
+  // local identity that may not even match their gate session, with the UI
+  // presenting the dialer as if nothing were wrong. Now stops and asks for
+  // an explicit retry instead of guessing.
+  const whoamiResp = await api('/whoami');
+  if (whoamiResp.error) {
+    idEntry.hidden = true;
+    idVerifyErrorDetail.textContent = whoamiResp.error;
+    idVerifyError.hidden = false;
+    // Reload rather than re-running this function's own setup in place --
+    // avoids re-registering the idForm submit listener a second time (and
+    // a third, on the retry after that...) for what's meant to be a rare
+    // recovery path, not a common one worth building real re-entrant state
+    // management for.
+    idVerifyRetry.addEventListener('click', () => location.reload());
+    return;
+  }
+  const verifiedEmail = whoamiResp.email;
   if (verifiedEmail) {
     const identity = loadOrCreateIdentity(verifiedEmail);
     await runDialer(identity, { verified: true });
@@ -1564,9 +1594,21 @@ async function runIdentityScreen() {
   // used one automatically instead of asking again.
   const existingKeys = Object.keys(localStorage).filter((k) => k.startsWith('ct-webconference-identity:'));
   if (existingKeys.length > 0) {
-    const identity = JSON.parse(localStorage.getItem(existingKeys[existingKeys.length - 1]));
-    await runDialer(identity);
-    return;
+    let identity = null;
+    try {
+      identity = JSON.parse(localStorage.getItem(existingKeys[existingKeys.length - 1]));
+    } catch (e) {
+      // CADS-webconference-demo#32: corrupted/tampered localStorage used to
+      // throw here uncaught, crashing the whole setup screen (blank page,
+      // no recovery). Drop the corrupted entry and fall through to a fresh
+      // id-entry form instead.
+      log(`stored identity was corrupted, ignoring it: ${e.message}`);
+      localStorage.removeItem(existingKeys[existingKeys.length - 1]);
+    }
+    if (identity) {
+      await runDialer(identity);
+      return;
+    }
   }
 
   idForm.addEventListener('submit', async (ev) => {
