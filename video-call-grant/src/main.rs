@@ -31,6 +31,17 @@ use ct_common::channel::{channel_id_for_link, ChannelGrant, Direction, Rights, S
 use ed25519_dalek::{Signer, SigningKey};
 
 const DEFAULT_TTL_SECS: u64 = 3600;
+// CADS-webconference-demo#34: --ttl-secs was parsed as a bare u64 with no
+// upper bound at all -- now + ttl_secs (in mint() below) had no overflow
+// check either, so release-mode Rust (which wraps on overflow instead of
+// panicking) would silently accept a typo like a 20-digit --ttl-secs and
+// produce either an immediately-expired grant (harmless) or, for the
+// right wrapped value, one valid for centuries. Bounding ttl_secs here
+// closes both: no out-of-range value survives to reach the addition at
+// all, and mint()'s now.checked_add() below is then providing defense in
+// depth against a similar mistake anywhere else that constructs Args
+// directly (as the test module does) rather than through parse_args.
+const MAX_TTL_SECS: u64 = 30 * 24 * 3600; // 30 days -- generous for a demo call link
 
 struct Args {
     holder_a: [u8; 32],
@@ -63,12 +74,26 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
         match raw[i].as_str() {
             "--operator-private" => {
                 let v = raw.get(i + 1).ok_or("--operator-private needs a value")?;
-                operator_private = Some(from_hex32(v).map_err(|e| format!("--operator-private: {e}"))?);
+                let bytes = from_hex32(v).map_err(|e| format!("--operator-private: {e}"))?;
+                // CADS-webconference-demo#34: SigningKey::from_bytes accepts any 32
+                // bytes including all-zero -- a misconfigured all-zero operator key
+                // would silently "work" (internally consistent, verifiable
+                // signatures under the zero key) instead of failing loudly at the
+                // one point (key import) where a canonical-key check is cheap and
+                // the mistake is still easy to explain.
+                if bytes == [0u8; 32] {
+                    return Err("--operator-private must not be the all-zero key".to_string());
+                }
+                operator_private = Some(bytes);
                 i += 2;
             }
             "--ttl-secs" => {
                 let v = raw.get(i + 1).ok_or("--ttl-secs needs a value")?;
-                ttl_secs = v.parse::<u64>().map_err(|_| "--ttl-secs must be a positive integer".to_string())?;
+                let parsed = v.parse::<u64>().map_err(|_| "--ttl-secs must be a positive integer".to_string())?;
+                if parsed == 0 || parsed > MAX_TTL_SECS {
+                    return Err(format!("--ttl-secs must be between 1 and {MAX_TTL_SECS} (30 days), got {parsed}"));
+                }
+                ttl_secs = parsed;
                 i += 2;
             }
             other => {
@@ -105,7 +130,13 @@ struct MintedGrants {
 fn mint(args: &Args, operator_sk: &SigningKey, now: u64) -> MintedGrants {
     let operator_public = operator_sk.verifying_key().to_bytes();
     let channel = channel_id_for_link(&operator_public, &args.holder_a, &args.holder_b);
-    let expires_at = now + args.ttl_secs;
+    // parse_args bounds ttl_secs to MAX_TTL_SECS for anything built through the
+    // CLI, so this can never actually overflow u64 for any realistic `now` --
+    // checked_add is defense in depth against an Args built directly (as the
+    // test module below does) with an out-of-band ttl_secs, panicking loudly
+    // instead of silently wrapping to a garbage expiry the way release-mode
+    // Rust's default `+` would.
+    let expires_at = now.checked_add(args.ttl_secs).expect("now + ttl_secs overflowed u64 -- ttl_secs should be bounded by parse_args");
 
     let sign_for = |holder: [u8; 32]| -> SignedChannelGrant {
         let grant = ChannelGrant { channel, holder, direction: Direction::Both, rights: Rights::ReadWrite, delegable: false, expires_at };
@@ -231,6 +262,32 @@ mod tests {
         assert!(parse_args(&[hex(&[0u8; 32])]).is_err(), "only one positional arg");
         assert!(parse_args(&["not-hex".to_string(), hex(&[0u8; 32])]).is_err());
         assert!(parse_args(&["--ttl-secs".to_string(), "not-a-number".to_string(), hex(&[0u8; 32]), hex(&[1u8; 32])]).is_err());
+    }
+
+    // CADS-webconference-demo#34
+    #[test]
+    fn parse_args_rejects_ttl_out_of_range() {
+        let holders = || vec![hex(&[0u8; 32]), hex(&[1u8; 32])];
+        let with_ttl = |ttl: &str| {
+            let mut raw = vec!["--ttl-secs".to_string(), ttl.to_string()];
+            raw.extend(holders());
+            raw
+        };
+        assert!(parse_args(&with_ttl("0")).is_err(), "zero ttl should be rejected");
+        assert!(parse_args(&with_ttl(&(MAX_TTL_SECS + 1).to_string())).is_err(), "past the 30-day cap should be rejected");
+        assert!(parse_args(&with_ttl("99999999999999999999")).is_err(), "a value that doesn't even fit u64 should be rejected, not silently wrapped");
+        assert!(parse_args(&with_ttl(&MAX_TTL_SECS.to_string())).is_ok(), "exactly the cap should still be accepted");
+    }
+
+    #[test]
+    fn parse_args_rejects_all_zero_operator_key() {
+        let raw = vec![
+            hex(&[0u8; 32]),
+            hex(&[1u8; 32]),
+            "--operator-private".to_string(),
+            hex(&[0u8; 32]),
+        ];
+        assert!(parse_args(&raw).is_err());
     }
 
     fn hex_decode(s: &str) -> Vec<u8> {
