@@ -41,6 +41,12 @@ services:
         grant-bin: ./video-call-grant/target/release
     environment:
       - WEBCONFERENCE_BRIDGE_LISTEN=0.0.0.0:8791
+      # CADS-webconference-demo#41 (finding 3): pending access requests are
+      # persisted here (atomic-write JSON, see server.js's own comment) so a
+      # container recreate -- not just a same-container process restart --
+      # doesn't silently drop them; needs the volume below since /srv itself
+      # is the image's own COPY'd code, not writable storage worth keeping.
+      - WEBCONFERENCE_ACCESS_REQUESTS_FILE=/srv/data/access-requests.json
       - CT_AGENT_CP_URL=${CT_AGENT_CP_URL:?control-plane URL}
       # Same var + same value as webconference-demo-agent's CT_AGENT_HOSTNAME
       # below, both sourced from this one top-level ${CT_AGENT_HOSTNAME} --
@@ -99,6 +105,8 @@ services:
       # `ct_portal_session` from the cookie jar.
       - CT_OIDC_TOKEN=${WEBCONFERENCE_OIDC_TOKEN:-}
       - CT_PORTAL_SESSION_COOKIE=${WEBCONFERENCE_PORTAL_SESSION_COOKIE:-}
+    volumes:
+      - webconference_demo_access_requests:/srv/data
     expose:
       - "8791"
     restart: unless-stopped
@@ -143,3 +151,4 @@ networks:
 volumes:
   webconference_demo_caddy_data_ss:
   webconference_demo_agent_state_ss:
+  webconference_demo_access_requests:

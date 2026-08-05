@@ -125,13 +125,40 @@ const pendingCalls = new Map();
 // above: a same-session convenience, not a persisted notification.
 const contactRequests = new Map();
 // email (lowercased) -> { email, createdAt }. CADS-webconference-demo#36 --
-// someone not yet on the login allow-list asking to be admitted. Same
-// durability tier as the maps above (in-memory, cleared on bridge restart) --
-// CADS-webconference-demo#41 (finding 3) flags that a restart loses every
-// pending request with no notification; real persistence (or an admin
-// notification path) is a bigger piece of work than this pass covers, left
-// as an open question on the issue rather than guessed at here.
+// someone not yet on the login allow-list asking to be admitted.
+// CADS-webconference-demo#41 (finding 3): unlike the maps above, this one is
+// mirrored to a single JSON file (ACCESS_REQUESTS_FILE) on every add/
+// approve/decline, so a bridge restart no longer silently drops every
+// pending request -- the in-memory Map stays the runtime source of truth
+// (every read goes through it), the file is only a load-on-boot /
+// write-through backup. Out-of-band admin notification (nothing pings
+// anyone when a request arrives) is deliberately NOT built here -- that
+// needs a real SMTP/webhook config surface and is a separate feature, not a
+// data-loss bug fix; the admin UI already lists pending requests whenever
+// an admin next signs in, and now they'll actually still be there.
 const accessRequests = new Map();
+const ACCESS_REQUESTS_FILE = process.env.WEBCONFERENCE_ACCESS_REQUESTS_FILE || './access-requests.json';
+try {
+  const raw = fs.readFileSync(ACCESS_REQUESTS_FILE, 'utf8');
+  for (const entry of JSON.parse(raw)) {
+    if (entry && typeof entry.email === 'string') accessRequests.set(entry.email.toLowerCase(), entry);
+  }
+  console.log(`loaded ${accessRequests.size} pending access request(s) from ${ACCESS_REQUESTS_FILE}`);
+} catch (e) {
+  if (e.code !== 'ENOENT') console.log(`could not load ${ACCESS_REQUESTS_FILE}: ${e.message} -- starting with no pending requests`);
+}
+function persistAccessRequests() {
+  // Atomic write (tmp file + rename) so a crash mid-write can't leave
+  // ACCESS_REQUESTS_FILE truncated/corrupted -- the rename is a single
+  // filesystem operation, never a partially-written target file.
+  const tmp = `${ACCESS_REQUESTS_FILE}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify([...accessRequests.values()]));
+    fs.renameSync(tmp, ACCESS_REQUESTS_FILE);
+  } catch (e) {
+    console.log(`could not persist access requests to ${ACCESS_REQUESTS_FILE}: ${e.message}`);
+  }
+}
 // CADS-webconference-demo#41 (finding 2): this is the one endpoint the
 // gate exemption in Caddyfile.selfservice deliberately leaves reachable
 // with NO authentication at all -- by design (it's the one way a rejected
@@ -771,7 +798,10 @@ const server = http.createServer(async (req, res) => {
       if (!accessRequests.has(key) && accessRequests.size >= ACCESS_REQUEST_MAX_PENDING) {
         return json(res, 503, { error: 'too many pending requests -- try again later' });
       }
-      if (!accessRequests.has(key)) accessRequests.set(key, { email: email.trim(), createdAt: Date.now() });
+      if (!accessRequests.has(key)) {
+        accessRequests.set(key, { email: email.trim(), createdAt: Date.now() });
+        persistAccessRequests();
+      }
       return json(res, 200, { ok: true });
     }
     if (req.method === 'GET' && url.pathname === '/api/access-requests') {
@@ -796,6 +826,7 @@ const server = http.createServer(async (req, res) => {
       const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email });
       if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}` });
       accessRequests.delete(email.trim().toLowerCase());
+      persistAccessRequests();
       return json(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/api/access-requests/decline') {
@@ -807,6 +838,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 403, { error: 'admin only' });
       }
       accessRequests.delete(email.trim().toLowerCase());
+      persistAccessRequests();
       return json(res, 200, { ok: true });
     }
 
