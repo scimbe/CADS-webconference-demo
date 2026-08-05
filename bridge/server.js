@@ -805,6 +805,19 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
     if (req.method === 'GET' && url.pathname === '/api/access-requests') {
+      // CADS-webconference-demo#61: the write side of this feature
+      // (approve/decline, right below) was made admin-only in #41 -- this
+      // read side wasn't, even though app.js's own UI comment already
+      // called the list admin-only. Any gate-admitted non-admin could
+      // fetch() this directly and enumerate pending requesters' emails
+      // regardless of the UI panel being hidden for them. Same
+      // X-Gate-Email / ADMIN_EMAILS check as approve/decline, so the
+      // "admin-only" claim is actually true at the server, not just in
+      // the client.
+      const caller = (req.headers['x-gate-email'] || '').trim().toLowerCase();
+      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has(caller)) {
+        return json(res, 403, { error: 'admin only' });
+      }
       return json(res, 200, { requests: [...accessRequests.values()].sort((a, b) => a.createdAt - b.createdAt) });
     }
     if (req.method === 'POST' && url.pathname === '/api/access-requests/approve') {
