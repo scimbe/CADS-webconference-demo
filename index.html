@@ -246,6 +246,18 @@
  .msg-icon-btn{font-family:inherit;background:transparent;border:none;color:var(--muted2);font-size:1.15rem;cursor:pointer;
   width:2.3rem;height:2.3rem;border-radius:50%;display:flex;align-items:center;justify-content:center;transition:background .12s}
  .msg-icon-btn:hover{background:var(--panel2);color:var(--text)}
+ /* CADS-webconference-demo#48: Block (destructive) and Video call sat only
+    the header's own uniform .7rem flex gap apart -- easy to hit the wrong
+    one. margin-RIGHT specifically (not left -- caught live: margin-left
+    here only pushed the block/call pair rightward as a unit, since the
+    gap between two flex siblings comes from the space AFTER the earlier
+    one, not before it -- a real bounding-box measurement after the first
+    attempt still showed the identical 11.2px gap, which is what caught
+    it) widens the gap actually BETWEEN the two buttons. A distinct
+    danger-tinted hover (matching the --danger treatment used for other
+    destructive actions in this app) adds a second, non-spatial cue. */
+ #msg-block-btn{margin-right:.9rem}
+ #msg-block-btn:hover{background:rgba(226,104,95,.14);color:var(--danger)}
 
  .msg-menu{position:absolute;top:3.5rem;right:1rem;z-index:5;background:var(--panel);border:1px solid var(--line);
   border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.35);padding:1rem;min-width:16rem;font-size:.85rem}
