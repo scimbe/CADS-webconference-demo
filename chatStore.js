@@ -10,8 +10,21 @@
 // Encryption: AES-GCM, key derived (HKDF) from this identity's own
 // holderPriv -- the same private key material already generated in this
 // browser and never transmitted anywhere. Only someone holding that key
-// (this browser, this identity) can ever decrypt the stored history;
-// IndexedDB itself never sees plaintext.
+// (this browser, this identity) can ever decrypt a message's TEXT.
+// CADS-webconference-demo#22 -- corrected from an earlier, overbroad claim
+// ("IndexedDB itself never sees plaintext"): only the message body is
+// encrypted. conversation/peerEmail/from/ts/seq/pending are stored in the
+// clear (conversation and seq specifically have to be, to stay queryable/
+// sortable via the byConversation index below -- IndexedDB can't
+// efficiently range-query encrypted bytes). Anyone with IndexedDB access
+// (a same-origin script, a browser extension, forensic disk access) can
+// see who this identity has talked to, when, how often, and in which
+// direction, without decrypting a single message body. Real gap, not
+// fixed in this pass -- closing it properly means hashing the
+// conversation key for the index (so it stays queryable without leaking
+// the actual emails) and moving from/ts/pending into the encrypted blob
+// alongside text, which is a real schema change best done together with
+// the other chatStore.js structural issues, not bolted on independently.
 //
 // Multi-tab sync (same device, same identity): a BroadcastChannel keyed by
 // email relays every new local message to any other open tab for the same
@@ -40,14 +53,32 @@ function conversationKey(myEmail, peerEmail) {
   return `${myEmail.toLowerCase()}->${peerEmail.toLowerCase()}`;
 }
 
-function openDb() {
+// CADS-webconference-demo#26: no onblocked/onversionchange handling meant
+// the FIRST future schema bump would silently deadlock every open tab --
+// this tab's open() request would fire onblocked (unhandled, so the
+// returned promise just hung forever) if another tab held an older
+// version open, and this tab never released its own connection for
+// another tab's upgrade either (no onversionchange). DB_VERSION is still
+// 1 today so neither path can trigger yet, but the fix needs to exist
+// BEFORE the first bump, not be written in a panic after it hangs
+// everyone's chat history. onVersionChange lets the caller (ChatStore)
+// know its cached connection just closed itself, so it can reopen on next
+// use instead of every subsequent operation hanging on a closed db.
+function openDb(onVersionChange) {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const store = req.result.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
       store.createIndex('byConversation', ['conversation', 'seq']);
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onblocked = () => reject(new Error('IndexedDB open blocked -- another tab is holding an older version open; close other tabs and reload'));
+    req.onsuccess = () => {
+      req.result.onversionchange = () => {
+        req.result.close(); // let the other tab's upgrade proceed instead of blocking it
+        if (onVersionChange) onVersionChange();
+      };
+      resolve(req.result);
+    };
     req.onerror = () => reject(req.error);
   });
 }
@@ -63,13 +94,37 @@ class LamportClock {
   constructor(email) {
     this.key = `ct-webconference-lamport:${email.toLowerCase()}`;
     this.value = Number(localStorage.getItem(this.key) || 0);
+    this.lockName = `ct-webconference-lamport-lock:${this.key}`;
   }
-  tick() {
-    this.value += 1;
-    localStorage.setItem(this.key, String(this.value));
-    return this.value;
+  // CADS-webconference-demo#25: two tabs could both read the same
+  // localStorage value, both increment, both write the same result --
+  // localStorage is synchronous per-tab but not atomic ACROSS tabs, so two
+  // near-simultaneous composes in different tabs could mint the identical
+  // seq. navigator.locks (Web Locks API, broadly supported in all current
+  // browsers this app already targets for WebRTC/WASM) serializes this
+  // across tabs for real; falls back to the old non-atomic behavior only
+  // if it's genuinely unavailable, same risk profile as before, not worse.
+  async tick() {
+    const bump = () => {
+      // Re-read here (not just at construction) -- another tab may have
+      // ticked since this instance last touched localStorage, and this is
+      // the one place that MUST see the latest value before advancing it.
+      this.value = Math.max(this.value, Number(localStorage.getItem(this.key) || 0)) + 1;
+      localStorage.setItem(this.key, String(this.value));
+      return this.value;
+    };
+    if (typeof navigator === 'undefined' || !navigator.locks) return bump();
+    return navigator.locks.request(this.lockName, bump);
   }
+  // A malicious same-origin sender (see the BroadcastChannel-trust issue)
+  // could otherwise post an unbounded or non-numeric seq and permanently
+  // wedge this clock: this.value = 1e308, then tick()'s +1 is a no-op at
+  // float64 precision, so every future outgoing message collides on the
+  // same seq forever -- or worse, a string seq turns '+= 1' into string
+  // concatenation. Reject anything that isn't a genuine, bounded integer
+  // instead of trusting it.
   observe(remoteSeq) {
+    if (!Number.isInteger(remoteSeq) || !Number.isSafeInteger(remoteSeq) || remoteSeq < 0) return;
     if (remoteSeq > this.value) {
       this.value = remoteSeq;
       localStorage.setItem(this.key, String(this.value));
@@ -97,20 +152,63 @@ export class ChatStore {
     this.identity = identity;
     this.clock = new LamportClock(identity.email);
     this.keyPromise = deriveKey(identity.holderPriv);
-    this.dbPromise = openDb();
+    this._dbPromise = null; // lazily (re)opened by _getDb() -- see its own comment
     this.listeners = new Set();
+    this._seenBroadcasts = new Set(); // dedup/replay guard for the channel listener below
     // Same-device, same-identity tab sync -- see header comment. Scoped by
     // email so a shared/kiosk browser's other identities never cross-talk.
     this.channel = new BroadcastChannel(`ct-webconference-chat:${identity.email.toLowerCase()}`);
+    // CADS-webconference-demo#23: this used to forward ANY same-origin
+    // BroadcastChannel post straight to the UI as a genuine peer message,
+    // no shape check, no replay guard -- any same-origin script (an XSS
+    // payload, a malicious extension content script, another same-origin
+    // app) could post a forged {from:'peer', text:'...'} and it would
+    // render as if the actual contact sent it. Note the real limit on how
+    // much this closes: a script with same-origin access can typically
+    // also read holderPriv straight out of localStorage and decrypt
+    // everything anyway, so a MAC under that same key wouldn't add a
+    // meaningful boundary here -- what these checks actually stop is
+    // malformed/stale data (a stale tab, a genuine bug) getting rendered
+    // as a real message, which is worth doing regardless of the same-
+    // origin threat model's own limits.
     this.channel.addEventListener('message', (ev) => {
-      this.clock.observe(ev.data.seq);
-      this._notify(ev.data);
+      const d = ev.data;
+      if (
+        !d || typeof d !== 'object'
+        || typeof d.peerEmail !== 'string' || !d.peerEmail
+        || (d.from !== 'me' && d.from !== 'peer')
+        || typeof d.text !== 'string'
+        || !Number.isInteger(d.seq) || !Number.isSafeInteger(d.seq) || d.seq < 0
+        || !Number.isFinite(d.ts)
+      ) {
+        return;
+      }
+      const dedupeKey = `${d.peerEmail}:${d.from}:${d.seq}`;
+      if (this._seenBroadcasts.has(dedupeKey)) return;
+      this._seenBroadcasts.add(dedupeKey);
+      if (this._seenBroadcasts.size > 500) {
+        this._seenBroadcasts.delete(this._seenBroadcasts.values().next().value); // bound growth, oldest first
+      }
+      this.clock.observe(d.seq);
+      this._notify(d);
     });
   }
 
   onMessage(fn) {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
+  }
+
+  // CADS-webconference-demo#26: openDb() closes the connection (and calls
+  // this) if another tab needs to upgrade the schema -- caching a single
+  // dbPromise forever meant every operation after that point awaited a
+  // promise that resolved to an already-closed db and just failed. Reopen
+  // on demand instead.
+  _getDb() {
+    if (!this._dbPromise) {
+      this._dbPromise = openDb(() => { this._dbPromise = null; });
+    }
+    return this._dbPromise;
   }
 
   _notify(msg) {
@@ -136,7 +234,7 @@ export class ChatStore {
   // record() below. Kept separate from record() (rather than record()
   // ticking internally) so the wire payload and the locally-persisted copy
   // can never end up with two different seqs for the same message.
-  nextSeqForSend() {
+  async nextSeqForSend() {
     return this.clock.tick();
   }
 
@@ -164,7 +262,7 @@ export class ChatStore {
       iv,
       ciphertext,
     };
-    const db = await this.dbPromise;
+    const db = await this._getDb();
     await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite');
       tx.objectStore(STORE).add(record);
@@ -176,11 +274,10 @@ export class ChatStore {
     return decoded;
   }
 
-  // Full history for one contact, decrypted, in causal (seq) order.
-  async history(peerEmail) {
-    const db = await this.dbPromise;
+  async _recordsForConversation(peerEmail) {
+    const db = await this._getDb();
     const conversation = conversationKey(this.identity.email, peerEmail);
-    const records = await new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readonly');
       const idx = tx.objectStore(STORE).index('byConversation');
       const range = IDBKeyRange.bound([conversation, -Infinity], [conversation, Infinity]);
@@ -193,31 +290,69 @@ export class ChatStore {
       };
       tx.onerror = () => reject(tx.error);
     });
+  }
+
+  // Full history for one contact, decrypted, in causal (seq) order.
+  // CADS-webconference-demo#24: one corrupted/tampered row used to fail
+  // the whole Promise.all -- a single bad record made the ENTIRE
+  // conversation (and, since pendingOutbox() used to just filter this
+  // same list, the whole outbox) permanently inaccessible. Decrypt each
+  // record independently now; an undecryptable one is skipped and
+  // surfaced as its own placeholder entry instead of taking the rest of
+  // the conversation down with it.
+  async history(peerEmail) {
+    const records = await this._recordsForConversation(peerEmail);
     return Promise.all(
-      records.map(async (r) => ({
-        peerEmail: r.peerEmail,
-        seq: r.seq,
-        from: r.from,
-        ts: r.ts,
-        pending: !!r.pending,
-        text: await this._decrypt(r.iv, r.ciphertext),
-      })),
+      records.map(async (r) => {
+        try {
+          return {
+            peerEmail: r.peerEmail,
+            seq: r.seq,
+            from: r.from,
+            ts: r.ts,
+            pending: !!r.pending,
+            text: await this._decrypt(r.iv, r.ciphertext),
+          };
+        } catch {
+          return { peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: false, text: '', corrupted: true };
+        }
+      }),
     );
   }
 
   // Outbox: every not-yet-delivered outgoing message for one peer, oldest
   // first -- what setupChatChannel's 'open' handler flushes the moment a
-  // live channel to that peer actually exists.
+  // live channel to that peer actually exists. CADS-webconference-demo#24:
+  // its own direct query now (scanning only from==='me' && pending) rather
+  // than decrypting the ENTIRE history just to filter it down -- a bad row
+  // anywhere else in the conversation can no longer block outbox delivery,
+  // and this also means one fewer bulk-decrypt on every flush attempt.
   async pendingOutbox(peerEmail) {
-    const all = await this.history(peerEmail);
-    return all.filter((m) => m.from === 'me' && m.pending);
+    const records = await this._recordsForConversation(peerEmail);
+    const out = [];
+    for (const r of records) {
+      if (r.from !== 'me' || !r.pending) continue;
+      try {
+        out.push({ peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: true, text: await this._decrypt(r.iv, r.ciphertext) });
+      } catch {
+        // Undecryptable pending row -- can't resend text we can't read.
+        // Leave it in place (still marked pending) rather than silently
+        // dropping it; surfaces via history()'s own corrupted:true entry.
+      }
+    }
+    return out;
   }
 
   // Flip a queued message to delivered once it's actually gone out over the
   // live channel. Matched by (peerEmail, seq) -- unique per conversation
-  // since seq comes from this identity's own strictly-increasing clock.
+  // in normal operation since seq comes from this identity's own
+  // strictly-increasing, now cross-tab-atomic clock (see LamportClock.tick)
+  // -- but CADS-webconference-demo#25 also asked this continue scanning
+  // past a match instead of stopping, so a duplicate-seq row surviving
+  // from before that fix (or from a peer that never got it) still gets
+  // fully cleared instead of leaving a stray duplicate stuck pending.
   async markDelivered(peerEmail, seq) {
-    const db = await this.dbPromise;
+    const db = await this._getDb();
     const conversation = conversationKey(this.identity.email, peerEmail);
     await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite');
@@ -227,9 +362,7 @@ export class ChatStore {
         const cursor = ev.target.result;
         if (!cursor) return resolve();
         if (cursor.value.seq === seq && cursor.value.pending) {
-          const updated = { ...cursor.value, pending: false };
-          cursor.update(updated);
-          return resolve();
+          cursor.update({ ...cursor.value, pending: false });
         }
         cursor.continue();
       };

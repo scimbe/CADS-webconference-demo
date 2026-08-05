@@ -622,12 +622,12 @@ function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
       chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
     }
   });
-  chatForm.addEventListener('submit', (ev) => {
+  chatForm.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const text = chatInput.value.trim();
     if (!text || channel.readyState !== 'open') return;
     if (chatStore && peerEmail) {
-      const seq = chatStore.nextSeqForSend();
+      const seq = await chatStore.nextSeqForSend();
       channel.send(JSON.stringify({ seq, text }));
       chatStore.record({ peerEmail, from: 'me', text, seq });
     } else {
@@ -801,7 +801,24 @@ logoutLink.addEventListener('click', async (ev) => {
   // browser, use the most recently used one automatically") silently
   // reuses the just-logged-out identity on the next visit instead of
   // prompting fresh. Clear it here too, or the other two fixes are moot.
-  localStorage.clear();
+  // CADS-webconference-demo#33: this used to be a blanket localStorage.clear()
+  // -- localStorage is shared across every identity this browser has ever
+  // held (loadOrCreateIdentity explicitly supports switching between
+  // several), so logging out as one identity destroyed every OTHER
+  // identity's keys, contacts, blocklist, and Lamport clock too. On a
+  // shared/kiosk browser that's silent, irreversible data loss for whoever
+  // else's identity happened to be sitting in this browser -- their
+  // encrypted IndexedDB history survives, but its keying material
+  // (holderPriv) doesn't, so it becomes permanently undecryptable. Scope
+  // the clear to exactly this identity's own keys instead.
+  if (myEmail) {
+    const suffix = `:${myEmail.toLowerCase()}`;
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith('ct-webconference-') && key.endsWith(suffix)) localStorage.removeItem(key);
+    }
+  } else {
+    localStorage.clear(); // no identity was ever established this session -- nothing identity-scoped to preserve
+  }
   try {
     await fetch('https://bunsenbrenner.org/gate/logout?host=bunsenbrenner.org', {
       credentials: 'include',
@@ -1154,11 +1171,16 @@ async function openConversation(email) {
 // happens after startCallFromIdentity's location.search reload takes the
 // page to #call-screen -- a fresh load of this conversation pane re-reads
 // history from chatStore (now delivered) next time it's opened.
-function appendConvMessage({ from, text, pending }) {
+function appendConvMessage({ from, text, pending, corrupted }) {
   const div = document.createElement('div');
   div.className = `chat-msg ${from}${pending ? ' pending' : ''}`;
   const body = document.createElement('div');
-  body.textContent = text;
+  // CADS-webconference-demo#24: a record chatStore.history() couldn't
+  // decrypt (corrupted/tampered row) comes back with corrupted:true and no
+  // text -- show that honestly instead of rendering an empty bubble as if
+  // it were a genuine blank message.
+  body.textContent = corrupted ? '⚠ this message could not be decrypted' : text;
+  if (corrupted) body.style.opacity = '.6';
   const meta = document.createElement('div');
   meta.className = 'meta';
   meta.textContent = from === 'me' ? (pending ? 'sending…' : 'you') : 'peer';
@@ -1241,7 +1263,7 @@ msgComposeForm.addEventListener('submit', async (ev) => {
   const text = msgComposeInput.value.trim();
   if (!text || !currentConversationEmail || !dialerChatStore) return;
   msgComposeInput.value = '';
-  const seq = dialerChatStore.nextSeqForSend();
+  const seq = await dialerChatStore.nextSeqForSend();
   const recorded = await dialerChatStore.record({ peerEmail: currentConversationEmail, from: 'me', text, seq, pending: true });
   appendConvMessage(recorded);
   refreshContacts(); // updates the list-pane preview text
@@ -1658,12 +1680,12 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
     }
   }
 
-  chatForm.addEventListener('submit', (ev) => {
+  chatForm.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const text = chatInput.value.trim();
     if (!text) return;
     if (chatStore && peerEmail) {
-      const seq = chatStore.nextSeqForSend();
+      const seq = await chatStore.nextSeqForSend();
       sendText(TAG_CHAT, JSON.stringify({ seq, text }));
       chatStore.record({ peerEmail, from: 'me', text, seq });
     } else {
