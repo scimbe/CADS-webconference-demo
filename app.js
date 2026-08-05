@@ -1789,16 +1789,33 @@ async function runDialer(identity, { verified = false } = {}) {
   // added to your contacts" copy, which was already the right shape for
   // this). Blocked senders never show up (server has no notion of my block
   // list, so filter client-side, same as showIncoming's own check).
-  setInterval(() => api(`/contact-requests?email=${encodeURIComponent(identity.email)}`).then((r) => {
-    for (const { fromEmail } of r.requests || []) {
-      const email = fromEmail.toLowerCase();
-      if (blockedEmails.has(email) || myContacts.has(email)) continue;
-      if (!pendingRequests.some((p) => p.email === email)) {
-        pendingRequests.push({ email });
-        renderRequests();
+  // CADS-webconference-demo#47: this had no immediate call before starting
+  // the interval -- every other poll in this function (refreshContacts,
+  // refreshAccessRequests) explicitly calls once immediately, THEN starts
+  // its interval, specifically so state that already exists by page-load
+  // time (e.g. someone added you moments before you opened the app) shows
+  // up right away instead of waiting a full interval. This is also the
+  // ONLY notification path for a contact request at all -- unlike
+  // /api/incoming, which has connectIncomingSocket's WS push as the real
+  // primary path and this poll as just its fallback -- so the missing
+  // immediate call mattered more here: a request sent just before the
+  // recipient's page finished loading waited a full 4s (reported live as
+  // "no request appeared within 5s", plausibly landing right at that edge
+  // once real network latency is added).
+  function pollContactRequests() {
+    api(`/contact-requests?email=${encodeURIComponent(identity.email)}`).then((r) => {
+      for (const { fromEmail } of r.requests || []) {
+        const email = fromEmail.toLowerCase();
+        if (blockedEmails.has(email) || myContacts.has(email)) continue;
+        if (!pendingRequests.some((p) => p.email === email)) {
+          pendingRequests.push({ email });
+          renderRequests();
+        }
       }
-    }
-  }).catch(() => {}), 4000);
+    }).catch(() => {});
+  }
+  pollContactRequests();
+  setInterval(pollContactRequests, 4000);
 
   btnDecline.addEventListener('click', () => {
     const declined = currentIncoming;
