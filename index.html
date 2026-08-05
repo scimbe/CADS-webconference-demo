@@ -167,6 +167,11 @@
  .chat-msg.me{align-self:flex-end;background:rgba(95,184,171,.14);border-color:rgba(95,184,171,.3)}
  .chat-msg .meta{font-family:var(--mono);font-size:.68rem;color:var(--muted);margin-top:.15rem}
  .chat-msg.system{align-self:center;background:transparent;border:none;color:var(--muted);font-size:.78rem;font-family:var(--mono)}
+ /* CADS-webconference-demo#50 */
+ .chat-file-image{display:block;max-width:100%;max-height:14rem;border-radius:7px;object-fit:cover}
+ .chat-file-link{display:inline-flex;align-items:center;gap:.35rem;color:var(--accent2);text-decoration:none;font-weight:600}
+ .chat-file-link:hover{text-decoration:underline}
+ .chat-file-size{display:block;font-family:var(--mono);font-size:.72rem;color:var(--muted);margin-top:.15rem}
  .chat-form{display:flex;gap:.5rem;padding:.7rem;border-top:1px solid var(--line)}
  .chat-form input{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:.5rem .7rem;font:inherit;font-size:.85rem}
  .chat-form input:focus{outline:none;border-color:var(--accent2)}
@@ -529,6 +534,8 @@
              dial-form submit logic (POST /call -> /attest ->
              startCallFromIdentity) needs no rewrite. -->
         <form class="msg-conv-input" id="msg-compose-form">
+          <button type="button" class="msg-start-call-btn" id="msg-attach-btn" aria-label="Attach a file">📎</button>
+          <input id="msg-attach-input" type="file" hidden />
           <input id="msg-compose-input" type="text" placeholder="Message… (sends once you're both connected)" autocomplete="off" />
           <button type="submit" class="msg-start-call-btn" aria-label="Send">➤</button>
         </form>

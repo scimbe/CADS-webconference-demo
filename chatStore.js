@@ -173,11 +173,18 @@ export class ChatStore {
     // origin threat model's own limits.
     this.channel.addEventListener('message', (ev) => {
       const d = ev.data;
+      // CADS-webconference-demo#50: a file record has no `text` at all
+      // (fileName/fileMimeType/fileSize + a Blob instead) -- shape-check
+      // each kind on its own terms rather than requiring every message to
+      // look like a text one.
+      const contentValid = d && (d.kind === 'file'
+        ? typeof d.fileName === 'string' && d.blob instanceof Blob
+        : typeof d.text === 'string');
       if (
         !d || typeof d !== 'object'
         || typeof d.peerEmail !== 'string' || !d.peerEmail
         || (d.from !== 'me' && d.from !== 'peer')
-        || typeof d.text !== 'string'
+        || !contentValid
         || !Number.isInteger(d.seq) || !Number.isSafeInteger(d.seq) || d.seq < 0
         || !Number.isFinite(d.ts)
       ) {
@@ -225,17 +232,34 @@ export class ChatStore {
     for (const fn of this.listeners) fn(msg);
   }
 
-  async _encrypt(text) {
+  // CADS-webconference-demo#50: generalized to raw bytes (text was always
+  // just UTF-8-encoded bytes under the hood) so file attachments use the
+  // exact same AES-GCM encrypt-at-rest path as chat text -- industry
+  // standard for this class of app (Signal/WhatsApp-style: encrypt the
+  // attachment with a key only the conversation participants hold, same
+  // as the message body), not a separate mechanism bolted on for files.
+  // AES-GCM has no meaningful size ceiling for a single-shot browser
+  // encrypt/decrypt at the sizes this app's own attachment cap allows
+  // (tens of MB) -- no streaming/chunked-encryption scheme needed.
+  async _encryptBytes(bytes) {
     const key = await this.keyPromise;
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(text));
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes);
     return { iv: Array.from(iv), ciphertext: Array.from(new Uint8Array(ciphertext)) };
   }
 
-  async _decrypt(iv, ciphertext) {
+  async _decryptBytes(iv, ciphertext) {
     const key = await this.keyPromise;
     const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(iv) }, key, new Uint8Array(ciphertext));
-    return new TextDecoder().decode(plain);
+    return new Uint8Array(plain);
+  }
+
+  async _encrypt(text) {
+    return this._encryptBytes(new TextEncoder().encode(text));
+  }
+
+  async _decrypt(iv, ciphertext) {
+    return new TextDecoder().decode(await this._decryptBytes(iv, ciphertext));
   }
 
   // Ticks this identity's Lamport clock for a new outgoing message -- call
@@ -246,6 +270,24 @@ export class ChatStore {
   // can never end up with two different seqs for the same message.
   async nextSeqForSend() {
     return this.clock.tick();
+  }
+
+  // CADS-webconference-demo#50: decrypts a stored row back into the shape
+  // callers actually want -- text records return {text}; file records
+  // decrypt the attachment bytes and hand back a Blob (native, easy to
+  // wrap in an <img>/download link) plus the in-the-clear metadata
+  // (fileName/fileMimeType/fileSize -- same trust tier as every other
+  // piece of metadata this store already keeps unencrypted, see the
+  // class's own header comment on that tradeoff). Shared by record()'s
+  // own duplicate-return path, history(), and pendingOutbox() so all
+  // three decode identically.
+  async _decodeRecord(r) {
+    const base = { peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: !!r.pending, kind: r.kind || 'text' };
+    if (r.kind === 'file') {
+      const bytes = await this._decryptBytes(r.iv, r.ciphertext);
+      return { ...base, fileName: r.fileName, fileMimeType: r.fileMimeType, fileSize: r.fileSize, blob: new Blob([bytes], { type: r.fileMimeType || 'application/octet-stream' }) };
+    }
+    return { ...base, text: await this._decrypt(r.iv, r.ciphertext) };
   }
 
   // Records a message this device sent (seq from nextSeqForSend()) or
@@ -259,7 +301,12 @@ export class ChatStore {
   // and shown immediately from the sender's own view, same as any real
   // messenger, cleared by markDelivered() once it actually goes out over
   // the live channel. Never true for a received message.
-  async record({ peerEmail, from, text, seq, received = false, pending = false }) {
+  // CADS-webconference-demo#50: kind defaults to 'text' (unchanged
+  // behavior, text param required as before); kind:'file' instead
+  // encrypts fileBytes (a Uint8Array -- the raw attachment) and stores
+  // fileName/fileMimeType/fileSize alongside it, using the exact same
+  // AES-GCM-at-rest path text already used (see _encryptBytes's comment).
+  async record({ peerEmail, from, text, seq, received = false, pending = false, kind = 'text', fileName, fileMimeType, fileSize, fileBytes }) {
     if (received) this.clock.observe(seq);
     const conversation = conversationKey(this.identity.email, peerEmail);
     const db = await this._getDb();
@@ -285,11 +332,9 @@ export class ChatStore {
         req.onerror = () => reject(req.error);
       });
       const duplicate = existing.find((r) => r.from === from);
-      if (duplicate) {
-        return { peerEmail: duplicate.peerEmail, seq, from, text: await this._decrypt(duplicate.iv, duplicate.ciphertext), ts: duplicate.ts, pending: duplicate.pending };
-      }
+      if (duplicate) return this._decodeRecord(duplicate);
     }
-    const { iv, ciphertext } = await this._encrypt(text);
+    const { iv, ciphertext } = kind === 'file' ? await this._encryptBytes(fileBytes) : await this._encrypt(text);
     const record = {
       conversation,
       peerEmail: peerEmail.toLowerCase(),
@@ -297,8 +342,10 @@ export class ChatStore {
       from, // 'me' | 'peer'
       ts: Date.now(),
       pending,
+      kind,
       iv,
       ciphertext,
+      ...(kind === 'file' ? { fileName, fileMimeType, fileSize } : {}),
     };
     await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite');
@@ -306,7 +353,12 @@ export class ChatStore {
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
-    const decoded = { peerEmail: record.peerEmail, seq, from, text, ts: record.ts, pending };
+    const decoded = kind === 'file'
+      ? { peerEmail: record.peerEmail, seq, from, ts: record.ts, pending, kind, fileName, fileMimeType, fileSize, blob: new Blob([fileBytes], { type: fileMimeType || 'application/octet-stream' }) }
+      : { peerEmail: record.peerEmail, seq, from, text, ts: record.ts, pending, kind };
+    // Blob is part of the structured-clone algorithm BroadcastChannel uses,
+    // same as every other field here -- no special-casing needed for the
+    // file case versus text.
     if (!pending) this.channel.postMessage(decoded); // other tabs don't need to see a not-yet-sent draft
     return decoded;
   }
@@ -342,16 +394,9 @@ export class ChatStore {
     return Promise.all(
       records.map(async (r) => {
         try {
-          return {
-            peerEmail: r.peerEmail,
-            seq: r.seq,
-            from: r.from,
-            ts: r.ts,
-            pending: !!r.pending,
-            text: await this._decrypt(r.iv, r.ciphertext),
-          };
+          return await this._decodeRecord(r);
         } catch {
-          return { peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: false, text: '', corrupted: true };
+          return { peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: false, kind: r.kind || 'text', text: '', corrupted: true };
         }
       }),
     );
@@ -370,9 +415,18 @@ export class ChatStore {
     for (const r of records) {
       if (r.from !== 'me' || !r.pending) continue;
       try {
-        out.push({ peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: true, text: await this._decrypt(r.iv, r.ciphertext) });
+        // CADS-webconference-demo#50: a file item needs raw bytes to chunk
+        // and send over the wire, not the Blob _decodeRecord wraps them in
+        // for display -- decrypted directly here instead of going through
+        // that helper.
+        if (r.kind === 'file') {
+          const fileBytes = await this._decryptBytes(r.iv, r.ciphertext);
+          out.push({ peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: true, kind: 'file', fileName: r.fileName, fileMimeType: r.fileMimeType, fileSize: r.fileSize, fileBytes });
+        } else {
+          out.push({ peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: true, kind: 'text', text: await this._decrypt(r.iv, r.ciphertext) });
+        }
       } catch {
-        // Undecryptable pending row -- can't resend text we can't read.
+        // Undecryptable pending row -- can't resend content we can't read.
         // Leave it in place (still marked pending) rather than silently
         // dropping it; surfaces via history()'s own corrupted:true entry.
       }

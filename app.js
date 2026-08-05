@@ -462,10 +462,23 @@ function createAckWaiter() {
 // chat panels' own two flushOutbox call sites (a separate DOM, #chat-log,
 // that doesn't have a "pending" concept at all -- addChatMessage renders
 // a live send immediately, no bubble to update).
-async function flushOutbox(chatStore, peerEmail, send, ackWaiter, onDelivered) {
+// CADS-webconference-demo#50: sendFile is an optional transport-specific
+// callback for a kind:'file' outbox item -- (m) => Promise<void>, expected
+// to have fully sent the file's init+chunks by the time it resolves (the
+// ack this function awaits right after is what actually confirms
+// delivery, same contract as a text send). Only backgroundChatSession
+// passes one today (the async/offline-capable delivery path -- the same
+// one text already uses, per the "offline behaves like messages" design);
+// the two in-call chat panels don't, so a file outbox item reaching
+// either of those two call sites is simply skipped rather than sent as
+// malformed text -- correct today since composing a file attachment only
+// ever happens from the messenger pane, which always delivers through
+// backgroundChatSession.
+async function flushOutbox(chatStore, peerEmail, send, ackWaiter, onDelivered, sendFile) {
   if (!chatStore || !peerEmail) return;
   const outbox = await chatStore.pendingOutbox(peerEmail);
   for (const m of outbox) {
+    if (m.kind === 'file' && !sendFile) continue; // this transport can't send files -- leave it pending for a transport that can
     // CADS-webconference-demo#43 (finding 3): only ackWaiter.wait() was
     // wrapped -- send() itself could throw synchronously (e.g. a data
     // channel raising InvalidStateError mid-close) and propagate straight
@@ -475,7 +488,8 @@ async function flushOutbox(chatStore, peerEmail, send, ackWaiter, onDelivered) {
     // same as an ack timeout) -- this only changes whether the failure is
     // handled cleanly or crashes out as unhandled.
     try {
-      send(JSON.stringify({ seq: m.seq, text: m.text }));
+      if (m.kind === 'file') await sendFile(m);
+      else send(JSON.stringify({ seq: m.seq, text: m.text }));
       await ackWaiter.wait(m.seq);
     } catch (e) {
       log(`flushOutbox: stopping (seq ${m.seq} to ${peerEmail} not confirmed: ${e.message || e}) -- rest stays queued for next attempt`);
@@ -510,6 +524,16 @@ function ensureWasmInit() {
 // channel open. Generous enough to comfortably cover the peer's own
 // symmetric flush-then-listen sequence on a slow connection.
 const BACKGROUND_CHAT_WINDOW_MS = 8000;
+// CADS-webconference-demo#50: BACKGROUND_CHAT_WINDOW_MS above was sized
+// for tiny text messages -- nowhere near enough for a chunked multi-MB
+// file transfer over a relayed connection. fileTransferWindowMs extends
+// the session's deadline (see backgroundChatSession) based on the
+// declared file size the moment a transfer starts, assuming a
+// deliberately pessimistic ~50KB/s floor throughput, capped at 5 minutes
+// so a stalled/hostile peer still can't hold the connection open forever.
+function fileTransferWindowMs(sizeBytes) {
+  return Math.min(5 * 60 * 1000, Math.max(BACKGROUND_CHAT_WINDOW_MS, (sizeBytes / 1024) * 50));
+}
 
 async function connectBackgroundChannel(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller) {
   const { stream, peerNoiseHex } = await joinChannel(wsUrl, grantHex, holderPrivHex);
@@ -534,7 +558,22 @@ async function connectBackgroundChannel(wsUrl, grantHex, holderPrivHex, noisePri
 // a plain WS close at the end is a normal, expected end to this session,
 // not a "peer hung up" signal the way it would be mid-call.
 async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore, peerEmail) {
-  const send = (text) => writeFramed(stream, noiseTransport.encrypt(concatBytes(new Uint8Array([TAG_CHAT]), new TextEncoder().encode(text))));
+  const sendTagged = (tag, bytes) => writeFramed(stream, noiseTransport.encrypt(concatBytes(new Uint8Array([tag]), bytes)));
+  const send = (text) => sendTagged(TAG_CHAT, new TextEncoder().encode(text));
+  // CADS-webconference-demo#50: sends a pending file outbox item's
+  // TAG_FILE_INIT header (seq/name/mimeType/size, so the receiver knows
+  // what's coming and how to reassemble it) followed by its bytes chunked
+  // at FILE_CHUNK_BYTES -- same shape as TAG_MEDIA_INIT/CHUNK already used
+  // for the experimental video path. Resolves once every chunk has been
+  // handed to the socket; flushOutbox (the caller) then awaits the ack the
+  // same way it does for a text send.
+  const sendFile = async (m) => {
+    deadline = Math.max(deadline, Date.now() + fileTransferWindowMs(m.fileBytes.length));
+    sendTagged(TAG_FILE_INIT, new TextEncoder().encode(JSON.stringify({ seq: m.seq, name: m.fileName, mimeType: m.fileMimeType, size: m.fileSize })));
+    for (let off = 0; off < m.fileBytes.length; off += FILE_CHUNK_BYTES) {
+      sendTagged(TAG_FILE_CHUNK, m.fileBytes.subarray(off, off + FILE_CHUNK_BYTES));
+    }
+  };
   const ackWaiter = createAckWaiter();
   // Runs CONCURRENTLY with the receive loop below, not before it -- flushOutbox
   // now awaits an ack for each send, and that ack can only ever arrive via
@@ -551,14 +590,64 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
   // is open.
   const flushPromise = flushOutbox(chatStore, peerEmail, send, ackWaiter, (seq) => {
     if (currentConversationEmail === peerEmail.toLowerCase()) markConvMessageDelivered(seq);
-  });
-  const deadline = Date.now() + BACKGROUND_CHAT_WINDOW_MS;
+  }, sendFile);
+  // CADS-webconference-demo#50: an in-progress incoming file transfer --
+  // only one at a time can be in flight (the sender's own flushOutbox is
+  // ack-gated, one outbox item fully delivered before the next starts), so
+  // tracking a single "current" transfer by seq is enough, no need to key
+  // this by anything else.
+  let incomingFile = null;
+  // CADS-webconference-demo#50: mutable (not const) -- extended by
+  // fileTransferWindowMs whenever a file transfer starts, in either
+  // direction (sendFile below, and the TAG_FILE_INIT receive handler),
+  // since BACKGROUND_CHAT_WINDOW_MS alone is nowhere near enough for a
+  // multi-MB chunked transfer.
+  let deadline = Date.now() + BACKGROUND_CHAT_WINDOW_MS;
   try {
     while (Date.now() < deadline) {
       const cipher = await readFramed(stream, deadline - Date.now());
       const plain = noiseTransport.decrypt(cipher);
-      if (plain[0] !== TAG_CHAT) continue;
-      const raw = new TextDecoder().decode(plain.slice(1));
+      const tag = plain[0];
+      const payload = plain.slice(1);
+      if (tag === TAG_FILE_INIT) {
+        let header;
+        try {
+          header = JSON.parse(new TextDecoder().decode(payload));
+        } catch {
+          continue; // malformed header -- nothing to reassemble
+        }
+        if (typeof header.size === 'number' && header.size > MAX_FILE_BYTES) {
+          log(`incoming file from ${peerEmail} exceeds the ${MAX_FILE_BYTES} byte cap (${header.size}) -- refusing to buffer it`);
+          incomingFile = null;
+          continue;
+        }
+        incomingFile = { seq: header.seq, name: header.name, mimeType: header.mimeType, size: header.size, chunks: [], received: 0 };
+        deadline = Math.max(deadline, Date.now() + fileTransferWindowMs(header.size || 0));
+        continue;
+      }
+      if (tag === TAG_FILE_CHUNK) {
+        if (!incomingFile) continue; // chunk with no preceding (or an already-abandoned) init -- nothing to append to
+        incomingFile.received += payload.length;
+        if (incomingFile.received > MAX_FILE_BYTES) {
+          log(`incoming file from ${peerEmail} exceeded the size cap mid-transfer -- abandoning it`);
+          incomingFile = null;
+          continue;
+        }
+        incomingFile.chunks.push(payload);
+        if (incomingFile.received < incomingFile.size) continue; // more chunks still coming
+        const fileBytes = concatBytes(...incomingFile.chunks);
+        const { seq, name, mimeType, size } = incomingFile;
+        incomingFile = null;
+        if (chatStore && peerEmail) {
+          const recorded = await chatStore.record({ peerEmail, from: 'peer', seq, received: true, kind: 'file', fileName: name, fileMimeType: mimeType, fileSize: size, fileBytes });
+          send(JSON.stringify({ ack: seq }));
+          if (currentConversationEmail === peerEmail.toLowerCase()) appendConvMessage(recorded);
+          refreshContacts();
+        }
+        continue;
+      }
+      if (tag !== TAG_CHAT) continue;
+      const raw = new TextDecoder().decode(payload);
       let parsed;
       try {
         parsed = JSON.parse(raw);
@@ -932,6 +1021,8 @@ const msgCallBtn = document.getElementById('msg-call-btn');
 const msgBlockBtn = document.getElementById('msg-block-btn');
 const msgComposeForm = document.getElementById('msg-compose-form');
 const msgComposeInput = document.getElementById('msg-compose-input');
+const msgAttachBtn = document.getElementById('msg-attach-btn');
+const msgAttachInput = document.getElementById('msg-attach-input');
 const convAvatar = document.getElementById('conv-avatar');
 const convName = document.getElementById('conv-name');
 const convStatus = document.getElementById('conv-status');
@@ -1232,7 +1323,9 @@ async function renderContacts(contacts) {
         time.className = 'msg-row-time';
         time.textContent = formatMsgTime(last.ts);
         top.appendChild(time);
-        preview.textContent = last.from === 'me' ? `You: ${last.text}` : last.text;
+        // CADS-webconference-demo#50: a file record has no .text at all.
+        const lastSummary = last.kind === 'file' ? `📎 ${last.fileName || 'file'}` : last.text;
+        preview.textContent = last.from === 'me' ? `You: ${lastSummary}` : lastSummary;
       }
     }
     body.append(top, preview);
@@ -1434,17 +1527,57 @@ async function openConversation(email) {
 // conversation) lets markConvMessageDelivered below find this exact bubble
 // again later and flip it live -- see #49's comment on flushOutbox's
 // onDelivered for why that's needed now.
-function appendConvMessage({ from, text, pending, corrupted, seq }) {
+// CADS-webconference-demo#50: formats a byte count the same way any real
+// file-transfer UI does (nearest sensible unit, not a raw byte count).
+function formatFileSize(bytes) {
+  if (bytes == null) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+function appendConvMessage({ from, text, pending, corrupted, seq, kind, fileName, fileMimeType, fileSize, blob }) {
   const div = document.createElement('div');
   div.className = `chat-msg ${from}${pending ? ' pending' : ''}`;
   if (from === 'me' && seq != null) div.dataset.seq = seq;
   const body = document.createElement('div');
-  // CADS-webconference-demo#24: a record chatStore.history() couldn't
-  // decrypt (corrupted/tampered row) comes back with corrupted:true and no
-  // text -- show that honestly instead of rendering an empty bubble as if
-  // it were a genuine blank message.
-  body.textContent = corrupted ? '⚠ this message could not be decrypted' : text;
-  if (corrupted) body.style.opacity = '.6';
+  if (corrupted) {
+    // CADS-webconference-demo#24: a record chatStore.history() couldn't
+    // decrypt (corrupted/tampered row) comes back with corrupted:true and
+    // no text -- show that honestly instead of rendering an empty bubble
+    // as if it were a genuine blank message.
+    body.textContent = '⚠ this message could not be decrypted';
+    body.style.opacity = '.6';
+  } else if (kind === 'file') {
+    // CADS-webconference-demo#50: an image renders inline (click to open
+    // full-size in a new tab, same pattern any real messenger uses);
+    // anything else renders as a filename + size + download link -- no
+    // in-page preview attempted for arbitrary file types.
+    const url = URL.createObjectURL(blob);
+    if ((fileMimeType || '').startsWith('image/')) {
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = fileName || 'image';
+      img.className = 'chat-file-image';
+      link.appendChild(img);
+      body.appendChild(link);
+    } else {
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName || 'file';
+      link.className = 'chat-file-link';
+      link.textContent = `📎 ${fileName || 'file'}`;
+      const size = document.createElement('span');
+      size.className = 'chat-file-size';
+      size.textContent = formatFileSize(fileSize);
+      body.append(link, size);
+    }
+  } else {
+    body.textContent = text;
+  }
   const meta = document.createElement('div');
   meta.className = 'meta';
   meta.textContent = from === 'me' ? (pending ? 'sending…' : 'you') : 'peer';
@@ -1566,6 +1699,31 @@ msgComposeForm.addEventListener('submit', async (ev) => {
   const recorded = await dialerChatStore.record({ peerEmail: currentConversationEmail, from: 'me', text, seq, pending: true });
   appendConvMessage(recorded);
   refreshContacts(); // updates the list-pane preview text
+  if (myIdentity) tryBackgroundDeliver(myIdentity, currentConversationEmail);
+});
+// CADS-webconference-demo#50: attaching a file goes through the exact
+// same pending-record -> outbox -> tryBackgroundDeliver path composing
+// text does (see msgComposeForm's own handler just above) -- "offline
+// behaves like messages" was the explicit design call here, so a file
+// picked while the peer is offline queues and delivers automatically once
+// they're back, same guarantee text already has.
+msgAttachBtn.addEventListener('click', () => msgAttachInput.click());
+msgAttachInput.addEventListener('change', async () => {
+  const file = msgAttachInput.files[0];
+  msgAttachInput.value = ''; // let the same file be picked again later
+  if (!file || !currentConversationEmail || !dialerChatStore) return;
+  if (file.size > MAX_FILE_BYTES) {
+    setCallNote('warn', `"${file.name}" is ${formatFileSize(file.size)} -- the limit is ${formatFileSize(MAX_FILE_BYTES)}.`);
+    return;
+  }
+  const fileBytes = new Uint8Array(await file.arrayBuffer());
+  const seq = await dialerChatStore.nextSeqForSend();
+  const recorded = await dialerChatStore.record({
+    peerEmail: currentConversationEmail, from: 'me', seq, pending: true,
+    kind: 'file', fileName: file.name, fileMimeType: file.type, fileSize: file.size, fileBytes,
+  });
+  appendConvMessage(recorded);
+  refreshContacts();
   if (myIdentity) tryBackgroundDeliver(myIdentity, currentConversationEmail);
 });
 msgBlockBtn.addEventListener('click', () => {
@@ -1996,6 +2154,20 @@ const TAG_MEDIA_INIT = 1;
 const TAG_MEDIA_CHUNK = 2;
 const TAG_CHAT = 3;
 const TAG_BYE = 4;
+// CADS-webconference-demo#50: same tagged-frame pattern as TAG_MEDIA_*
+// above (used for the experimental video path) -- FILE_INIT carries a
+// small JSON header (seq/name/mimeType/size) as a text frame, FILE_CHUNK
+// carries raw chunked bytes, reassembled by total size on the receiving
+// end exactly like TAG_MEDIA_CHUNK already is.
+const TAG_FILE_INIT = 5;
+const TAG_FILE_CHUNK = 6;
+// 25MB: a well-known, widely-recognized web-app attachment ceiling (the
+// same order of magnitude as Gmail's own long-standing attachment limit) --
+// generous for a real file/image/document, small enough that a chunked
+// transfer over a relayed channel finishes in a reasonable time instead of
+// minutes.
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const FILE_CHUNK_BYTES = 49152; // matches TAG_MEDIA_CHUNK's own chunk size below
 
 async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatStore, peerEmail) {
   setStatus('connecting-media');
