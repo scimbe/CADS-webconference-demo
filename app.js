@@ -143,6 +143,9 @@ function addChatMessage(text, who) {
 // chat messages are normal), just there to fail loudly instead of hanging
 // silently forever if something ever stalls the underlying byte stream.
 const STALL_TIMEOUT_MS = 60000;
+// See readLine()'s own comment -- its one real caller expects at most a few
+// hundred bytes; this is a generous multiple of that, not a tight fit.
+const MAX_LINE_BYTES = 4096;
 
 class WsByteStream {
   constructor(ws) {
@@ -236,6 +239,14 @@ class WsByteStream {
         this.totalLen -= idx + 1;
         return new TextDecoder().decode(out);
       }
+      // CADS-webconference-demo#38 (finding 8): the only caller (joinChannel,
+      // reading the bridge's one-line ack response) expects at most a few
+      // hundred bytes -- STALL_TIMEOUT_MS above only bounds growth if bytes
+      // stop arriving entirely; a server streaming continuous bytes with no
+      // '\n' would otherwise never stall and grow this buffer unboundedly.
+      // A generous cap catches that case without touching readExact, which
+      // legitimately needs to handle large media-chunk frames.
+      if (buf.length > MAX_LINE_BYTES) throw new Error(`readLine exceeded ${MAX_LINE_BYTES} bytes with no newline -- treating as a malformed/hostile stream`);
       if (this.closed) throw new Error('connection closed while reading a line');
       // No fixed target length here (we don't know where '\n' will land) --
       // wait for strictly more bytes than we currently have, so this
@@ -334,6 +345,17 @@ capture device attached in this environment`);
   return media;
 }
 
+// CADS-webconference-demo#38 (finding 7): switchCamera needs the active
+// RTCPeerConnection but is declared outside run()'s closure (it's shared by
+// both transports' hangup/control wiring) -- this used to be reached via
+// `window.__ctVideoCallDemo.pc`, a live handle any script on the page
+// (extension, or an XSS if one ever landed despite the CSP) could use to
+// drive the call, decrypt/encrypt arbitrary Noise frames, or inject
+// signaling. A module-private variable gives switchCamera the same access
+// without handing it to the whole page. Only ever set/cleared from run()'s
+// own webrtc branch below.
+let activeWebrtcPc = null;
+
 // Live front/back swap. Always correct for the local preview (video elements
 // track live additions/removals on the SAME MediaStream object). For an
 // active WebRTC call, also pushes the new track to the peer via
@@ -355,9 +377,8 @@ async function switchCamera(media) {
     }
     media.stream.addTrack(newTrack);
     currentFacingMode = nextFacingMode;
-    const pc = window.__ctVideoCallDemo?.pc;
-    if (pc) {
-      const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+    if (activeWebrtcPc) {
+      const sender = activeWebrtcPc.getSenders().find((s) => s.track && s.track.kind === 'video');
       if (sender) await sender.replaceTrack(newTrack);
     }
   } catch (e) {
@@ -1041,7 +1062,27 @@ let pendingRequests = [];
 // The list itself is now MY CONTACTS (myContacts, local), not raw presence
 // -- /api/contacts (presence) is only consulted to annotate each contact's
 // online/offline status, not to decide who's shown at all.
+// CADS-webconference-demo#38 (finding 4): called from a 5s setInterval AND
+// directly after almost every user action (send, open conversation, add/
+// remove contact...) without awaiting/serializing either. On a slow network
+// -- where the earlier /contacts round-trip is still in flight when the
+// next trigger fires -- multiple overlapping calls raced renderContacts's
+// own clear-and-rebuild of the list DOM, and each one recomputed the same
+// currentConversationEmail status independently. Callers that DO await
+// refreshContacts() (e.g. openConversation) still need a real completion
+// signal, not a silent no-op, so an in-flight overlap joins the SAME
+// promise instead of being dropped.
+let refreshContactsInFlight = null;
 async function refreshContacts() {
+  if (refreshContactsInFlight) return refreshContactsInFlight;
+  refreshContactsInFlight = doRefreshContacts();
+  try {
+    await refreshContactsInFlight;
+  } finally {
+    refreshContactsInFlight = null;
+  }
+}
+async function doRefreshContacts() {
   const mine = myContacts.all();
   // CADS-webconference-demo#11: scoped to exactly the emails this call
   // needs presence for -- see the endpoint's own comment for why. Already
@@ -1975,6 +2016,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
         } else if (tag === TAG_BYE) {
           setStatus('peer-hung-up');
           addChatMessage('peer hung up', 'system');
+          byteStream.ws.close(); // CADS-webconference-demo#38 (finding 9) -- see setupControls' onHangup callback's matching comment
           returnToDialerAfterHangup();
           return;
         }
@@ -1982,6 +2024,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
         log(`channel receive loop: bad frame, ending call: ${e.message}`);
         setStatus('peer-hung-up');
         addChatMessage('connection lost (a corrupted or unexpected frame arrived)', 'system');
+        byteStream.ws.close();
         returnToDialerAfterHangup();
         return;
       }
@@ -2042,11 +2085,16 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   setupControls(media, () => {
     sendTagged(TAG_BYE, new Uint8Array(0));
     if (recorder && recorder.state !== 'inactive') recorder.stop();
+    // CADS-webconference-demo#38 (finding 9): neither hangup path closed the
+    // underlying signaling WS -- it lingered open until
+    // returnToDialerAfterHangup's ~1200ms-delayed reload tore down the whole
+    // page. Explicit close here (mirrors backgroundChatSession's own
+    // stream.ws.close() in its finally block) frees it immediately instead.
+    byteStream.ws.close();
   });
 
   setIceState('connected'); // no real ICE in this mode -- 'connected' just reflects the channel being fully up
   setStatus('in-call');
-  window.__ctVideoCallDemo = { sendBye: () => sendTagged(TAG_BYE, new Uint8Array(0)) };
 }
 
 async function run() {
@@ -2180,6 +2228,12 @@ async function run() {
     setStatus('peer-hung-up');
     addChatMessage(`peer connection lost (${reason})`, 'system');
     pc.close();
+    activeWebrtcPc = null;
+    // CADS-webconference-demo#38 (finding 9): the Noise/ws_channel signaling
+    // socket is a separate connection from the RTCPeerConnection itself --
+    // closing pc alone left it open until returnToDialerAfterHangup's
+    // reload tore down the page.
+    stream.ws.close();
     returnToDialerAfterHangup();
   }
 
@@ -2301,8 +2355,10 @@ async function run() {
     sessionEnded = true; // before pc.close(), so the heartbeat/connection-state
     // watchdogs above see the session as already-ended and don't also fire
     // a redundant "peer connection lost" on top of our own local hang-up.
-    window.__ctVideoCallDemo?.sendSignal(wasm.encodeSignalBye());
+    sendSignal(wasm.encodeSignalBye()); // already in scope here -- no need to bounce through the (now-removed) window global
     pc.close();
+    activeWebrtcPc = null;
+    stream.ws.close(); // CADS-webconference-demo#38 (finding 9) -- see endCallDueToPeerLoss's matching comment
   });
 
   // Background loop: every subsequent signaling message (from here on the
@@ -2341,6 +2397,8 @@ async function run() {
           setStatus('peer-hung-up');
           addChatMessage('peer hung up', 'system');
           pc.close();
+          activeWebrtcPc = null;
+          stream.ws.close(); // CADS-webconference-demo#38 (finding 9) -- see endCallDueToPeerLoss's matching comment
           returnToDialerAfterHangup();
           return;
         }
@@ -2350,6 +2408,8 @@ async function run() {
         setStatus('peer-hung-up');
         addChatMessage('connection lost (a corrupted or unexpected signaling frame arrived)', 'system');
         pc.close();
+        activeWebrtcPc = null;
+        stream.ws.close();
         returnToDialerAfterHangup();
         return;
       }
@@ -2363,7 +2423,7 @@ async function run() {
   }
 
   setStatus('signaling-active');
-  window.__ctVideoCallDemo = { pc, noiseTransport, sendSignal };
+  activeWebrtcPc = pc; // CADS-webconference-demo#38 (finding 7) -- see activeWebrtcPc's own declaration comment
 }
 
 run().catch((e) => {
