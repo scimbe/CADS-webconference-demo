@@ -32,6 +32,33 @@
 const http = require('http');
 const { execFile } = require('child_process');
 const crypto = require('crypto');
+const fs = require('fs');
+
+// CADS-webconference-demo#30: these three are this bridge's highest-value
+// secrets (the operator key can mint grants for any channel; the OIDC
+// secret and portal session cookie authenticate as the workflow-maintainer
+// account against the control plane) -- all three used to live as plain
+// `environment:` entries in the compose file, readable via `docker
+// inspect`/`docker compose config`/`/proc/1/environ` by anyone who can
+// reach the host or the docker socket. Standard Docker-secrets convention
+// (same one the official postgres/mysql images use): if `<NAME>_FILE` is
+// set, read the value from that file (a Docker `secrets:` mount lands at
+// /run/secrets/<name>, never in `environment:` or `docker inspect`
+// output); otherwise fall back to the plain env var, so an operator who
+// hasn't migrated to secrets yet isn't broken by this. Full closure needs
+// the docker-compose secrets: wiring, not just this read-side support.
+function readSecret(name) {
+  const filePath = process.env[`${name}_FILE`];
+  if (filePath) {
+    try {
+      return fs.readFileSync(filePath, 'utf8').trim();
+    } catch (e) {
+      console.error(`bridge: failed to read ${name}_FILE (${filePath}):`, e.message);
+      return undefined;
+    }
+  }
+  return process.env[name];
+}
 
 const LISTEN = process.env.WEBCONFERENCE_BRIDGE_LISTEN || '0.0.0.0:8791';
 const CP_URL = process.env.CT_AGENT_CP_URL || 'https://bunsenbrenner.org';
@@ -49,7 +76,7 @@ if (!AGENT_HOSTNAME) {
   process.exit(1);
 }
 const WS_URL = `wss://${AGENT_HOSTNAME}/ws/channel`;
-const OPERATOR_KEY = process.env.CT_CHANNEL_OPERATOR_KEY; // 64-hex private key, from `ct-agent channel operator-init`
+const OPERATOR_KEY = readSecret('CT_CHANNEL_OPERATOR_KEY'); // 64-hex private key, from `ct-agent channel operator-init`
 const GRANT_BIN = process.env.CT_VIDEO_CALL_GRANT_BIN || '/usr/local/bin/ct-video-call-grant';
 // This tunnel's own portal id (the UUID-ish string in /portal/tunnels/:id/...),
 // needed only for the login-allowlist add/remove proxy below -- optional
@@ -262,7 +289,7 @@ function mintGrants(holderAPub, holderBPub) {
 // ("POST /me/channels -> 401 missing bearer token") every time whichever
 // human-minted credential happened to expire between manual refreshes.
 const OIDC_CLIENT_ID = process.env.CT_OIDC_CLIENT_ID;
-const OIDC_CLIENT_SECRET = process.env.CT_OIDC_CLIENT_SECRET;
+const OIDC_CLIENT_SECRET = readSecret('CT_OIDC_CLIENT_SECRET');
 const OIDC_TOKEN_URL = process.env.CT_OIDC_TOKEN_URL || 'https://auth.bunsenbrenner.org/realms/ct-demo/protocol/openid-connect/token';
 
 let cachedToken = null; // { value, expiresAt } -- expiresAt in epoch ms
@@ -288,7 +315,7 @@ async function getBearerToken() {
 async function cpFetch(path, body) {
   const serviceToken = await getBearerToken();
   const token = serviceToken || process.env.CT_OIDC_TOKEN;
-  const sessionCookie = process.env.CT_PORTAL_SESSION_COOKIE;
+  const sessionCookie = readSecret('CT_PORTAL_SESSION_COOKIE');
   const headers = { 'content-type': 'application/json' };
   if (token) headers['authorization'] = `Bearer ${token}`;
   else if (sessionCookie) headers['cookie'] = `ct_portal_session=${sessionCookie}`;
@@ -304,7 +331,7 @@ async function cpFetch(path, body) {
 // `redirect: 'manual'` avoids needlessly following the 302 back to the full
 // /portal/tunnels HTML page -- an opaque redirect (status 0) means success.
 async function cpFetchForm(path, fields) {
-  const sessionCookie = process.env.CT_PORTAL_SESSION_COOKIE;
+  const sessionCookie = readSecret('CT_PORTAL_SESSION_COOKIE');
   if (!sessionCookie) return { status: 401, text: 'CT_PORTAL_SESSION_COOKIE not configured' };
   const resp = await fetch(`${CP_URL}${path}`, {
     method: 'POST',
@@ -838,7 +865,7 @@ server.listen(Number(port), host, () => {
     ? 'service-account (self-refreshing)'
     : process.env.CT_OIDC_TOKEN
       ? 'static bearer token (will expire, no refresh)'
-      : process.env.CT_PORTAL_SESSION_COOKIE
+      : readSecret('CT_PORTAL_SESSION_COOKIE')
         ? 'portal session cookie (will expire in ~8h, no refresh; login-allowlist add/remove needs this regardless)'
         : 'NONE -- registration will fail';
   console.log(`webconference-demo-bridge listening on ${LISTEN} (cp=${CP_URL}, registration auth: ${authMode})`);

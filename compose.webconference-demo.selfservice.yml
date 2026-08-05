@@ -58,6 +58,33 @@ services:
       # gate-verified caller (with a startup warning), matching the old
       # behaviour until this is actually set.
       - WEBCONFERENCE_ADMIN_EMAILS=${WEBCONFERENCE_ADMIN_EMAILS:-}
+      # CADS-webconference-demo#30: these three (CT_CHANNEL_OPERATOR_KEY,
+      # CT_OIDC_CLIENT_SECRET, CT_PORTAL_SESSION_COOKIE) are this bridge's
+      # highest-value secrets -- plain `environment:` entries are readable
+      # via `docker inspect`/`docker compose config`/`/proc/1/environ` by
+      # anyone who can reach this host or the docker socket. server.js now
+      # supports the standard Docker-secrets convention for all three: set
+      # `<NAME>_FILE=/run/secrets/<name>` instead and it reads the value
+      # from that file (never landing in `environment:` at all). NOT
+      # switched over here yet -- that needs the actual secret VALUES
+      # written to real files outside this repo (e.g. under a
+      # git-ignored ./secrets/ directory) and this service's `secrets:`
+      # list wired to them; left as plain env vars below (unchanged
+      # behavior) until an operator does that migration deliberately.
+      # Example of what the migration looks like, once the files exist:
+      #   secrets:
+      #     - ct_channel_operator_key
+      #     - ct_oidc_client_secret
+      #     - ct_portal_session_cookie
+      # (as service-level entries here) plus, at the top level of this file:
+      #   secrets:
+      #     ct_channel_operator_key: { file: ./secrets/ct_channel_operator_key.txt }
+      #     ct_oidc_client_secret: { file: ./secrets/ct_oidc_client_secret.txt }
+      #     ct_portal_session_cookie: { file: ./secrets/ct_portal_session_cookie.txt }
+      # and then set (replacing the three CT_*_FILE-less lines below):
+      #   CT_CHANNEL_OPERATOR_KEY_FILE=/run/secrets/ct_channel_operator_key
+      #   CT_OIDC_CLIENT_SECRET_FILE=/run/secrets/ct_oidc_client_secret
+      #   CT_PORTAL_SESSION_COOKIE_FILE=/run/secrets/ct_portal_session_cookie
       - CT_CHANNEL_OPERATOR_KEY=${WEBCONFERENCE_OPERATOR_KEY:?this demo's channel operator private key, 64-hex, from ct-agent channel operator-init}
       # Preferred: a durable service-account credential (POST
       # /me/service-accounts from the portal) -- doesn't expire on its own,
