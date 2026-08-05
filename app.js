@@ -63,6 +63,19 @@ function sanitizeErrorMessage(msg) {
   return String(msg).replace(/\b[0-9a-fA-F]{64}\b/g, '[redacted]');
 }
 
+// CADS-webconference-demo#40 (finding 4): every real email entry point
+// (identity screen, add-contact search, revoke access) uses an
+// `<input type="email">`, which DOES block obviously-malformed input at the
+// browser's own native-constraint-validation layer before the submit event
+// even fires -- but that's not a substitute for an explicit check the app
+// itself owns: it doesn't fire for requestSubmit()-driven submissions in
+// every browser, isn't guaranteed if a future change adds `novalidate`, and
+// gives no control over the error message shown. One shared, deliberately
+// simple (not full RFC 5322) helper, applied at each real entry point below.
+function isValidEmail(s) {
+  return typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
 function log(msg) {
   // Timestamped (HH:MM:SS.mmm) so the Technical readout panel can show how
   // far apart events actually happened -- important for diagnosing stalls/
@@ -778,7 +791,16 @@ function showCallScreen() {
 // attestation (matching ct_common::channel::member_noise_attest_bytes byte
 // for byte), and talks to the bridge only in public keys / signatures.
 
+// CADS-webconference-demo#40 (finding 2): used to silently truncate an
+// odd-length input (new Uint8Array(hex.length / 2) floors) and never
+// validated the characters -- parseInt('zz', 16) is NaN, silently baked
+// into the output as byte 0. A malformed hex string produced a different,
+// but still valid-looking, byte sequence instead of an error pointing at
+// the actual problem.
 function hexToBytes(hex) {
+  if (typeof hex !== 'string' || hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
+    throw new Error(`hexToBytes: not a valid even-length hex string (got ${JSON.stringify(hex)})`);
+  }
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
   return out;
@@ -1386,8 +1408,16 @@ function setAccessNote(kind, text) {
 
 accessRemoveForm.addEventListener('submit', async (ev) => {
   ev.preventDefault();
-  const email = accessRemoveEmail.value.trim();
+  // CADS-webconference-demo#40 (finding 1): localSetFor's own add()/has()
+  // already lowercase internally, so blockedEmails.add(email) below was
+  // never actually bypassable by case alone -- but /allowlist/remove sends
+  // this straight to the control plane's own login-allowlist endpoint with
+  // no normalization at all, and every OTHER email this codebase touches
+  // (identity storage, contacts, block list) is treated case-insensitively.
+  // Normalizing here too, consistently.
+  const email = accessRemoveEmail.value.trim().toLowerCase();
   if (!email) return;
+  if (!isValidEmail(email)) return setAccessNote('error', `"${email}" doesn't look like a valid email address.`);
   accessRemoveConsoleLink.hidden = true;
   setAccessNote('info', `Revoking access for ${email}…`);
   const resp = await api('/allowlist/remove', { body: { email, callerEmail: myEmail } });
@@ -1424,6 +1454,15 @@ msgSearchForm.addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const email = msgSearchInput.value.trim().toLowerCase();
   if (!email) return;
+  // CADS-webconference-demo#40 (finding 4): this input's own type="email"
+  // already blocks obviously-malformed values via the browser's native
+  // constraint validation before submit even fires -- an explicit check
+  // here is defense in depth (doesn't depend on that always firing) using
+  // the input's own built-in validity UI rather than a new note element.
+  if (!isValidEmail(email)) {
+    msgSearchInput.reportValidity();
+    return;
+  }
   msgSearchInput.value = '';
   myContacts.add(email);
   const resp = await api('/allowlist/add', { body: { email } });
@@ -1813,8 +1852,16 @@ async function runIdentityScreen() {
 
   idForm.addEventListener('submit', async (ev) => {
     ev.preventDefault();
-    const email = idEmailInput.value.trim();
+    const email = idEmailInput.value.trim().toLowerCase();
     if (!email) return;
+    // CADS-webconference-demo#40 (finding 4) -- see isValidEmail's own
+    // comment. This is the identity that ends up keying localStorage/
+    // IndexedDB for everything else in the app, so it's worth an explicit
+    // check even beyond the input's own type="email".
+    if (!isValidEmail(email)) {
+      idEmailInput.reportValidity();
+      return;
+    }
     const identity = loadOrCreateIdentity(email);
     await runDialer(identity);
   });
@@ -2122,14 +2169,27 @@ async function run() {
   const grantHex = params.get('grant');
   let holderPrivHex = params.get('holderPriv');
   let noisePrivHex = params.get('noisePriv');
-  const role = params.get('role'); // 'caller' | 'callee'
+  // CADS-webconference-demo#40 (finding 5): role used to be accepted as
+  // whatever string showed up in the URL -- isCaller below just checked
+  // `=== 'caller'`, so ANY other value (a typo, a stale/hand-edited link)
+  // silently became "callee" instead of failing. Narrowed to the only two
+  // real values.
+  const roleParam = params.get('role');
+  const role = roleParam === 'caller' || roleParam === 'callee' ? roleParam : null;
   const transportMode = params.get('transport') === 'channel' ? 'channel' : 'webrtc';
   // Optional for a manually-built call link, which has no identity to key
   // the chat store to -- chat just isn't persisted for that session, same
   // as always. Unconditional (not just chat-store keying) for every
   // in-app call now -- see the #13 key-recovery block right below.
-  const myEmail = params.get('myEmail');
-  const peerEmail = params.get('peerEmail');
+  // CADS-webconference-demo#40 (finding 3): these come straight from the
+  // URL with no shape check -- an invalid value would still key the
+  // encrypted chat store's IndexedDB rows under whatever garbage was in the
+  // query string. Treated the same as "absent" (chat just isn't persisted)
+  // rather than used as-is, same reasoning as the length checks above.
+  const myEmailParam = params.get('myEmail');
+  const peerEmailParam = params.get('peerEmail');
+  const myEmail = isValidEmail(myEmailParam) ? myEmailParam : null;
+  const peerEmail = isValidEmail(peerEmailParam) ? peerEmailParam : null;
 
   if (!wsUrl || !grantHex || !role) {
     await runIdentityScreen();
