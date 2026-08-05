@@ -90,6 +90,8 @@
   border-radius:10px;padding:.7rem 1rem;margin-top:.6rem;font-size:.92rem;color:var(--accent);font-weight:600;flex-basis:100%}
  .connecting-banner .spinner{width:1rem;height:1rem;border-radius:50%;border:2px solid rgba(217,138,79,.3);border-top-color:var(--accent);
   flex-shrink:0;animation:connecting-spin .8s linear infinite}
+ .connecting-banner .reconnect-btn{font-family:inherit;background:var(--accent);color:#2b1608;border:none;border-radius:8px;
+  padding:.35rem .8rem;font-size:.82rem;font-weight:600;cursor:pointer;margin-left:auto}
  @media (prefers-reduced-motion: reduce){.connecting-banner .spinner{animation:none}}
  @keyframes connecting-spin{to{transform:rotate(360deg)}}
  .status-pill[data-live="0"] .dot{background:var(--danger)}
@@ -426,6 +428,28 @@
   <div class="msg-topbar">
     <div class="msg-brand"><span class="flame"></span>Messages</div>
     <button class="msg-icon-btn" id="msg-menu-toggle" type="button" aria-label="Menu">⋮</button>
+  </div>
+
+  <!-- CADS-webconference-demo#38 (finding 1): the messenger's own background
+       polls (heartbeat/incoming/contacts/access-requests) used to silently
+       parse a 5xx as if it were a real response and keep hammering a downed
+       bridge with no visible sign anything was wrong -- api() now tracks
+       consecutive failures and this banner surfaces that instead of nothing. -->
+  <div class="connecting-banner" id="conn-trouble-banner" hidden>
+    <span class="spinner" aria-hidden="true"></span>
+    <span>Connection trouble — retrying…</span>
+  </div>
+
+  <!-- CADS-webconference-demo#38 (finding 2): the presence socket used to
+       retry forever with no way to stop short of a page reload, so an
+       abandoned background tab would reconnect every ~30s indefinitely.
+       It now gives up after a capped number of attempts and surfaces this
+       instead -- incoming calls still arrive via the /api/incoming poll
+       fallback either way, this only affects the instant WS push and the
+       "someone cancelled" live notice. -->
+  <div class="connecting-banner" id="presence-lost-banner" hidden>
+    <span>Live connection lost.</span>
+    <button type="button" id="presence-reconnect-btn" class="reconnect-btn">Reconnect</button>
   </div>
 
   <div class="msg-menu" id="msg-menu" hidden>

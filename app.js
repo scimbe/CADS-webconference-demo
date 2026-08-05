@@ -1204,10 +1204,34 @@ function setCallNote(kind, text) {
   callNote.textContent = text;
 }
 
+// CADS-webconference-demo#38 (finding 1): consecutive api() failures (a
+// non-2xx response, or the network-error catch below) toggle a shared
+// "connection trouble" banner in the messenger shell. Previously a downed
+// bridge's 502s were parsed as if they were real JSON responses -- every
+// background poll (heartbeat/incoming/contacts/access-requests) kept
+// hammering it at full cadence with no visible sign anything was wrong.
+// This doesn't change poll cadence itself (a real backoff/coordinator
+// across all six independent pollers is its own architectural piece, #38
+// finding 3, deliberately left for a separate pass) -- it makes the outage
+// observable to the user instead of silent, and gives every caller a
+// reliable `.error`/`._status` to check instead of guessing from a body
+// shape that may or may not be present.
+let apiConsecutiveFailures = 0;
+function noteApiResult(ok) {
+  apiConsecutiveFailures = ok ? 0 : apiConsecutiveFailures + 1;
+  const banner = document.getElementById('conn-trouble-banner');
+  if (banner) banner.hidden = apiConsecutiveFailures < 3;
+}
+
 // Never throws -- a network blip, a dropped connection, or a non-JSON error
 // page all collapse to `{ error: '...' }` instead of an unhandled rejection
 // that would otherwise leave whatever UI state was set right before this
-// call (e.g. "Connecting…") stuck forever with no way forward.
+// call (e.g. "Connecting…") stuck forever with no way forward. A non-2xx
+// response no longer silently returns as if it were a success (#38 finding
+// 1): the body is still returned as-is when it already carries its own
+// `error` (e.g. the bridge's own `{error:"admin only"}`), but always gets
+// `_status` set so a caller can distinguish "the bridge said no" from "the
+// bridge is unreachable" without re-deriving it from response shape.
 async function api(path, opts) {
   try {
     const resp = await fetch(`/api${path}`, {
@@ -1215,8 +1239,15 @@ async function api(path, opts) {
       headers: opts?.body ? { 'content-type': 'application/json' } : undefined,
       body: opts?.body ? JSON.stringify(opts.body) : undefined,
     });
-    return await resp.json();
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      if (!body.error) body.error = `http ${resp.status}`;
+      body._status = resp.status;
+    }
+    noteApiResult(resp.ok);
+    return body;
   } catch (e) {
+    noteApiResult(false);
     return { error: `network error: ${e.message || e}` };
   }
 }
@@ -2105,8 +2136,18 @@ async function runDialer(identity, { verified = false } = {}) {
   // down for a while, and have every disconnected tab retry in lockstep.
   // Resets to 0 on a successful connection. The /api/incoming poll below
   // still covers for this socket being down the whole time regardless.
+  // CADS-webconference-demo#38 (finding 2): previously unbounded -- an
+  // abandoned background tab would reconnect every ~30s forever. Once
+  // MAX_INCOMING_SOCKET_ATTEMPTS is hit, this stops retrying automatically
+  // and shows #presence-lost-banner with a manual Reconnect button instead
+  // -- the /api/incoming poll fallback (below) keeps covering incoming
+  // calls regardless, so giving up here loses only the instant WS push,
+  // never the calls themselves.
+  const MAX_INCOMING_SOCKET_ATTEMPTS = 10;
   let incomingSocketAttempt = 0;
+  const presenceLostBanner = document.getElementById('presence-lost-banner');
   function connectIncomingSocket() {
+    if (presenceLostBanner) presenceLostBanner.hidden = true;
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const sock = new WebSocket(`${wsProto}//${location.host}/api/ws?email=${encodeURIComponent(identity.email)}`);
     sock.addEventListener('open', () => {
@@ -2124,16 +2165,29 @@ async function runDialer(identity, { verified = false } = {}) {
         }
       } catch (_) {}
     });
-    sock.addEventListener('close', (ev) => {
-      incomingSocketAttempt++;
-      const base = Math.min(1000 * 2 ** incomingSocketAttempt, 30000);
-      const delay = Math.round(base / 2 + Math.random() * (base / 2));
-      log(`presence socket closed (code ${ev.code}); reconnecting in ~${Math.round(delay / 1000)}s (attempt ${incomingSocketAttempt})`);
-      setTimeout(connectIncomingSocket, delay);
-    });
+    sock.addEventListener('close', (ev) => handleIncomingSocketClose(ev.code));
     sock.addEventListener('error', () => sock.close());
   }
+  // Factored out of the 'close' listener above so the cap/banner decision
+  // (pure bookkeeping, no real socket needed) can be exercised directly --
+  // this is exactly what the real listener calls, not a parallel copy.
+  function handleIncomingSocketClose(code) {
+    incomingSocketAttempt++;
+    if (incomingSocketAttempt > MAX_INCOMING_SOCKET_ATTEMPTS) {
+      log(`presence socket closed (code ${code}); giving up after ${incomingSocketAttempt - 1} attempts -- incoming calls still arrive via polling, click Reconnect to restore the instant push`);
+      if (presenceLostBanner) presenceLostBanner.hidden = false;
+      return;
+    }
+    const base = Math.min(1000 * 2 ** incomingSocketAttempt, 30000);
+    const delay = Math.round(base / 2 + Math.random() * (base / 2));
+    log(`presence socket closed (code ${code}); reconnecting in ~${Math.round(delay / 1000)}s (attempt ${incomingSocketAttempt})`);
+    setTimeout(connectIncomingSocket, delay);
+  }
   connectIncomingSocket();
+  document.getElementById('presence-reconnect-btn')?.addEventListener('click', () => {
+    incomingSocketAttempt = 0;
+    connectIncomingSocket();
+  });
 
   // Fallback poll -- unchanged cadence, stays as the safety net described above.
   setInterval(() => api(`/incoming?email=${encodeURIComponent(identity.email)}`).then((r) => {
