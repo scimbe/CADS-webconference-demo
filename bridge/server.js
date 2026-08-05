@@ -97,6 +97,10 @@ const pendingCalls = new Map();
 // hears about it. In-memory only, same durability tier as pendingCalls
 // above: a same-session convenience, not a persisted notification.
 const contactRequests = new Map();
+// email (lowercased) -> { email, createdAt }. CADS-webconference-demo#36 --
+// someone not yet on the login allow-list asking to be admitted. Same
+// durability tier as the maps above (in-memory, cleared on bridge restart).
+const accessRequests = new Map();
 // email -> channel (the most recent incoming call offered to this email)
 const incomingByEmail = new Map();
 
@@ -488,6 +492,48 @@ const server = http.createServer(async (req, res) => {
       }
       const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist/${encodeURIComponent(email)}/remove`, {});
       if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}` });
+      return json(res, 200, { ok: true });
+    }
+
+    // CADS-webconference-demo#36: a brand-new self-registered user hits the
+    // gate's own rejection page (control plane, a separate repo) with no
+    // actionable next step -- every existing contact-add path requires
+    // already being admitted. POST here is reachable WITHOUT passing the
+    // gate (see Caddyfile.selfservice's @exempt matcher) so a rejected
+    // registrant has somewhere to go; GET/approve/decline stay behind the
+    // normal gate (part of /api/*, not exempted) and approve is admin-only,
+    // matching /allowlist/remove's own gate -- same reasoning: letting any
+    // already-admitted caller grant a THIRD party's access is a bigger
+    // privilege than adding your own contact.
+    if (req.method === 'POST' && url.pathname === '/api/access-requests') {
+      const { email } = await readBody(req);
+      if (!email) return json(res, 400, { error: 'email required' });
+      const key = email.trim().toLowerCase();
+      if (!accessRequests.has(key)) accessRequests.set(key, { email: email.trim(), createdAt: Date.now() });
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/access-requests') {
+      return json(res, 200, { requests: [...accessRequests.values()].sort((a, b) => a.createdAt - b.createdAt) });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/access-requests/approve') {
+      if (!TUNNEL_ID) return json(res, 503, { error: 'WEBCONFERENCE_TUNNEL_ID not configured' });
+      const { email, callerEmail } = await readBody(req);
+      if (!email) return json(res, 400, { error: 'email required' });
+      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has((callerEmail || '').trim().toLowerCase())) {
+        return json(res, 403, { error: 'admin only' });
+      }
+      const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email });
+      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}` });
+      accessRequests.delete(email.trim().toLowerCase());
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/access-requests/decline') {
+      const { email, callerEmail } = await readBody(req);
+      if (!email) return json(res, 400, { error: 'email required' });
+      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has((callerEmail || '').trim().toLowerCase())) {
+        return json(res, 403, { error: 'admin only' });
+      }
+      accessRequests.delete(email.trim().toLowerCase());
       return json(res, 200, { ok: true });
     }
 

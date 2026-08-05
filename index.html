@@ -394,6 +394,15 @@
         <li class="msg-empty" id="blocked-empty">No one blocked.</li>
       </ul>
     </details>
+    <details class="manage-access" id="access-requests-details" hidden>
+      <summary>Access requests (admin)<span class="msg-tab-badge" id="access-requests-badge" style="margin-left:.4rem" hidden>0</span></summary>
+      <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">People who registered but aren't on
+        the login allow-list yet — see <a href="/request-access.html" target="_blank" rel="noopener" style="color:var(--accent2)">/request-access.html</a>,
+        reachable without signing in. Admitting adds them to the allow-list; they can sign in normally after.</p>
+      <ul class="msg-chat-list" id="access-requests-list" style="border-radius:8px">
+        <li class="msg-empty" id="access-requests-empty">No pending requests.</li>
+      </ul>
+    </details>
     <details class="manage-access" id="revoke-access-details" hidden>
       <summary>Revoke someone's login access (admin)</summary>
       <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">Separate from removing a contact

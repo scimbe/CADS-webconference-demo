@@ -755,6 +755,10 @@ const accessRemoveEmail = document.getElementById('access-remove-email');
 const accessNote = document.getElementById('access-note');
 const revokeAccessDetails = document.getElementById('revoke-access-details');
 const accessRemoveConsoleLink = document.getElementById('access-remove-console-link');
+const accessRequestsDetails = document.getElementById('access-requests-details');
+const accessRequestsBadge = document.getElementById('access-requests-badge');
+const accessRequestsList = document.getElementById('access-requests-list');
+const accessRequestsEmpty = document.getElementById('access-requests-empty');
 const videoGrid = document.getElementById('video-grid');
 const localTile = document.getElementById('local-tile');
 const btnSwitchCamera = document.getElementById('btn-switch-camera');
@@ -1111,6 +1115,54 @@ function renderRequests() {
   }
 }
 
+// CADS-webconference-demo#36: admin-only panel listing everyone who hit
+// /request-access.html because the login allow-list rejected them.
+// Approve grants login (same control-plane call /allowlist/add uses) and
+// clears the request; Decline just clears it. Both server-side calls are
+// admin-gated independently of this UI (see the bridge's own comment).
+async function refreshAccessRequests() {
+  const resp = await api('/access-requests');
+  renderAccessRequests(resp.error ? [] : resp.requests || []);
+}
+
+function renderAccessRequests(requests) {
+  accessRequestsList.querySelectorAll('li:not(#access-requests-empty)').forEach((li) => li.remove());
+  accessRequestsEmpty.hidden = requests.length > 0;
+  accessRequestsBadge.hidden = requests.length === 0;
+  accessRequestsBadge.textContent = String(requests.length);
+  for (const { email } of requests) {
+    const li = document.createElement('li');
+    li.style.cursor = 'default';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'msg-row-body';
+    nameEl.textContent = email;
+    const actions = document.createElement('div');
+    actions.className = 'msg-request-actions';
+    const approveBtn = document.createElement('button');
+    approveBtn.type = 'button';
+    approveBtn.className = 'accept';
+    approveBtn.textContent = 'Admit';
+    approveBtn.addEventListener('click', async () => {
+      approveBtn.disabled = true;
+      const resp = await api('/access-requests/approve', { body: { email, callerEmail: myEmail } });
+      if (resp.error) { approveBtn.disabled = false; log(`couldn't admit ${email}: ${resp.error}`); return; }
+      refreshAccessRequests();
+    });
+    const declineBtn = document.createElement('button');
+    declineBtn.type = 'button';
+    declineBtn.className = 'decline';
+    declineBtn.textContent = 'Dismiss';
+    declineBtn.addEventListener('click', async () => {
+      declineBtn.disabled = true;
+      await api('/access-requests/decline', { body: { email, callerEmail: myEmail } });
+      refreshAccessRequests();
+    });
+    actions.append(approveBtn, declineBtn);
+    li.append(nameEl, actions);
+    accessRequestsList.appendChild(li);
+  }
+}
+
 function renderBlockedList() {
   blockedList.querySelectorAll('li:not(#blocked-empty)').forEach((li) => li.remove());
   const blocked = blockedEmails.all();
@@ -1325,6 +1377,11 @@ async function runDialer(identity, { verified = false } = {}) {
   // server-side on the revoke call itself regardless of what this shows.
   api(`/is-admin?email=${encodeURIComponent(identity.email)}`).then((resp) => {
     revokeAccessDetails.hidden = !resp.isAdmin;
+    accessRequestsDetails.hidden = !resp.isAdmin;
+    if (resp.isAdmin) {
+      refreshAccessRequests();
+      setInterval(refreshAccessRequests, 15000);
+    }
   });
   // Only meaningful for a real gate-verified session (X-Gate-Email) -- a
   // free-text identity was never actually logged in anywhere to log out of.

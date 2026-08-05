@@ -8,6 +8,49 @@
 # updated to serve its own fullchain.pem/privkey.pem on :443 like the base
 # Caddyfile does.
 :80 {
+	# CADS-webconference-demo#36: a brand-new self-registered user hits the
+	# gate's own rejection page (control-plane, a separate repo -- not
+	# reachable/editable from here) with no actionable next step. Can't fix
+	# that page, but CAN give them somewhere to go: two specific requests
+	# carved out of the gate below so they're reachable WITHOUT already
+	# being on the allow-list, to submit a request an already-admitted
+	# member can approve from inside the real (gated) app. `handle`/`handle`
+	# are mutually exclusive -- first match wins -- so this is a real
+	# exemption, not just a route that happens to also pass the gate.
+	#
+	# Deliberately narrow, and deliberately NOT a wildcard -- caught live
+	# before this ever shipped: an earlier version of this matcher used
+	# `path /api/access-requests/*`, which (path matchers have no concept
+	# of HTTP method) ALSO exempted /api/access-requests/approve and
+	# /decline from the gate entirely. Those routes' own admin check is a
+	# client-asserted callerEmail field, same trust tier as everywhere else
+	# in this bridge (see #9/#10) -- with no gate in front of them at all,
+	# literally anyone on the internet could have POSTed
+	# {email:"attacker@evil.com", callerEmail:"<the real admin's email>"}
+	# and self-approved, completely bypassing both the gate AND the
+	# "admin-only" check. A second matcher issue caught in the same pass:
+	# listing the bare path also exempted GET (path matchers don't
+	# distinguish method), which would have let anyone unauthenticated
+	# enumerate every pending requester's email. Both closed by matching on
+	# method AND the exact path, nothing broader.
+	@exempt-page {
+		method GET
+		path /request-access.html /request-access.js
+	}
+	@exempt-submit {
+		method POST
+		path /api/access-requests
+	}
+
+	handle @exempt-page {
+		root * /srv
+		file_server
+	}
+	handle @exempt-submit {
+		reverse_proxy /api/access-requests {$WEBCONFERENCE_BRIDGE_ADDR}
+	}
+
+	handle {
 	# Browser-Plane login gate (CADS-Tunnel#214): calls the control-plane's
 	# public /gate/check for every request. Caddy sets X-Forwarded-Host to
 	# this vhost's own Host header automatically, which is exactly what
@@ -57,14 +100,24 @@
 			copy_headers X-Gate-Email
 		}
 	}
-	handle_errors 401 {
-		redir "https://bunsenbrenner.org/gate/start?host={http.request.host}&return={http.request.orig_uri}" 302
-	}
 
 	reverse_proxy /ws/channel {$WEBCONFERENCE_EDGE_WS}
 	reverse_proxy /api/* {$WEBCONFERENCE_BRIDGE_ADDR}
 	root * /srv
 	file_server
+	}
+
+	# handle_errors is NOT an ordered HTTP handler (confirmed live -- Caddy
+	# refused to start entirely, crash-looping, when this was nested inside
+	# the handle{} block above alongside route{}/reverse_proxy/file_server).
+	# Has to stay at this top level, same as the original file before the
+	# #36 @exempt split -- it still correctly catches the 401 the route{}
+	# block above raises regardless of the handle{}/handle{} nesting, since
+	# it scopes to the whole server block, not to one handler.
+	handle_errors 401 {
+		redir "https://bunsenbrenner.org/gate/start?host={http.request.host}&return={http.request.orig_uri}" 302
+	}
+
 	encode gzip
 	header {
 		X-Content-Type-Options "nosniff"
