@@ -47,6 +47,8 @@ const routeYou = document.getElementById('route-you');
 const routeSignal = document.getElementById('route-signal');
 const routeWebrtc = document.getElementById('route-webrtc');
 const routePeer = document.getElementById('route-peer');
+const connectingBanner = document.getElementById('connecting-banner');
+const connectingBannerText = document.getElementById('connecting-banner-text');
 
 // CADS-webconference-demo#31: a WASM-thrown crypto error (holderSign,
 // NoiseHandshake, encrypt/decrypt, etc.) can echo its offending input in
@@ -90,7 +92,28 @@ function setIceState(s) {
     setStatus('in-call');
     routeWebrtc.classList.add('live');
     routePeer.classList.add('live');
+    hideConnecting();
   }
+}
+
+// Reported as "the camera page shows up right after you place the call,
+// even though the other side hasn't picked up yet". Backend gating was
+// verified correct -- accepted_and_registered (and so navigation into run()
+// at all) already requires the callee's own attestation -- the actual gap is
+// UX: showCallScreen() below turns on your own camera immediately (it has
+// to, to show you a preview and let you place the call), well before the
+// real peer-to-peer link (WebRTC ICE, or the channel transport's Noise
+// session) is actually up. This banner is the explicit "not yet connected"
+// signal that was missing in that gap; hideConnecting() is called once real
+// connectivity is confirmed -- see setIceState above (webrtc) and
+// runChannelMediaCall (direct-channel, already-connected by the time it
+// starts since the Noise handshake completes before it's invoked).
+function showConnecting(peerLabel) {
+  connectingBannerText.textContent = peerLabel ? `Connecting to ${peerLabel}…` : 'Connecting…';
+  connectingBanner.hidden = false;
+}
+function hideConnecting() {
+  connectingBanner.hidden = true;
 }
 
 function addChatMessage(text, who) {
@@ -1711,6 +1734,13 @@ const TAG_BYE = 4;
 async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatStore, peerEmail) {
   setStatus('connecting-media');
   routeWebrtc.classList.add('live');
+  // Real peer-to-peer connectivity for this transport is already up by the
+  // time this function is called (the Noise_IK handshake in run() completes
+  // first) -- 'connecting-media' above just means chat/video framing isn't
+  // wired yet, not that the peer itself isn't there. Confirmed by chat being
+  // immediately usable a few lines below ("chat connected") with no further
+  // handshake in between.
+  hideConnecting();
 
   if (chatStore && peerEmail) {
     chatStore.history(peerEmail).then((history) => {
@@ -1987,6 +2017,7 @@ async function run() {
     return;
   }
   showCallScreen();
+  showConnecting(peerEmail);
   document.getElementById('transport-badge').textContent = transportMode === 'channel' ? 'direct-channel' : 'webrtc';
   document.getElementById('chat-transport-note').textContent =
     transportMode === 'channel' ? '— tunneled through the same Noise_IK channel' : '— over a real WebRTC data channel';
@@ -2231,4 +2262,10 @@ run().catch((e) => {
   console.error('run() failed:', safeMessage);
   setStatus('error: ' + safeMessage);
   log(`error: ${safeMessage}`);
+  // Otherwise a failure here (joinChannel/handshake throwing before real
+  // peer connectivity was ever reached) leaves the "Connecting to X…"
+  // spinner banner sitting on screen forever with nothing telling the user
+  // it actually failed -- the exact kind of misleading state this banner
+  // was added to prevent, not reproduce.
+  hideConnecting();
 });

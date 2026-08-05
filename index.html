@@ -70,6 +70,28 @@
  .status-pill{font-family:var(--mono);font-size:.76rem;padding:.3rem .7rem;border-radius:99px;border:1px solid var(--line);color:var(--muted2);display:flex;align-items:center;gap:.4rem}
  .status-pill .dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
  .status-pill[data-live="1"] .dot{background:var(--accent2);box-shadow:0 0 0 3px rgba(95,184,171,.2)}
+ /* CADS-webconference-demo: the call screen (incl. your own live camera
+    preview) used to appear with only a tiny "signaling: joining" mono-font
+    label in the Technical readout as any indication the actual peer
+    connection wasn't up yet -- reported as looking like the call was already
+    connected when it wasn't. This banner is deliberately large/impossible to
+    miss and sits above the video grid until real peer connectivity is
+    confirmed (WebRTC ICE connected, or the channel transport's already-
+    established Noise link for direct-channel mode). */
+ /* flex-basis:100% inside .call-header's flex-wrap row -- reliably drops
+    this onto its own line below the title/badges regardless of container
+    width, INCLUDING the mobile full-screen call view below, where
+    .call-header itself becomes position:absolute (a WhatsApp-style overlay
+    on top of the video) -- keeping the banner a child of that same header
+    means it inherits that positioning for free instead of needing its own
+    separate absolute placement that would risk overlapping the video
+    controls or the small self-camera PiP. */
+ .connecting-banner{display:flex;align-items:center;gap:.7rem;background:rgba(217,138,79,.12);border:1px solid rgba(217,138,79,.35);
+  border-radius:10px;padding:.7rem 1rem;margin-top:.6rem;font-size:.92rem;color:var(--accent);font-weight:600;flex-basis:100%}
+ .connecting-banner .spinner{width:1rem;height:1rem;border-radius:50%;border:2px solid rgba(217,138,79,.3);border-top-color:var(--accent);
+  flex-shrink:0;animation:connecting-spin .8s linear infinite}
+ @media (prefers-reduced-motion: reduce){.connecting-banner .spinner{animation:none}}
+ @keyframes connecting-spin{to{transform:rotate(360deg)}}
  .status-pill[data-live="0"] .dot{background:var(--danger)}
 
  .call-grid{display:grid;grid-template-columns:2fr 1fr;gap:1.1rem;align-items:start}
@@ -102,6 +124,17 @@
   #call-screen .call-header{position:absolute;top:0;left:0;right:0;z-index:2;margin:0;padding:.9rem 1rem;
    background:linear-gradient(rgba(0,0,0,.65),transparent);color:#fff}
   #call-screen .call-header h1{color:#fff}
+  /* Taken out of the header's own flex flow here -- on mobile the header's
+     box only ever covers its single title/badge row (position:absolute
+     children don't add to their parent's height); letting the banner grow
+     that row via flex-basis:100% (the desktop behavior) pushed the header
+     visually taller than the fixed top:4.2rem the self-camera PiP below
+     assumes, so the two silently overlapped (caught live via a real 390px
+     viewport screenshot). Positioned independently instead, clearing both
+     the title row above and stopping short of the PiP's own 28vw column
+     on the right. */
+  #call-screen .connecting-banner{position:absolute;top:3.1rem;left:.7rem;right:calc(28vw + 1.5rem);
+   flex-basis:auto;font-size:.8rem;padding:.5rem .65rem;margin-top:0}
   #call-screen .call-grid{display:block;height:100%}
   #call-screen .call-grid>div:first-child{height:100%;display:flex;flex-direction:column}
   #call-screen .video-grid{position:relative;flex:1;display:block}
@@ -506,6 +539,10 @@
         <div class="status-pill" id="status-pill" data-live="0">
           <span class="dot"></span><span id="status-text">idle</span>
         </div>
+      </div>
+      <div class="connecting-banner" id="connecting-banner" hidden>
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="connecting-banner-text">Connecting…</span>
       </div>
     </div>
 
