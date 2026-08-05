@@ -178,10 +178,10 @@ class WsByteStream {
       this.waiters.push(entry);
     });
   }
-  async readExact(n) {
+  async readExact(n, timeoutMs) {
     while (this.totalLen < n) {
       if (this.closed) throw new Error(`connection closed while reading ${n} bytes`);
-      await this._waitForBytes(n);
+      await this._waitForBytes(n, timeoutMs);
     }
     const buf = this._concat();
     const out = buf.slice(0, n);
@@ -215,10 +215,10 @@ async function writeFramed(stream, bytes) {
   stream.send(wasm.frame_message(bytes));
 }
 
-async function readFramed(stream) {
-  const lenBytes = await stream.readExact(2);
+async function readFramed(stream, timeoutMs) {
+  const lenBytes = await stream.readExact(2, timeoutMs);
   const len = (lenBytes[0] << 8) | lenBytes[1];
-  return stream.readExact(len);
+  return stream.readExact(len, timeoutMs);
 }
 
 // The join response is either a 2-byte b"NO" refusal or a 32-byte challenge --
@@ -369,6 +369,153 @@ async function flushOutbox(chatStore, peerEmail, send) {
   for (const m of outbox) {
     send(JSON.stringify({ seq: m.seq, text: m.text }));
     await chatStore.markDelivered(peerEmail, m.seq);
+  }
+}
+
+// ============ Background chat delivery (no call, no page reload) ============
+// Being mutual contacts and both online was never enough on its own for a
+// queued message to actually leave the device -- delivery only ever
+// happened as a side effect of a REAL call's chat channel opening. This
+// closes that gap with its own lightweight session over the exact same
+// grant/attest/channel/Noise_IK machinery a real call uses (bridge's
+// /api/call now accepts kind:'chat-delivery' -- see server.js), just
+// without ever reaching startCallFromIdentity's location.search reload:
+// run() and its call-screen UI are never involved, so a message send can't
+// visibly interrupt whatever the recipient is doing. Both sides run the
+// SAME backgroundChatSession once connected -- there's no "sender vs.
+// receiver" asymmetry once the channel is up, only caller-vs-callee for
+// the Noise handshake's own initiator/responder roles.
+
+let wasmInitPromise = null;
+function ensureWasmInit() {
+  return wasmInitPromise || (wasmInitPromise = init('./pkg/ct_agent_wasm_bg.wasm'));
+}
+
+// How long a background session keeps listening for a reply after sending
+// its own outbox -- bounded so an idle WS doesn't linger forever holding a
+// channel open. Generous enough to comfortably cover the peer's own
+// symmetric flush-then-listen sequence on a slow connection.
+const BACKGROUND_CHAT_WINDOW_MS = 8000;
+
+async function connectBackgroundChannel(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller) {
+  const { stream, peerNoiseHex } = await joinChannel(wsUrl, grantHex, holderPrivHex);
+  if (!peerNoiseHex) throw new Error('no peer Noise key in ack -- peer not registered with a Noise key');
+  const hs = isCaller ? wasm.NoiseHandshake.newInitiator(noisePrivHex, peerNoiseHex) : wasm.NoiseHandshake.newResponder(noisePrivHex);
+  if (isCaller) {
+    await writeFramed(stream, hs.writeMessage(new Uint8Array(0)));
+    hs.readMessage(await readFramed(stream));
+  } else {
+    hs.readMessage(await readFramed(stream));
+    await writeFramed(stream, hs.writeMessage(new Uint8Array(0)));
+  }
+  if (!hs.isFinished()) throw new Error('Noise handshake did not finish after 2 messages');
+  return { stream, noiseTransport: hs.intoTransport() };
+}
+
+// Flushes this identity's own outbox, then listens for up to
+// BACKGROUND_CHAT_WINDOW_MS for anything the peer sends back (their own
+// symmetric flush) -- decrypts and records it via the SAME chatStore the
+// messenger pane reads from, and live-appends it if that conversation
+// happens to be open right now. Never touches call-status/ringing state;
+// a plain WS close at the end is a normal, expected end to this session,
+// not a "peer hung up" signal the way it would be mid-call.
+async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore, peerEmail) {
+  const send = (text) => writeFramed(stream, noiseTransport.encrypt(concatBytes(new Uint8Array([TAG_CHAT]), new TextEncoder().encode(text))));
+  await flushOutbox(chatStore, peerEmail, send);
+  const deadline = Date.now() + BACKGROUND_CHAT_WINDOW_MS;
+  try {
+    while (Date.now() < deadline) {
+      const cipher = await readFramed(stream, deadline - Date.now());
+      const plain = noiseTransport.decrypt(cipher);
+      if (plain[0] !== TAG_CHAT) continue;
+      const raw = new TextDecoder().decode(plain.slice(1));
+      let seq, text;
+      try {
+        ({ seq, text } = JSON.parse(raw));
+      } catch {
+        continue; // sentinel or malformed frame -- nothing to record
+      }
+      if (chatStore && peerEmail && seq != null && text != null) {
+        await chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
+        if (currentConversationEmail === peerEmail.toLowerCase()) appendConvMessage({ from: 'peer', text, pending: false });
+        refreshContacts(); // updates the list-pane preview text
+      }
+    }
+  } catch {
+    // Timed out waiting for more, or the peer closed -- a normal end to a
+    // background session, not an error worth surfacing anywhere.
+  } finally {
+    stream.ws.close();
+  }
+}
+
+// Per-peer guard so the compose-time trigger and the periodic sweep below
+// can't both open a second background session for the same peer at once.
+const deliveryInFlight = new Set();
+
+// Caller-initiated half: called (a) right after composing a message, and
+// (b) periodically for any contact with a non-empty outbox, so a message
+// composed while the peer was offline still gets picked up once they come
+// back online without needing another explicit action. No-ops quietly if
+// there's nothing queued or the peer isn't online -- this is a background
+// sweep, not a user-facing action, so it never surfaces its own errors.
+async function tryBackgroundDeliver(identity, peerEmail) {
+  const key = peerEmail.toLowerCase();
+  if (deliveryInFlight.has(key)) return;
+  if (!dialerChatStore) return;
+  const outbox = await dialerChatStore.pendingOutbox(peerEmail);
+  if (!outbox.length) return;
+  const presence = await api(`/presence?email=${encodeURIComponent(peerEmail)}`);
+  if (!presence.online) return;
+  deliveryInFlight.add(key);
+  try {
+    await ensureWasmInit();
+    const resp = await api('/call', { body: { fromEmail: identity.email, toEmail: peerEmail, transport: 'channel', kind: 'chat-delivery' } });
+    if (resp.error || resp.status === 'offline') return;
+    const attestation = computeAttestation(resp.channel, identity.holderPriv, identity.holderPub, identity.noisePub);
+    const attestResp = await api('/attest', {
+      body: { channel: resp.channel, role: 'caller', holderPub: identity.holderPub, noisePub: identity.noisePub, attestation },
+    });
+    if (attestResp.error) return;
+    if (attestResp.status?.state !== 'accepted_and_registered') {
+      // The callee auto-attests near-instantly (no human ringing wait for
+      // chat-delivery) -- a short poll covers the one real round-trip delay
+      // (their attest + this bridge's own tryRegister control-plane calls).
+      let accepted = false;
+      await pollCallStatus(resp.channel, {
+        timeoutMs: 10000,
+        intervalMs: 500,
+        onDone: (ok) => { accepted = ok; },
+      });
+      if (!accepted) return;
+    }
+    const { stream, noiseTransport } = await connectBackgroundChannel(resp.ws, resp.grant, identity.holderPriv, identity.noisePriv, true);
+    await backgroundChatSession(stream, noiseTransport, true, dialerChatStore, peerEmail);
+  } catch (e) {
+    log(`background chat delivery to ${peerEmail} failed (will retry next sweep): ${e.message || e}`);
+  } finally {
+    deliveryInFlight.delete(key);
+  }
+}
+
+// Callee-initiated half: showIncoming branches here for kind:'chat-delivery'
+// instead of ever showing the ringing card -- see its own comment.
+async function autoAcceptChatDelivery(incoming, identity) {
+  const key = incoming.fromEmail.toLowerCase();
+  if (deliveryInFlight.has(key)) return;
+  deliveryInFlight.add(key);
+  try {
+    await ensureWasmInit();
+    const attestation = computeAttestation(incoming.channel, identity.holderPriv, identity.holderPub, identity.noisePub);
+    await api('/attest', {
+      body: { channel: incoming.channel, role: 'callee', holderPub: identity.holderPub, noisePub: identity.noisePub, attestation },
+    });
+    const { stream, noiseTransport } = await connectBackgroundChannel(incoming.ws, incoming.grant, identity.holderPriv, identity.noisePriv, false);
+    await backgroundChatSession(stream, noiseTransport, false, dialerChatStore, incoming.fromEmail);
+  } catch (e) {
+    log(`background chat delivery from ${incoming.fromEmail} failed: ${e.message || e}`);
+  } finally {
+    deliveryInFlight.delete(key);
   }
 }
 
@@ -730,6 +877,7 @@ let myContacts = null;
 let blockedEmails = null;
 let onlyAcceptFromContacts = false;
 let myEmail = null; // set once in runDialer -- the logged-in identity's own email
+let myIdentity = null; // set once in runDialer -- full identity object (needed by background delivery, which lives outside runDialer's own closure)
 const KEYCLOAK_ADMIN_CONSOLE_BASE = 'https://auth.bunsenbrenner.org/admin/master/console/#/ct-demo/users';
 function keycloakAdminConsoleLink(email) {
   return `${KEYCLOAK_ADMIN_CONSOLE_BASE}?search=${encodeURIComponent(email)}`;
@@ -1036,6 +1184,7 @@ msgComposeForm.addEventListener('submit', async (ev) => {
   const recorded = await dialerChatStore.record({ peerEmail: currentConversationEmail, from: 'me', text, seq, pending: true });
   appendConvMessage(recorded);
   refreshContacts(); // updates the list-pane preview text
+  if (myIdentity) tryBackgroundDeliver(myIdentity, currentConversationEmail);
 });
 msgBlockBtn.addEventListener('click', () => {
   if (!currentConversationEmail) return;
@@ -1079,6 +1228,7 @@ async function runDialer(identity, { verified = false } = {}) {
   messengerShell.hidden = false;
   dialerChatStore = new ChatStore(identity);
   myEmail = identity.email;
+  myIdentity = identity;
   myContacts = localSetFor('contacts', identity.email);
   blockedEmails = localSetFor('blocked', identity.email);
   onlyAcceptFromContacts = localStorage.getItem(`ct-webconference-settings:${identity.email.toLowerCase()}`) === '1';
@@ -1175,20 +1325,23 @@ async function runDialer(identity, { verified = false } = {}) {
   }
 
   function showIncoming(incoming) {
-    if (currentIncoming) return;
     const from = incoming.fromEmail.toLowerCase();
     // Blocked: silently declined, never rings, never shows up in Requests
     // either -- the whole point of blocking is not having to think about
-    // them again, not just not being interrupted this once.
+    // them again, not just not being interrupted this once. Applies to a
+    // background chat-delivery attempt exactly the same as a real call --
+    // blocking someone should stop them reaching you at all, not just stop
+    // your phone from ringing.
     if (blockedEmails.has(from)) {
       api('/decline', { body: { channel: incoming.channel } }).catch(() => {});
       return;
     }
     // Privacy mode on and this isn't someone I've actually added: don't
-    // ring -- decline this specific attempt (by the time anyone reviews
-    // Requests, its own ~60s ringing window has likely already passed
-    // anyway) and hold it in Requests so accepting there means "let them
-    // reach me next time," not a claim this live call can still connect.
+    // ring (or silently auto-accept a delivery) -- decline this specific
+    // attempt (by the time anyone reviews Requests, its own ~60s ringing
+    // window has likely already passed anyway) and hold it in Requests so
+    // accepting there means "let them reach me next time," not a claim
+    // this live attempt can still connect.
     if (onlyAcceptFromContacts && !myContacts.has(from)) {
       api('/decline', { body: { channel: incoming.channel } }).catch(() => {});
       if (!pendingRequests.some((r) => r.email === from)) {
@@ -1197,6 +1350,14 @@ async function runDialer(identity, { verified = false } = {}) {
       }
       return;
     }
+    // Silent path: no ringing card, no currentIncoming state at all -- a
+    // background delivery must never block on (or be blocked by) a real
+    // call that happens to be ringing at the same moment.
+    if (incoming.kind === 'chat-delivery') {
+      autoAcceptChatDelivery(incoming, identity);
+      return;
+    }
+    if (currentIncoming) return;
     currentIncoming = incoming;
     incomingFrom.textContent = incoming.fromEmail;
     incomingCard.hidden = false;
@@ -1254,6 +1415,14 @@ async function runDialer(identity, { verified = false } = {}) {
   refreshContacts();
   setInterval(refreshContacts, 5000);
   preloadLocalMedia();
+
+  // Catches the case the compose-time trigger can't: a message queued
+  // while the peer was offline, delivered once they come back -- without
+  // this, "compose any time, it goes out once you're both connected" would
+  // only ever be true if you happened to compose AFTER they reconnected.
+  setInterval(() => {
+    for (const email of myContacts.all()) tryBackgroundDeliver(identity, email);
+  }, 10000);
 
   // Someone added ME as a contact -- merge into the same Requests list
   // showIncoming's privacy-gate already populates (see its "Wants to be

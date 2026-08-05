@@ -451,7 +451,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && url.pathname === '/api/call') {
-      const { fromEmail, toEmail, transport } = await readBody(req);
+      const { fromEmail, toEmail, transport, kind } = await readBody(req);
       const from = (fromEmail || '').toLowerCase();
       const to = (toEmail || '').toLowerCase();
       const caller = directory.get(from);
@@ -474,6 +474,12 @@ const server = http.createServer(async (req, res) => {
         // 'webrtc' (default) or 'channel' -- caller's choice, both sides use
         // the same value so they agree on how media/chat travel (see app.js).
         transport: transport === 'channel' ? 'channel' : 'webrtc',
+        // 'call' (default, rings + shows the incoming card) or
+        // 'chat-delivery' (silent -- the callee auto-attests with no UI at
+        // all, see showIncoming's branch in app.js). Threaded through so a
+        // background message flush never surfaces a ringing card for
+        // something the recipient never asked to be interrupted for.
+        kind: kind === 'chat-delivery' ? 'chat-delivery' : 'call',
         createdAt: Date.now(),
         callerAttest: null,
         calleeAttest: null,
@@ -483,7 +489,7 @@ const server = http.createServer(async (req, res) => {
       incomingByEmail.set(to, call.channel);
       // Push immediately if the callee has a live WS connection -- falls back
       // to their own /api/incoming poll (still running regardless) if not.
-      wsPush(to, { type: 'incoming', channel: call.channel, fromEmail: call.callerEmail, grant: call.grantForCallee, ws: WS_URL, transport: call.transport });
+      wsPush(to, { type: 'incoming', channel: call.channel, fromEmail: call.callerEmail, grant: call.grantForCallee, ws: WS_URL, transport: call.transport, kind: call.kind });
       return json(res, 200, { status: 'ringing', channel: call.channel, grant: call.grantForCaller, ws: WS_URL, transport: call.transport });
     }
 
@@ -546,7 +552,7 @@ const server = http.createServer(async (req, res) => {
         incomingByEmail.delete(email);
         return json(res, 200, { incoming: null });
       }
-      return json(res, 200, { incoming: { channel: call.channel, fromEmail: call.callerEmail, grant: call.grantForCallee, ws: WS_URL, transport: call.transport } });
+      return json(res, 200, { incoming: { channel: call.channel, fromEmail: call.callerEmail, grant: call.grantForCallee, ws: WS_URL, transport: call.transport, kind: call.kind } });
     }
 
     json(res, 404, { error: 'not found' });

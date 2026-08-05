@@ -25,8 +25,19 @@ const DB_NAME = 'ct-webconference-chat';
 const DB_VERSION = 1;
 const STORE = 'messages';
 
+// Deliberately NOT sorted. IndexedDB (DB_NAME below) is one shared,
+// origin-wide database -- it's how a browser that has EVER held more than
+// one local identity (loadOrCreateIdentity supports switching between
+// several) keeps each one's history separate. A sorted [a,b] key made two
+// DIFFERENT identities' stores land on the IDENTICAL row set whenever they
+// shared the same peer pair -- each identity's records are encrypted with
+// its OWN key (chatStore.js's header comment), so the other identity's
+// ChatStore.history() would try to AES-GCM-decrypt ciphertext it has no key
+// for and throw OperationError. Keying by (this store's OWN email, peer) --
+// always the same for a given instance -- scopes rows per-owner instead,
+// with no behavior change for the common single-identity-per-browser case.
 function conversationKey(myEmail, peerEmail) {
-  return [myEmail.toLowerCase(), peerEmail.toLowerCase()].sort().join('|');
+  return `${myEmail.toLowerCase()}->${peerEmail.toLowerCase()}`;
 }
 
 function openDb() {
