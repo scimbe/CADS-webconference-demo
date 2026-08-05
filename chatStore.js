@@ -135,7 +135,12 @@ export class ChatStore {
   // required and explicit: for a receive, observe() first so this clock
   // stays ahead of everything it's seen, keeping future local ticks
   // causally after it.
-  async record({ peerEmail, from, text, seq, received = false }) {
+  // `pending: true` marks a message composed while no live chat channel to
+  // this peer is open yet (see the outbox comment on the class) -- stored
+  // and shown immediately from the sender's own view, same as any real
+  // messenger, cleared by markDelivered() once it actually goes out over
+  // the live channel. Never true for a received message.
+  async record({ peerEmail, from, text, seq, received = false, pending = false }) {
     if (received) this.clock.observe(seq);
     const { iv, ciphertext } = await this._encrypt(text);
     const record = {
@@ -144,6 +149,7 @@ export class ChatStore {
       seq,
       from, // 'me' | 'peer'
       ts: Date.now(),
+      pending,
       iv,
       ciphertext,
     };
@@ -154,8 +160,8 @@ export class ChatStore {
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
-    const decoded = { peerEmail: record.peerEmail, seq, from, text, ts: record.ts };
-    this.channel.postMessage(decoded);
+    const decoded = { peerEmail: record.peerEmail, seq, from, text, ts: record.ts, pending };
+    if (!pending) this.channel.postMessage(decoded); // other tabs don't need to see a not-yet-sent draft
     return decoded;
   }
 
@@ -182,8 +188,41 @@ export class ChatStore {
         seq: r.seq,
         from: r.from,
         ts: r.ts,
+        pending: !!r.pending,
         text: await this._decrypt(r.iv, r.ciphertext),
       })),
     );
+  }
+
+  // Outbox: every not-yet-delivered outgoing message for one peer, oldest
+  // first -- what setupChatChannel's 'open' handler flushes the moment a
+  // live channel to that peer actually exists.
+  async pendingOutbox(peerEmail) {
+    const all = await this.history(peerEmail);
+    return all.filter((m) => m.from === 'me' && m.pending);
+  }
+
+  // Flip a queued message to delivered once it's actually gone out over the
+  // live channel. Matched by (peerEmail, seq) -- unique per conversation
+  // since seq comes from this identity's own strictly-increasing clock.
+  async markDelivered(peerEmail, seq) {
+    const db = await this.dbPromise;
+    const conversation = conversationKey(this.identity.email, peerEmail);
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      const idx = tx.objectStore(STORE).index('byConversation');
+      const range = IDBKeyRange.bound([conversation, -Infinity], [conversation, Infinity]);
+      idx.openCursor(range).onsuccess = (ev) => {
+        const cursor = ev.target.result;
+        if (!cursor) return resolve();
+        if (cursor.value.seq === seq && cursor.value.pending) {
+          const updated = { ...cursor.value, pending: false };
+          cursor.update(updated);
+          return resolve();
+        }
+        cursor.continue();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
   }
 }

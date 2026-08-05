@@ -284,6 +284,13 @@
   padding:.75rem 1rem;font-size:.92rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:.5rem}
  .msg-start-call-btn:hover{filter:brightness(1.05)}
  .msg-start-call-btn:disabled{opacity:.5;cursor:not-allowed}
+ #msg-compose-form{display:flex;gap:.5rem;align-items:center;padding-bottom:.4rem}
+ #msg-compose-input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--line);border-radius:99px;color:var(--text);
+  padding:.6rem 1rem;font:inherit;font-size:.92rem}
+ #msg-compose-input:focus{outline:none;border-color:var(--accent2)}
+ #msg-compose-form .msg-start-call-btn{width:auto;flex-shrink:0;padding:.6rem .9rem;font-size:1.05rem;aspect-ratio:1;border-radius:50%}
+ .chat-msg.pending{opacity:.6}
+ .chat-msg .pending-mark{font-size:.7rem;margin-left:.35rem}
 
  .msg-incoming-banner{position:absolute;top:3.6rem;left:50%;transform:translateX(-50%);z-index:6;background:var(--panel);
   border:1px solid var(--accent2);border-radius:10px;padding:.9rem 1.1rem;box-shadow:0 8px 28px rgba(0,0,0,.35);
@@ -370,21 +377,24 @@
     <details class="manage-access">
       <summary>Blocked</summary>
       <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">Blocked emails are silently
-        declined — never rings, never shows up in Requests either.</p>
+        declined — never rings, never shows up in Requests either. Unblocking puts them back in
+        your contact list (it does not, by itself, restore login access if that was also revoked).</p>
       <ul class="msg-chat-list" id="blocked-list" style="border-radius:8px">
         <li class="msg-empty" id="blocked-empty">No one blocked.</li>
       </ul>
     </details>
-    <details class="manage-access">
-      <summary>Revoke someone's login access</summary>
-      <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">Separate from removing/blocking a
-        contact (which only changes what <em>you</em> see) — this revokes them from the tunnel's login
-        allow-list entirely, so they can no longer sign in at all.</p>
+    <details class="manage-access" id="revoke-access-details" hidden>
+      <summary>Revoke someone's login access (admin)</summary>
+      <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">Separate from removing a contact
+        (which only changes what <em>you</em> see) — this revokes them from the tunnel's login
+        allow-list entirely, so they can no longer sign in at all. They're also added to your
+        Blocked list above; unblocking restores them to your contacts but not their login access.</p>
       <form class="access-form" id="access-remove-form">
         <input id="access-remove-email" type="email" placeholder="someone@example.com" required autocomplete="off" />
         <button type="submit" class="danger">Revoke access</button>
       </form>
       <div id="access-note"></div>
+      <p style="margin:.6rem 0 0;font-size:.78rem"><a id="access-remove-console-link" href="#" target="_blank" rel="noopener" style="color:var(--accent2)" hidden>Open their Keycloak account console ↗</a></p>
     </details>
     <details class="manual-fallback">
       <summary>Have a manual call link instead?</summary>
@@ -443,14 +453,20 @@
         <div class="msg-conv-messages" id="conv-messages"></div>
         <button class="decline" id="btn-cancel-call" type="button" hidden style="margin:0 .9rem .6rem">Cancel call</button>
         <div class="msg-conv-note" id="call-note"></div>
-        <!-- Real-time text only exists over a live call (no server-relay/
-             store-and-forward in this demo) -- rather than a text box that
-             silently can't deliver anything until connected, this is one
-             explicit action, honest about what it does. dial-email stays a
-             hidden field carrying the target (set by openConversation/the
-             contact click handler) so the existing dial-form submit logic
-             (POST /call -> /attest -> startCallFromIdentity) needs no
-             rewrite, just a different way of getting its target address. -->
+        <!-- Text is composable any time, even while the peer is offline --
+             it's stored locally (chatStore's outbox) and only actually
+             leaves the device once a live call's chat channel opens, the
+             same channel real-time TAG_CHAT messages already use (no new
+             transport, no new crypto: composing offline just means "queued
+             until the one delivery path that exists connects"). dial-email
+             stays a hidden field carrying the call target (set by
+             openConversation/the contact click handler) so the existing
+             dial-form submit logic (POST /call -> /attest ->
+             startCallFromIdentity) needs no rewrite. -->
+        <form class="msg-conv-input" id="msg-compose-form">
+          <input id="msg-compose-input" type="text" placeholder="Message… (sends once you're both connected)" autocomplete="off" />
+          <button type="submit" class="msg-start-call-btn" aria-label="Send">➤</button>
+        </form>
         <form class="msg-conv-input" id="dial-form">
           <input id="dial-email" type="hidden" />
           <button type="submit" class="msg-start-call-btn">📹 Start a call to chat live</button>

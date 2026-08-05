@@ -53,6 +53,11 @@ services:
       # book's login-allowlist add/remove proxy. Optional: the contact list
       # itself works without it.
       - WEBCONFERENCE_TUNNEL_ID=${WEBCONFERENCE_TUNNEL_ID:-}
+      # Comma-separated, case-insensitive. Who's allowed to revoke someone
+      # else's login access -- empty leaves that endpoint open to any
+      # gate-verified caller (with a startup warning), matching the old
+      # behaviour until this is actually set.
+      - WEBCONFERENCE_ADMIN_EMAILS=${WEBCONFERENCE_ADMIN_EMAILS:-}
       - CT_CHANNEL_OPERATOR_KEY=${WEBCONFERENCE_OPERATOR_KEY:?this demo's channel operator private key, 64-hex, from ct-agent channel operator-init}
       # Preferred: a durable service-account credential (POST
       # /me/service-accounts from the portal) -- doesn't expire on its own,

@@ -58,6 +58,28 @@ const TUNNEL_ID = process.env.WEBCONFERENCE_TUNNEL_ID || '';
 const PRESENCE_TTL_MS = 45_000;
 const CALL_TTL_MS = 60_000;
 
+// Who's allowed to revoke someone else's login access. Comma-separated,
+// case-insensitive. Empty (unset) preserves the previous behaviour -- any
+// gate-verified caller can revoke -- with a startup warning, so an operator
+// who deploys without setting this doesn't get silently locked out of their
+// own admin panel; setting it is what actually turns the gate on.
+// Caller identity here is client-asserted (a `callerEmail` field in the
+// request body), same trust level as every other email this bridge accepts
+// (e.g. /register's own caller-supplied email) -- not cryptographically
+// verified against the gate's session. A real guarantee would need the
+// frontend to forward its Keycloak ID token for this bridge to verify, which
+// is a larger change; this at least closes the "any script that can reach
+// the API can revoke anyone" gap for the common case.
+const ADMIN_EMAILS = new Set(
+  (process.env.WEBCONFERENCE_ADMIN_EMAILS || '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean)
+);
+if (ADMIN_EMAILS.size === 0) {
+  console.warn('bridge: WEBCONFERENCE_ADMIN_EMAILS not set -- /api/allowlist/remove is open to any caller');
+}
+
 if (!OPERATOR_KEY || !/^[0-9a-f]{64}$/i.test(OPERATOR_KEY)) {
   console.error('bridge: CT_CHANNEL_OPERATOR_KEY (64-hex) is required');
   process.exit(1);
@@ -68,6 +90,13 @@ const directory = new Map();
 // channel -> { callerEmail, calleeEmail, grantForCaller, grantForCallee, createdAt,
 //              callerAttest, calleeAttest, status }
 const pendingCalls = new Map();
+
+// toEmail (lowercased) -> [{ fromEmail, createdAt }]. "A adds B as a
+// contact" also asks B to add A back -- otherwise A can message/call B
+// (allowlist/add already grants B login) while B's own contact list never
+// hears about it. In-memory only, same durability tier as pendingCalls
+// above: a same-session convenience, not a persisted notification.
+const contactRequests = new Map();
 // email -> channel (the most recent incoming call offered to this email)
 const incomingByEmail = new Map();
 
@@ -351,14 +380,24 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { contacts });
     }
 
+    // Lets the frontend decide whether to show admin-only UI (the revoke
+    // panel) at all -- returns only a boolean, never the admin list itself,
+    // so this can't be used to enumerate who's an admin.
+    if (req.method === 'GET' && url.pathname === '/api/is-admin') {
+      const email = (url.searchParams.get('email') || '').trim().toLowerCase();
+      return json(res, 200, { isAdmin: ADMIN_EMAILS.size > 0 && ADMIN_EMAILS.has(email) });
+    }
+
     // Add/remove an email on the tunnel's login allow-list (who's permitted
     // to pass the gate at all) -- proxies the control plane's own portal
     // form-POST routes (login_allowlist_add_route/_remove_route in
     // CADS-Tunnel's portal_api.rs), reusing the exact same session-cookie
-    // credential cpFetch() already holds for channel registration. Any
-    // gate-verified caller can reach these two endpoints; there's no separate
-    // "admin" tier here, matching this demo's existing trust model (a small
-    // account-managed tunnel, not a public multi-tenant service).
+    // credential cpFetch() already holds for channel registration. Adding is
+    // still open to any gate-verified caller (that's the same action as
+    // adding a contact, from the user's side -- see msgSearchForm in app.js);
+    // removing is gated to ADMIN_EMAILS above, since letting any caller
+    // revoke *anyone's* access was a real privilege gap, not a deliberate
+    // design choice.
     if (req.method === 'POST' && url.pathname === '/api/allowlist/add') {
       if (!TUNNEL_ID) return json(res, 503, { error: 'WEBCONFERENCE_TUNNEL_ID not configured' });
       const { email } = await readBody(req);
@@ -367,10 +406,45 @@ const server = http.createServer(async (req, res) => {
       if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}` });
       return json(res, 200, { ok: true });
     }
+    // Contact requests: "I added you" shows up in the OTHER person's
+    // Requests tab so adding someone isn't silently one-sided. POST is
+    // idempotent per (from,to) pair (no duplicate entries); GET returns and
+    // leaves the list intact (the client itself tracks which it has already
+    // shown, same as /api/incoming's own polling model) so a page reload
+    // doesn't lose a still-unactioned request; DELETE clears one entry once
+    // the recipient accepts or declines it.
+    if (req.method === 'POST' && url.pathname === '/api/contact-requests') {
+      const { fromEmail, toEmail } = await readBody(req);
+      if (!fromEmail || !toEmail) return json(res, 400, { error: 'fromEmail and toEmail required' });
+      const to = toEmail.trim().toLowerCase();
+      const list = contactRequests.get(to) || [];
+      if (!list.some((r) => r.fromEmail.toLowerCase() === fromEmail.trim().toLowerCase())) {
+        list.push({ fromEmail: fromEmail.trim(), createdAt: Date.now() });
+        contactRequests.set(to, list);
+      }
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/contact-requests') {
+      const email = (url.searchParams.get('email') || '').trim().toLowerCase();
+      return json(res, 200, { requests: contactRequests.get(email) || [] });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/contact-requests/clear') {
+      const { email, fromEmail } = await readBody(req);
+      const to = (email || '').trim().toLowerCase();
+      const list = contactRequests.get(to);
+      if (list) {
+        contactRequests.set(to, list.filter((r) => r.fromEmail.toLowerCase() !== (fromEmail || '').trim().toLowerCase()));
+      }
+      return json(res, 200, { ok: true });
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/allowlist/remove') {
       if (!TUNNEL_ID) return json(res, 503, { error: 'WEBCONFERENCE_TUNNEL_ID not configured' });
-      const { email } = await readBody(req);
+      const { email, callerEmail } = await readBody(req);
       if (!email) return json(res, 400, { error: 'email required' });
+      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has((callerEmail || '').trim().toLowerCase())) {
+        return json(res, 403, { error: 'admin only' });
+      }
       const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist/${encodeURIComponent(email)}/remove`, {});
       if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}` });
       return json(res, 200, { ok: true });

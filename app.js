@@ -358,6 +358,20 @@ const NO_CAMERA_SENTINEL = '\u0000no-camera';
 // VP8/VP9/Opus at all) -- telling them "no camera" here would be flat wrong.
 const NO_CODEC_SENTINEL = '\u0000no-codec';
 
+// Sends every message composed while offline (chatStore.pendingOutbox) the
+// moment a live channel to that peer actually opens -- called from both
+// transports' own "channel just opened" point. `send` is transport-specific
+// (WebRTC datachannel.send(str) vs. the Noise-channel sendText(TAG_CHAT, str))
+// so this stays agnostic to which one is live.
+async function flushOutbox(chatStore, peerEmail, send) {
+  if (!chatStore || !peerEmail) return;
+  const outbox = await chatStore.pendingOutbox(peerEmail);
+  for (const m of outbox) {
+    send(JSON.stringify({ seq: m.seq, text: m.text }));
+    await chatStore.markDelivered(peerEmail, m.seq);
+  }
+}
+
 // chatStore/peerEmail are both optional (see startCallFromIdentity's
 // comment -- a manually-built call link has no identity to key a store to).
 // When present: past history for this contact is loaded and rendered
@@ -379,6 +393,7 @@ function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
     chatSend.disabled = false;
     addChatMessage('chat connected (real WebRTC data channel, DTLS-encrypted)', 'system');
     if (!localHasCamera) channel.send(NO_CAMERA_SENTINEL);
+    flushOutbox(chatStore, peerEmail, (payload) => channel.send(payload));
   });
   channel.addEventListener('close', () => {
     chatInput.disabled = true;
@@ -532,6 +547,8 @@ const contactsEmpty = document.getElementById('contacts-empty');
 const accessRemoveForm = document.getElementById('access-remove-form');
 const accessRemoveEmail = document.getElementById('access-remove-email');
 const accessNote = document.getElementById('access-note');
+const revokeAccessDetails = document.getElementById('revoke-access-details');
+const accessRemoveConsoleLink = document.getElementById('access-remove-console-link');
 const videoGrid = document.getElementById('video-grid');
 const localTile = document.getElementById('local-tile');
 const btnSwitchCamera = document.getElementById('btn-switch-camera');
@@ -545,6 +562,8 @@ const msgConversation = document.getElementById('msg-conversation');
 const msgBackBtn = document.getElementById('msg-back-btn');
 const msgCallBtn = document.getElementById('msg-call-btn');
 const msgBlockBtn = document.getElementById('msg-block-btn');
+const msgComposeForm = document.getElementById('msg-compose-form');
+const msgComposeInput = document.getElementById('msg-compose-input');
 const convAvatar = document.getElementById('conv-avatar');
 const convName = document.getElementById('conv-name');
 const convStatus = document.getElementById('conv-status');
@@ -710,6 +729,11 @@ function localSetFor(kind, email) {
 let myContacts = null;
 let blockedEmails = null;
 let onlyAcceptFromContacts = false;
+let myEmail = null; // set once in runDialer -- the logged-in identity's own email
+const KEYCLOAK_ADMIN_CONSOLE_BASE = 'https://auth.bunsenbrenner.org/admin/master/console/#/ct-demo/users';
+function keycloakAdminConsoleLink(email) {
+  return `${KEYCLOAK_ADMIN_CONSOLE_BASE}?search=${encodeURIComponent(email)}`;
+}
 // Non-contact incoming attempts held for review instead of ringing
 // immediately (only populated when onlyAcceptFromContacts is on) -- see
 // showIncoming's gating logic. In-memory only: a real "missed request"
@@ -842,6 +866,7 @@ function renderRequests() {
     acceptBtn.addEventListener('click', () => {
       myContacts.add(email);
       pendingRequests = pendingRequests.filter((r) => r.email !== email);
+      api('/contact-requests/clear', { body: { email: myEmail, fromEmail: email } }).catch(() => {});
       refreshContacts();
     });
     const declineBtn = document.createElement('button');
@@ -850,6 +875,7 @@ function renderRequests() {
     declineBtn.textContent = 'Dismiss';
     declineBtn.addEventListener('click', () => {
       pendingRequests = pendingRequests.filter((r) => r.email !== email);
+      api('/contact-requests/clear', { body: { email: myEmail, fromEmail: email } }).catch(() => {});
       renderRequests();
     });
     actions.append(acceptBtn, declineBtn);
@@ -875,7 +901,13 @@ function renderBlockedList() {
     unblockBtn.textContent = 'Unblock';
     unblockBtn.addEventListener('click', () => {
       blockedEmails.remove(email);
+      // Whether they landed on the block list via the conversation's Block
+      // button or an admin's Revoke action, unblocking always means "back
+      // in my contacts" -- it does NOT restore server login access on its
+      // own if that was also revoked (see the revoke panel's own note).
+      myContacts.add(email);
       renderBlockedList();
+      refreshContacts();
     });
     li.append(nameEl, unblockBtn);
     blockedList.appendChild(li);
@@ -900,20 +932,30 @@ async function openConversation(email) {
   convMessages.innerHTML = '';
   if (dialerChatStore) {
     const history = await dialerChatStore.history(email);
-    for (const m of history) {
-      const div = document.createElement('div');
-      div.className = `chat-msg ${m.from}`;
-      const body = document.createElement('div');
-      body.textContent = m.text;
-      const meta = document.createElement('div');
-      meta.className = 'meta';
-      meta.textContent = m.from === 'me' ? 'you' : 'peer';
-      div.append(body, meta);
-      convMessages.appendChild(div);
-    }
-    convMessages.scrollTop = convMessages.scrollHeight;
+    for (const m of history) appendConvMessage(m);
   }
   await refreshContacts(); // updates the .active row highlight
+}
+
+// Shared by history load (openConversation) and a just-composed message
+// (msgComposeForm below) so both render identically. `pending` (queued,
+// not yet sent over any live channel -- see chatStore's outbox) shows a
+// dimmed bubble with "sending…" instead of "you"; there's no separate
+// live-update path to flip it once delivered because sending only actually
+// happens after startCallFromIdentity's location.search reload takes the
+// page to #call-screen -- a fresh load of this conversation pane re-reads
+// history from chatStore (now delivered) next time it's opened.
+function appendConvMessage({ from, text, pending }) {
+  const div = document.createElement('div');
+  div.className = `chat-msg ${from}${pending ? ' pending' : ''}`;
+  const body = document.createElement('div');
+  body.textContent = text;
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = from === 'me' ? (pending ? 'sending…' : 'you') : 'peer';
+  div.append(body, meta);
+  convMessages.appendChild(div);
+  convMessages.scrollTop = convMessages.scrollHeight;
 }
 
 function closeConversation() {
@@ -936,10 +978,20 @@ accessRemoveForm.addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const email = accessRemoveEmail.value.trim();
   if (!email) return;
+  accessRemoveConsoleLink.hidden = true;
   setAccessNote('info', `Revoking access for ${email}…`);
-  const resp = await api('/allowlist/remove', { body: { email } });
+  const resp = await api('/allowlist/remove', { body: { email, callerEmail: myEmail } });
   if (resp.error) return setAccessNote('error', `Couldn't revoke access: ${resp.error}`);
-  setAccessNote('ok', `${email} can no longer log in.`);
+  // Revoking someone's login is also "I don't want to hear from them" --
+  // fold in the same local block+remove-from-contacts side effects the
+  // conversation-header Block button applies, so the two paths agree.
+  blockedEmails.add(email);
+  myContacts.remove(email);
+  renderBlockedList();
+  refreshContacts();
+  setAccessNote('ok', `${email} can no longer log in, and has been added to your Blocked list.`);
+  accessRemoveConsoleLink.href = keycloakAdminConsoleLink(email);
+  accessRemoveConsoleLink.hidden = false;
   accessRemoveEmail.value = '';
 });
 
@@ -966,11 +1018,25 @@ msgSearchForm.addEventListener('submit', async (ev) => {
   myContacts.add(email);
   const resp = await api('/allowlist/add', { body: { email } });
   if (resp.error) log(`allowlist/add for ${email} failed (added as a local contact anyway): ${resp.error}`);
+  // Let them know: shows up in THEIR Requests tab next time they poll (see
+  // pollContactRequests below), same as any real messenger's "X added you".
+  // Best-effort -- a failure here doesn't block adding the contact locally.
+  api('/contact-requests', { body: { fromEmail: myEmail, toEmail: email } }).catch(() => {});
   await refreshContacts();
   openConversation(email);
 });
 msgBackBtn.addEventListener('click', closeConversation);
 msgCallBtn.addEventListener('click', () => dialForm.requestSubmit());
+msgComposeForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const text = msgComposeInput.value.trim();
+  if (!text || !currentConversationEmail || !dialerChatStore) return;
+  msgComposeInput.value = '';
+  const seq = dialerChatStore.nextSeqForSend();
+  const recorded = await dialerChatStore.record({ peerEmail: currentConversationEmail, from: 'me', text, seq, pending: true });
+  appendConvMessage(recorded);
+  refreshContacts(); // updates the list-pane preview text
+});
 msgBlockBtn.addEventListener('click', () => {
   if (!currentConversationEmail) return;
   const email = currentConversationEmail;
@@ -1012,12 +1078,20 @@ async function runDialer(identity, { verified = false } = {}) {
   landingMain.hidden = true;
   messengerShell.hidden = false;
   dialerChatStore = new ChatStore(identity);
+  myEmail = identity.email;
   myContacts = localSetFor('contacts', identity.email);
   blockedEmails = localSetFor('blocked', identity.email);
   onlyAcceptFromContacts = localStorage.getItem(`ct-webconference-settings:${identity.email.toLowerCase()}`) === '1';
   onlyContactsToggle.checked = onlyAcceptFromContacts;
   renderBlockedList();
   myEmailEl.textContent = identity.email + (verified ? ' (verified via login)' : '');
+  // Revoke-access is admin-only -- hidden until proven otherwise. is-admin
+  // only ever returns a boolean (never the admin list itself), so this is
+  // safe to call unauthenticated; the bridge enforces the real gate
+  // server-side on the revoke call itself regardless of what this shows.
+  api(`/is-admin?email=${encodeURIComponent(identity.email)}`).then((resp) => {
+    revokeAccessDetails.hidden = !resp.isAdmin;
+  });
   // Only meaningful for a real gate-verified session (X-Gate-Email) -- a
   // free-text identity was never actually logged in anywhere to log out of.
   logoutLink.hidden = !verified;
@@ -1180,6 +1254,22 @@ async function runDialer(identity, { verified = false } = {}) {
   refreshContacts();
   setInterval(refreshContacts, 5000);
   preloadLocalMedia();
+
+  // Someone added ME as a contact -- merge into the same Requests list
+  // showIncoming's privacy-gate already populates (see its "Wants to be
+  // added to your contacts" copy, which was already the right shape for
+  // this). Blocked senders never show up (server has no notion of my block
+  // list, so filter client-side, same as showIncoming's own check).
+  setInterval(() => api(`/contact-requests?email=${encodeURIComponent(identity.email)}`).then((r) => {
+    for (const { fromEmail } of r.requests || []) {
+      const email = fromEmail.toLowerCase();
+      if (blockedEmails.has(email) || myContacts.has(email)) continue;
+      if (!pendingRequests.some((p) => p.email === email)) {
+        pendingRequests.push({ email });
+        renderRequests();
+      }
+    }
+  }).catch(() => {}), 4000);
 
   btnDecline.addEventListener('click', () => {
     const declined = currentIncoming;
@@ -1355,6 +1445,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   chatInput.disabled = false;
   chatSend.disabled = false;
   addChatMessage('chat connected (tunneled through the Noise_IK channel, no separate data channel)', 'system');
+  flushOutbox(chatStore, peerEmail, (payload) => sendText(TAG_CHAT, payload));
 
   // Background receive loop -- same framing/decrypt pattern as the WebRTC
   // path's signaling loop, just dispatching on our own 1-byte tag instead of
