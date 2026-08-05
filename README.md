@@ -35,15 +35,22 @@ and exchanges real encrypted WebRTC signaling messages to establish a real
   ICE) is the reliable fallback for exactly those networks — not just "one
   option" among equals the way earlier revisions of this README implied, but the
   one that actually works off-LAN today.
-- **Known gap (CADS-webconference-demo#42): identity keys live in this
-  browser's `localStorage` until you explicitly remove them.** Each
-  identity's holder/Noise private keys persist across reloads and tab
-  closes (by design — that's what lets a reload keep an in-progress call
-  alive), and are only cleared when you use "Forget this identity" (or
-  "Log out," which forgets it too) from the messenger's menu. Don't use
-  this demo on a shared/kiosk machine and walk away without forgetting
-  your identity first — anyone with local browser access afterward could
-  still act as you.
+- **Known gap (CADS-webconference-demo#42/#22): identity keys — and
+  everything else this app stores locally — live in this browser's
+  `localStorage`/IndexedDB in the clear until you explicitly remove
+  them.** Each identity's holder/Noise private keys persist across
+  reloads and tab closes (by design — that's what lets a reload keep an
+  in-progress call alive), and are only cleared when you use "Forget this
+  identity" (or "Log out," which forgets it too) from the messenger's
+  menu. The same applies to your contacts list, blocked list, and message
+  metadata (chatStore encrypts message *bodies*, not who/when/direction —
+  see #22). None of this is encrypted at rest: anyone who can read this
+  browser profile's storage for this origin (a same-origin script, a
+  browser extension, forensic disk access) has the private keys
+  themselves, not just the metadata — the strongest possible credential,
+  making any *partial* encryption of contacts/metadata alone a false
+  sense of protection. Don't use this demo on a shared/kiosk machine and
+  walk away without forgetting your identity first.
 
 ## Architecture
 
