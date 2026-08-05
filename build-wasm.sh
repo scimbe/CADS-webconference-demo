@@ -15,7 +15,19 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Agent.Dockerfile comment) and its wasm/ member didn't exist before the workspace
 # restructure commit -- pinned by commit SHA until a release tag covers it. Bump
 # deliberately (bump-ct-agent.yml automates checking for a newer commit).
-CT_AGENT_REF="${CT_AGENT_REF:-86ab198ffc70d6dcb9ee1bb55efa2191dbd8d408}"
+#
+# CADS-webconference-demo#29: this pin MUST match Agent.Dockerfile's own
+# CT_AGENT_REF default and both compose files' -- the WASM build here is
+# the browser half of the same wire protocol the NATIVE ct-agent (built
+# from Agent.Dockerfile, run as webconference-demo-agent) speaks. They'd
+# drifted to two different commits (86ab198f here/compose.webconference-demo.yml
+# vs. b03f2efd in compose.webconference-demo.selfservice.yml) with no CI
+# check catching it. Aligned to b03f2efd here since that's the pairing
+# actually verified live this session (real Noise_IK handshakes + channel
+# joins succeeded repeatedly against the selfservice deployment's native
+# agent) -- not a claim 86ab198f was wrong, just that this is the pairing
+# with real evidence behind it. Bump all four together from now on.
+CT_AGENT_REF="${CT_AGENT_REF:-b03f2efd1ab5ec34d745a98336593fa6d9791ff1}"
 OUT_DIR="$REPO_ROOT/pkg"
 
 docker run --rm -m 2g --cpus 2 \

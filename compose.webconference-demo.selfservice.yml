@@ -81,6 +81,10 @@ services:
       context: .
       dockerfile: Agent.Dockerfile
       args:
+        # CADS-webconference-demo#29: must match build-wasm.sh/Agent.Dockerfile/
+        # compose.webconference-demo.yml's own defaults -- see build-wasm.sh's
+        # comment. This was the ONE of the four already on this pin; the other
+        # three were on a different, drifted commit until this same fix.
         - CT_AGENT_REF=${CT_AGENT_REF:-b03f2efd1ab5ec34d745a98336593fa6d9791ff1}
     environment:
       - CT_AGENT_MODE=browser

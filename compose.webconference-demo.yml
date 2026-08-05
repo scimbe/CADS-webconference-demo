@@ -52,7 +52,10 @@ services:
       context: .
       dockerfile: Agent.Dockerfile
       args:
-        - CT_AGENT_REF=${CT_AGENT_REF:-86ab198ffc70d6dcb9ee1bb55efa2191dbd8d408}
+        # CADS-webconference-demo#29: aligned with build-wasm.sh/Agent.Dockerfile/
+        # compose.webconference-demo.selfservice.yml's own defaults -- see
+        # build-wasm.sh's comment for why b03f2efd is the pin these all share now.
+        - CT_AGENT_REF=${CT_AGENT_REF:-b03f2efd1ab5ec34d745a98336593fa6d9791ff1}
     environment:
       - CT_AGENT_MODE=browser
       - CT_AGENT_HOSTNAME=webconference.bunsenbrenner.org
