@@ -28,7 +28,12 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # CADS-webconference-demo#28: pinned to the exact commit v4.4.0 tags
+      # (not the mutable `v4` major tag, which its owner can repoint to a
+      # different commit at any time) -- this workflow has `contents: write`
+      # + `pull-requests: write`, so a compromised/repointed action here
+      # could push arbitrary changes to this repo under CI's own token.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Resolve latest ct-agent commit
         id: latest
@@ -57,7 +62,12 @@ jobs:
 
       - name: Open PR if it changed and verification passed
         if: steps.diff.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v6
+        # CADS-webconference-demo#28: pinned to the exact commit v6.1.0 tags,
+        # not the mutable `v6` major tag -- same reasoning as actions/checkout
+        # above. This is the specific action the issue called out: it's a
+        # third-party action (not GitHub-owned) that runs with this
+        # workflow's own contents/pull-requests write token.
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
         with:
           commit-message: "chore(deps): bump pinned ct-agent to ${{ steps.latest.outputs.sha }}"
           title: "chore(deps): bump pinned ct-agent to ${{ steps.latest.outputs.sha }}"
