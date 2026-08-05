@@ -501,6 +501,17 @@
         back a full <code>?ws=&amp;grant=&amp;holderPriv=&amp;noisePriv=&amp;role=</code> link — opening
         it drops you straight into a call.</p>
     </details>
+    <!-- CADS-webconference-demo#42: identity private keys live in localStorage
+         until explicitly cleared -- logging out only ever cleared them as a
+         side effect of ending the Keycloak/gate session too. This gives a
+         shared-machine user a lighter, one-click way to purge just this
+         identity's keys (and its local chat history, which becomes
+         permanently undecryptable once the keys are gone) without also
+         signing out of the account entirely. -->
+    <p style="margin:.8rem 0 .3rem;font-size:.72rem;color:var(--muted)">Forgetting removes this
+      identity's keys from this browser -- its chat history becomes permanently unreadable here.
+      You stay signed in and can create or switch to a different identity.</p>
+    <button type="button" class="logout" id="forget-identity-btn" style="background:none;border:none;font:inherit;cursor:pointer;text-align:left;padding:0">Forget this identity</button>
     <a class="logout" id="logout-link" href="https://bunsenbrenner.org/portal/logout" hidden>Log out</a>
   </div>
 

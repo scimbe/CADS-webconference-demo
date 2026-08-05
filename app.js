@@ -1126,6 +1126,30 @@ const requestsEmpty = document.getElementById('requests-empty');
 // So: clear the gate cookie first via a credentialed no-cors beacon fetch
 // (Set-Cookie still applies even though the opaque response can't be read),
 // then navigate to /portal/logout for the real interactive Keycloak logout.
+// CADS-webconference-demo#33: scoped to exactly one identity's own keys, not
+// a blanket localStorage.clear() -- localStorage is shared across every
+// identity this browser has ever held (loadOrCreateIdentity explicitly
+// supports switching between several), so clearing everything would destroy
+// every OTHER identity's keys, contacts, blocklist, and Lamport clock too.
+// On a shared/kiosk browser that's silent, irreversible data loss for
+// whoever else's identity happened to be sitting in this browser -- their
+// encrypted IndexedDB history survives, but its keying material
+// (holderPriv) doesn't, so it becomes permanently undecryptable.
+// CADS-webconference-demo#42: factored out of the logout handler so the
+// same "purge this identity's keys" action is available on its own (Forget
+// this identity, and hangup's forget prompt) without also ending the
+// Keycloak/gate session the way logout does.
+function forgetIdentityKeys(email) {
+  if (email) {
+    const suffix = `:${email.toLowerCase()}`;
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith('ct-webconference-') && key.endsWith(suffix)) localStorage.removeItem(key);
+    }
+  } else {
+    localStorage.clear(); // no identity was ever established this session -- nothing identity-scoped to preserve
+  }
+}
+
 logoutLink.addEventListener('click', async (ev) => {
   ev.preventDefault();
   // A third piece, found by testing the full flow end-to-end: even once
@@ -1135,24 +1159,7 @@ logoutLink.addEventListener('click', async (ev) => {
   // browser, use the most recently used one automatically") silently
   // reuses the just-logged-out identity on the next visit instead of
   // prompting fresh. Clear it here too, or the other two fixes are moot.
-  // CADS-webconference-demo#33: this used to be a blanket localStorage.clear()
-  // -- localStorage is shared across every identity this browser has ever
-  // held (loadOrCreateIdentity explicitly supports switching between
-  // several), so logging out as one identity destroyed every OTHER
-  // identity's keys, contacts, blocklist, and Lamport clock too. On a
-  // shared/kiosk browser that's silent, irreversible data loss for whoever
-  // else's identity happened to be sitting in this browser -- their
-  // encrypted IndexedDB history survives, but its keying material
-  // (holderPriv) doesn't, so it becomes permanently undecryptable. Scope
-  // the clear to exactly this identity's own keys instead.
-  if (myEmail) {
-    const suffix = `:${myEmail.toLowerCase()}`;
-    for (const key of Object.keys(localStorage)) {
-      if (key.startsWith('ct-webconference-') && key.endsWith(suffix)) localStorage.removeItem(key);
-    }
-  } else {
-    localStorage.clear(); // no identity was ever established this session -- nothing identity-scoped to preserve
-  }
+  forgetIdentityKeys(myEmail);
   try {
     await fetch('https://bunsenbrenner.org/gate/logout?host=bunsenbrenner.org', {
       credentials: 'include',
@@ -1160,6 +1167,20 @@ logoutLink.addEventListener('click', async (ev) => {
     });
   } catch (_) {}
   location.href = 'https://bunsenbrenner.org/portal/logout';
+});
+
+// CADS-webconference-demo#42: purges just this identity's local keys (and,
+// as a consequence, its own chat history -- see forgetIdentityKeys' own
+// comment) WITHOUT ending the Keycloak/gate session the way logout does.
+// Reloading afterward is deliberate rather than trying to hand-reset every
+// piece of in-memory state (contacts, chatStore, open sockets, ...) --
+// run()'s normal bootstrap already handles "no matching identity in
+// localStorage" correctly on a fresh load, so reusing that path is both
+// simpler and less error-prone than a manual partial reset.
+document.getElementById('forget-identity-btn')?.addEventListener('click', () => {
+  if (!confirm(`Forget this identity (${myEmail || 'this browser\'s current identity'})? Its local chat history becomes permanently unreadable here. You'll stay signed in and can create or switch to a different identity.`)) return;
+  forgetIdentityKeys(myEmail);
+  location.reload();
 });
 
 // Set while an outgoing call is ringing (placed but not yet accepted/declined/

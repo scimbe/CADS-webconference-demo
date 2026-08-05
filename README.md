@@ -35,6 +35,15 @@ and exchanges real encrypted WebRTC signaling messages to establish a real
   ICE) is the reliable fallback for exactly those networks — not just "one
   option" among equals the way earlier revisions of this README implied, but the
   one that actually works off-LAN today.
+- **Known gap (CADS-webconference-demo#42): identity keys live in this
+  browser's `localStorage` until you explicitly remove them.** Each
+  identity's holder/Noise private keys persist across reloads and tab
+  closes (by design — that's what lets a reload keep an in-progress call
+  alive), and are only cleared when you use "Forget this identity" (or
+  "Log out," which forgets it too) from the messenger's menu. Don't use
+  this demo on a shared/kiosk machine and walk away without forgetting
+  your identity first — anyone with local browser access afterward could
+  still act as you.
 
 ## Architecture
 
