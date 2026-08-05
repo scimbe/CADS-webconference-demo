@@ -260,26 +260,31 @@ async function joinChannel(wsUrl, grantHex, holderPrivHex) {
   return { ws, stream, peerNoiseHex };
 }
 
-// Acquired as soon as the dialer screen is up (preloadLocalMedia, called from
-// runDialer) instead of only once a call actually starts -- getUserMedia's
-// permission prompt + device spin-up is the single slowest step between
-// "Call" and seeing yourself, and there's no reason to pay that latency
-// AFTER the callee has already started ringing. getLocalMedia() below
-// consumes this (one-shot: cleared on use) if it's ready, and transparently
-// falls back to acquiring fresh otherwise -- callers never need to know
-// which happened.
-let preloadedMedia = null;
+// CADS-webconference-demo (user feedback): this used to be acquired as soon
+// as the dialer/messenger screen came up (preloadLocalMedia, called from
+// runDialer) rather than only once a call actually starts -- trading a real
+// cost (the camera/mic light stays on the entire time someone's just
+// browsing contacts or chatting, not only while actually calling) for
+// shaving getUserMedia's latency off the start of a call. Not worth it,
+// especially now that most time in this app has nothing to do with calling
+// at all. Acquired fresh at getLocalMedia() call time now -- i.e. only once
+// a call is actually starting -- accepting the latency this trades back in.
 // 'user' (front/selfie) is the sane default on a device with two cameras;
 // meaningless-but-harmless on a desktop webcam, which just ignores facingMode.
 let currentFacingMode = 'user';
 let cameraSwitchAvailable = false;
 
-async function preloadLocalMedia() {
-  if (preloadedMedia) return;
-  preloadedMedia = await acquireLocalMedia();
-  if (preloadedMedia.kind === 'media') {
-    localVideo.srcObject = preloadedMedia.stream;
-    localEmpty.style.display = 'none';
+async function getLocalMedia() {
+  let media;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: currentFacingMode } });
+    log('real camera/microphone acquired');
+    media = { kind: 'media', stream };
+  } catch (e) {
+    log(`getUserMedia unavailable (${e.name || e}); falling back to a data channel probe -- \
+the same RTCPeerConnection/ICE machinery a real audio/video call uses, just without a \
+capture device attached in this environment`);
+    media = { kind: 'probe' };
   }
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -289,28 +294,7 @@ async function preloadLocalMedia() {
     // stays hidden, same as genuinely having only one camera.
   }
   btnSwitchCamera.hidden = !cameraSwitchAvailable;
-}
-
-async function acquireLocalMedia() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: currentFacingMode } });
-    log('real camera/microphone acquired');
-    return { kind: 'media', stream };
-  } catch (e) {
-    log(`getUserMedia unavailable (${e.name || e}); falling back to a data channel probe -- \
-the same RTCPeerConnection/ICE machinery a real audio/video call uses, just without a \
-capture device attached in this environment`);
-    return { kind: 'probe' };
-  }
-}
-
-async function getLocalMedia() {
-  if (preloadedMedia) {
-    const m = preloadedMedia;
-    preloadedMedia = null; // one-shot: consumed here, never reused stale
-    return m;
-  }
-  return acquireLocalMedia();
+  return media;
 }
 
 // Live front/back swap. Always correct for the local preview (video elements
@@ -1497,7 +1481,6 @@ async function runDialer(identity, { verified = false } = {}) {
 
   refreshContacts();
   setInterval(refreshContacts, 5000);
-  preloadLocalMedia();
 
   // Catches the case the compose-time trigger can't: a message queued
   // while the peer was offline, delivered once they come back -- without
