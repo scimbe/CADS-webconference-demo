@@ -81,5 +81,30 @@
 		# makes that revalidation cheap (304s, not a full re-fetch) when
 		# nothing actually changed.
 		Cache-Control "no-cache"
+		# CADS-webconference-demo#15/#16: no CSP or other hardening headers
+		# existed at all before this. Scoped to what the app actually does --
+		# one external module script (index.html has no inline <script>/
+		# onclick etc, confirmed by grep before writing this), inline <style>
+		# throughout (a full external-stylesheet refactor is its own separate
+		# piece of work, not bundled into a security-headers fix), the WASM
+		# module fetched same-origin, WebRTC media via getUserMedia +
+		# MediaSource (blob:), and the channel signaling WebSocket to this
+		# same host (wss: to 'self' is covered by CSP's same-origin match,
+		# no separate connect-src entry needed). frame-ancestors 'none' +
+		# X-Frame-Options DENY below are deliberately redundant (older
+		# browsers only honor the header, CSP is the modern replacement).
+		# connect-src includes the public STUN server (CADS-webconference-demo#18)
+		# -- WebRTC ICE/STUN gathering is CSP-gated in Chrome/Firefox, so without
+		# this entry the STUN fix would be silently defeated by this same policy.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self' stun://stun.l.google.com:19302; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# camera/microphone stay allowed for this origin itself (self) --
+		# the app's entire purpose needs getUserMedia; the actual hardening
+		# is denying them to any framed cross-origin content, which
+		# frame-ancestors 'none' above already forecloses anyway, but this
+		# also blocks e.g. a same-origin future embed from silently reusing
+		# camera access it was never granted.
+		Permissions-Policy "camera=(self), microphone=(self), geolocation=(), payment=()"
 	}
 }

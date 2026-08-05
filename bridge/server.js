@@ -191,7 +191,11 @@ function isOnline(entry) {
 
 function mintGrants(holderAPub, holderBPub) {
   return new Promise((resolve, reject) => {
-    execFile(GRANT_BIN, [holderAPub, holderBPub, '--operator-private', OPERATOR_KEY, '--ttl-secs', '3600'], (err, stdout) => {
+    // CADS-webconference-demo#12: no timeout meant a hung/misbehaving
+    // ct-video-call-grant process left this request (and the caller
+    // awaiting it) stuck forever. Local key-signing has no reason to take
+    // anywhere near this long; 10s is a generous ceiling, not a tight one.
+    execFile(GRANT_BIN, [holderAPub, holderBPub, '--operator-private', OPERATOR_KEY, '--ttl-secs', '3600'], { timeout: 10_000 }, (err, stdout) => {
       if (err) return reject(err);
       const out = {};
       for (const line of stdout.trim().split('\n')) {
@@ -310,10 +314,26 @@ function json(res, code, obj) {
   res.end(body);
 }
 
+// CADS-webconference-demo#12: no cap here at all meant a single request
+// body of any size just kept accumulating in memory until the connection
+// ended -- a real, trivial DoS vector. 64KB is generous for what this API
+// actually sends (the largest real payload is an attestation blob, still
+// well under a few KB); this rejects anything past that instead of trying
+// to buffer it.
+const MAX_BODY_BYTES = 65_536;
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (c) => (data += c));
+    let bytes = 0;
+    req.on('data', (c) => {
+      bytes += c.length;
+      if (bytes > MAX_BODY_BYTES) {
+        reject(new Error('request body too large'));
+        req.destroy();
+        return;
+      }
+      data += c;
+    });
     req.on('end', () => {
       try {
         resolve(data ? JSON.parse(data) : {});
@@ -368,14 +388,23 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { online: isOnline(directory.get(email)) });
     }
 
-    // Address-book contact list -- everyone who has ever registered presence
-    // here (not the gate's login allow-list, which this bridge can write to
-    // below but has no JSON API to read; see login_allowlist_add_route in
-    // CADS-Tunnel). "online" reuses the same PRESENCE_TTL_MS freshness check
-    // /api/presence already applies to a single email.
+    // Presence lookup for the caller's OWN contact list -- CADS-webconference-demo#11:
+    // this used to return the FULL directory (every email that has ever
+    // registered here, anywhere), regardless of who asked -- a real PII leak
+    // (email enumeration) and a presence oracle (who's online right now) for
+    // anyone who could reach this endpoint at all. app.js's refreshContacts()
+    // already only ever used this to annotate presence for myContacts.all()
+    // -- it never needed anyone else's entries -- so scoping the response to
+    // an explicit, caller-supplied list changes no real behavior, just closes
+    // the leak. `emails` unset/empty deliberately returns nothing rather than
+    // falling back to the old full-directory behavior for an unpatched caller.
     if (req.method === 'GET' && url.pathname === '/api/contacts') {
-      const contacts = [...directory.entries()]
-        .map(([email, entry]) => ({ email, online: isOnline(entry) }))
+      const requested = (url.searchParams.get('emails') || '')
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean);
+      const contacts = requested
+        .map((email) => ({ email, online: isOnline(directory.get(email)) }))
         .sort((a, b) => a.email.localeCompare(b.email));
       return json(res, 200, { contacts });
     }

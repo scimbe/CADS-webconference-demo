@@ -358,16 +358,52 @@ const NO_CAMERA_SENTINEL = '\u0000no-camera';
 // VP8/VP9/Opus at all) -- telling them "no camera" here would be flat wrong.
 const NO_CODEC_SENTINEL = '\u0000no-codec';
 
+// CADS-webconference-demo#21: markDelivered() used to run immediately after
+// send(), with nothing confirming the peer actually got the frame -- a
+// channel/tab/network death between send() and the peer processing it
+// silently and PERMANENTLY lost the message (already marked delivered
+// locally, so it would never be retried). Every place that handles an
+// incoming TAG_CHAT frame now sends a small {ack:seq} envelope right back
+// over the same channel (see each receive loop's own comment); an
+// AckWaiter matches those to the sends still waiting on them. One per
+// live channel/session -- never shared across connections, so a stale ack
+// from a previous session can't spuriously resolve a new one.
+function createAckWaiter() {
+  const pending = new Map(); // seq -> {resolve, reject}
+  return {
+    wait(seq, timeoutMs = 5000) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(seq);
+          reject(new Error(`no ack for seq ${seq} within ${timeoutMs}ms`));
+        }, timeoutMs);
+        pending.set(seq, { resolve: () => { clearTimeout(timer); pending.delete(seq); resolve(); } });
+      });
+    },
+    resolve(seq) {
+      pending.get(seq)?.resolve();
+    },
+  };
+}
+
 // Sends every message composed while offline (chatStore.pendingOutbox) the
 // moment a live channel to that peer actually opens -- called from both
 // transports' own "channel just opened" point. `send` is transport-specific
 // (WebRTC datachannel.send(str) vs. the Noise-channel sendText(TAG_CHAT, str))
-// so this stays agnostic to which one is live.
-async function flushOutbox(chatStore, peerEmail, send) {
+// so this stays agnostic to which one is live. Only marks a message
+// delivered once its ack actually arrives; stops flushing (leaving the rest
+// pending) the moment one doesn't -- a dead channel mid-flush shouldn't
+// spray the remaining queue into the void, just leave it for next time.
+async function flushOutbox(chatStore, peerEmail, send, ackWaiter) {
   if (!chatStore || !peerEmail) return;
   const outbox = await chatStore.pendingOutbox(peerEmail);
   for (const m of outbox) {
     send(JSON.stringify({ seq: m.seq, text: m.text }));
+    try {
+      await ackWaiter.wait(m.seq);
+    } catch {
+      break;
+    }
     await chatStore.markDelivered(peerEmail, m.seq);
   }
 }
@@ -421,7 +457,12 @@ async function connectBackgroundChannel(wsUrl, grantHex, holderPrivHex, noisePri
 // not a "peer hung up" signal the way it would be mid-call.
 async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore, peerEmail) {
   const send = (text) => writeFramed(stream, noiseTransport.encrypt(concatBytes(new Uint8Array([TAG_CHAT]), new TextEncoder().encode(text))));
-  await flushOutbox(chatStore, peerEmail, send);
+  const ackWaiter = createAckWaiter();
+  // Runs CONCURRENTLY with the receive loop below, not before it -- flushOutbox
+  // now awaits an ack for each send, and that ack can only ever arrive via
+  // this same function's own receive loop, so awaiting the flush first would
+  // deadlock waiting for a reply nothing is listening for yet.
+  const flushPromise = flushOutbox(chatStore, peerEmail, send, ackWaiter);
   const deadline = Date.now() + BACKGROUND_CHAT_WINDOW_MS;
   try {
     while (Date.now() < deadline) {
@@ -429,13 +470,19 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
       const plain = noiseTransport.decrypt(cipher);
       if (plain[0] !== TAG_CHAT) continue;
       const raw = new TextDecoder().decode(plain.slice(1));
-      let seq, text;
+      let parsed;
       try {
-        ({ seq, text } = JSON.parse(raw));
+        parsed = JSON.parse(raw);
       } catch {
         continue; // sentinel or malformed frame -- nothing to record
       }
+      if (parsed.ack != null) {
+        ackWaiter.resolve(parsed.ack);
+        continue;
+      }
+      const { seq, text } = parsed;
       if (chatStore && peerEmail && seq != null && text != null) {
+        send(JSON.stringify({ ack: seq })); // CADS-webconference-demo#21 -- see createAckWaiter's comment
         await chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
         if (currentConversationEmail === peerEmail.toLowerCase()) appendConvMessage({ from: 'peer', text, pending: false });
         refreshContacts(); // updates the list-pane preview text
@@ -445,6 +492,7 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
     // Timed out waiting for more, or the peer closed -- a normal end to a
     // background session, not an error worth surfacing anywhere.
   } finally {
+    await flushPromise.catch(() => {}); // let any still-in-flight send finish before we close under it
     stream.ws.close();
   }
 }
@@ -527,6 +575,7 @@ async function autoAcceptChatDelivery(incoming, identity) {
 // identity's OTHER open tab (via chatStore's BroadcastChannel) also renders
 // live here if it's for this same conversation.
 function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
+  const ackWaiter = createAckWaiter(); // CADS-webconference-demo#21 -- see createAckWaiter's own comment
   if (chatStore && peerEmail) {
     chatStore.history(peerEmail).then((history) => {
       for (const m of history) addChatMessage(m.text, m.from);
@@ -540,7 +589,7 @@ function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
     chatSend.disabled = false;
     addChatMessage('chat connected (real WebRTC data channel, DTLS-encrypted)', 'system');
     if (!localHasCamera) channel.send(NO_CAMERA_SENTINEL);
-    flushOutbox(chatStore, peerEmail, (payload) => channel.send(payload));
+    flushOutbox(chatStore, peerEmail, (payload) => channel.send(payload), ackWaiter);
   });
   channel.addEventListener('close', () => {
     chatInput.disabled = true;
@@ -555,14 +604,23 @@ function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
     // JSON envelope carries the sender's Lamport seq so record({received:true})
     // can preserve causal order -- tolerate a plain-text payload too (e.g. an
     // older/manual-link peer with no chatStore of its own) by just showing it.
-    let seq, text;
+    let parsed;
     try {
-      ({ seq, text } = JSON.parse(ev.data));
+      parsed = JSON.parse(ev.data);
     } catch (_) {
-      text = ev.data;
+      addChatMessage(ev.data, 'peer');
+      return;
     }
+    if (parsed.ack != null) {
+      ackWaiter.resolve(parsed.ack);
+      return;
+    }
+    const { seq, text } = parsed;
     addChatMessage(text, 'peer');
-    if (chatStore && peerEmail && seq != null) chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
+    if (chatStore && peerEmail && seq != null) {
+      channel.send(JSON.stringify({ ack: seq }));
+      chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
+    }
   });
   chatForm.addEventListener('submit', (ev) => {
     ev.preventDefault();
@@ -895,9 +953,12 @@ let pendingRequests = [];
 // -- /api/contacts (presence) is only consulted to annotate each contact's
 // online/offline status, not to decide who's shown at all.
 async function refreshContacts() {
-  const resp = await api('/contacts');
+  const mine = myContacts.all();
+  // CADS-webconference-demo#11: scoped to exactly the emails this call
+  // needs presence for -- see the endpoint's own comment for why.
+  const resp = mine.length ? await api(`/contacts?emails=${encodeURIComponent(mine.join(','))}`) : { contacts: [] };
   const presence = new Map((resp.error ? [] : resp.contacts || []).map((c) => [c.email, c.online]));
-  const contacts = myContacts.all().map((email) => ({ email, online: presence.get(email) || false }));
+  const contacts = mine.map((email) => ({ email, online: presence.get(email) || false }));
   await renderContacts(contacts);
   renderRequests();
 }
@@ -1614,7 +1675,8 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   chatInput.disabled = false;
   chatSend.disabled = false;
   addChatMessage('chat connected (tunneled through the Noise_IK channel, no separate data channel)', 'system');
-  flushOutbox(chatStore, peerEmail, (payload) => sendText(TAG_CHAT, payload));
+  const ackWaiter = createAckWaiter(); // CADS-webconference-demo#21 -- see createAckWaiter's own comment
+  flushOutbox(chatStore, peerEmail, (payload) => sendText(TAG_CHAT, payload), ackWaiter);
 
   // Background receive loop -- same framing/decrypt pattern as the WebRTC
   // path's signaling loop, just dispatching on our own 1-byte tag instead of
@@ -1639,46 +1701,73 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
         returnToDialerAfterHangup();
         return;
       }
-      const plain = noiseTransport.decrypt(cipher);
-      const tag = plain[0];
-      const payload = plain.slice(1);
-      if (tag === TAG_MEDIA_INIT) {
-        const mimeType = new TextDecoder().decode(payload);
-        if (mediaSource.readyState === 'open' && MediaSource.isTypeSupported(mimeType)) {
-          sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-          sourceBuffer.mode = 'sequence';
-          sourceBuffer.addEventListener('updateend', flushPending);
-          remoteEmpty.style.display = 'none';
-          log(`remote media stream starting (${mimeType})`);
-        } else {
-          mediaUnsupported = true;
-          log(`peer's media type unsupported here: ${mimeType}`);
-        }
-      } else if (tag === TAG_MEDIA_CHUNK) {
-        appendChunk(payload);
-      } else if (tag === TAG_CHAT) {
-        const raw = new TextDecoder().decode(payload);
-        if (raw === NO_CAMERA_SENTINEL) {
-          addChatMessage('Your peer joined without a working camera/microphone -- that\'s why you can\'t see or hear them, not a bug.', 'system');
-          remoteEmpty.textContent = 'peer has no camera';
-        } else if (raw === NO_CODEC_SENTINEL) {
-          addChatMessage('Your peer has a camera, but their browser can\'t encode video for this transport (e.g. Safari doesn\'t support the codecs used here) -- try WebRTC mode instead.', 'system');
-          remoteEmpty.textContent = "peer's browser can't encode video here";
-        } else {
-          // Real chat rides as a {seq, text} JSON envelope -- see the send
-          // side's comment. Tolerate plain text too (an older/manual-link peer).
-          let seq, text;
-          try {
-            ({ seq, text } = JSON.parse(raw));
-          } catch (_) {
-            text = raw;
+      // CADS-webconference-demo#20: readFramed() above is guarded, but
+      // decrypt()/dispatch was not -- one malformed or undecryptable frame
+      // (corrupted in transit, a desynced Noise counter, a media type this
+      // browser rejects in addSourceBuffer) threw out of this async IIFE
+      // with nothing awaiting it, silently ending the whole receive loop
+      // with zero UI feedback -- the exact "call just stops working, no
+      // error shown" symptom reported. Treated the same as a lost
+      // connection (the existing catch above) rather than skip-and-continue:
+      // a decrypt failure specifically can mean something is genuinely
+      // wrong with this stream, not safe to just keep reading past.
+      try {
+        const plain = noiseTransport.decrypt(cipher);
+        const tag = plain[0];
+        const payload = plain.slice(1);
+        if (tag === TAG_MEDIA_INIT) {
+          const mimeType = new TextDecoder().decode(payload);
+          if (mediaSource.readyState === 'open' && MediaSource.isTypeSupported(mimeType)) {
+            sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+            sourceBuffer.mode = 'sequence';
+            sourceBuffer.addEventListener('updateend', flushPending);
+            remoteEmpty.style.display = 'none';
+            log(`remote media stream starting (${mimeType})`);
+          } else {
+            mediaUnsupported = true;
+            log(`peer's media type unsupported here: ${mimeType}`);
           }
-          addChatMessage(text, 'peer');
-          if (chatStore && peerEmail && seq != null) chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
+        } else if (tag === TAG_MEDIA_CHUNK) {
+          appendChunk(payload);
+        } else if (tag === TAG_CHAT) {
+          const raw = new TextDecoder().decode(payload);
+          if (raw === NO_CAMERA_SENTINEL) {
+            addChatMessage('Your peer joined without a working camera/microphone -- that\'s why you can\'t see or hear them, not a bug.', 'system');
+            remoteEmpty.textContent = 'peer has no camera';
+          } else if (raw === NO_CODEC_SENTINEL) {
+            addChatMessage('Your peer has a camera, but their browser can\'t encode video for this transport (e.g. Safari doesn\'t support the codecs used here) -- try WebRTC mode instead.', 'system');
+            remoteEmpty.textContent = "peer's browser can't encode video here";
+          } else {
+            // Real chat rides as a {seq, text} JSON envelope -- see the send
+            // side's comment. Tolerate plain text too (an older/manual-link peer).
+            let parsed;
+            try {
+              parsed = JSON.parse(raw);
+            } catch (_) {
+              addChatMessage(raw, 'peer');
+              parsed = null;
+            }
+            if (parsed && parsed.ack != null) {
+              ackWaiter.resolve(parsed.ack);
+            } else if (parsed) {
+              const { seq, text } = parsed;
+              addChatMessage(text, 'peer');
+              if (chatStore && peerEmail && seq != null) {
+                sendText(TAG_CHAT, JSON.stringify({ ack: seq })); // CADS-webconference-demo#21
+                chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
+              }
+            }
+          }
+        } else if (tag === TAG_BYE) {
+          setStatus('peer-hung-up');
+          addChatMessage('peer hung up', 'system');
+          returnToDialerAfterHangup();
+          return;
         }
-      } else if (tag === TAG_BYE) {
+      } catch (e) {
+        log(`channel receive loop: bad frame, ending call: ${e.message}`);
         setStatus('peer-hung-up');
-        addChatMessage('peer hung up', 'system');
+        addChatMessage('connection lost (a corrupted or unexpected frame arrived)', 'system');
         returnToDialerAfterHangup();
         return;
       }
@@ -1801,7 +1890,18 @@ async function run() {
   }
 
   setStatus('connecting-webrtc');
-  const pc = new RTCPeerConnection({ iceServers: [] });
+  // CADS-webconference-demo#18: iceServers: [] meant ICE could only ever
+  // find a candidate pair when both sides happened to be reachable directly
+  // (same LAN, or one side has a real public IP) -- anyone behind NAT on
+  // both ends failed silently. A public STUN server fixes the common case
+  // (each side discovers its own reflexive address) but NOT symmetric NAT
+  // or locked-down corporate networks, which need an actual TURN relay --
+  // this demo has no TURN infrastructure/credentials to offer one, so
+  // that harder case stays a known gap, not silently claimed as fixed. The
+  // direct-channel transport (transportMode === 'channel', relayed over
+  // this app's own WebSocket channel instead of raw ICE) remains the
+  // reliable fallback for exactly those networks.
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
 
   // Liveness above the relay, not through it: the Noise/ws_channel signaling
   // path only tells us the peer is gone if it manages to send a clean 'bye'
@@ -1939,21 +2039,39 @@ async function run() {
       } catch {
         return; // connection closed
       }
-      const plain = noiseTransport.decrypt(cipher);
-      const msg = wasm.decodeSignalMessage(plain);
-      if (msg.kind === 'offer') {
-        await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        sendSignal(wasm.encodeSignalAnswer(answer.sdp));
-      } else if (msg.kind === 'answer') {
-        await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
-      } else if (msg.kind === 'ice-candidate') {
-        await pc.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMlineIndex });
-      } else if (msg.kind === 'bye') {
-        sessionEnded = true; // before pc.close(), same reasoning as the local hang-up path above
+      // CADS-webconference-demo#20: readFramed() above is guarded, but
+      // decrypt()/decode/dispatch was not -- one malformed or undecryptable
+      // signaling frame (or an SDP/ICE candidate the browser itself rejects
+      // via setRemoteDescription/addIceCandidate) threw out of this async
+      // IIFE with nothing awaiting it, silently ending the whole signaling
+      // loop with zero UI feedback -- "the call just stops working." Same
+      // cleanup as an explicit 'bye', since from here on this signaling
+      // channel can't be trusted to keep making sense.
+      try {
+        const plain = noiseTransport.decrypt(cipher);
+        const msg = wasm.decodeSignalMessage(plain);
+        if (msg.kind === 'offer') {
+          await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          sendSignal(wasm.encodeSignalAnswer(answer.sdp));
+        } else if (msg.kind === 'answer') {
+          await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+        } else if (msg.kind === 'ice-candidate') {
+          await pc.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMlineIndex });
+        } else if (msg.kind === 'bye') {
+          sessionEnded = true; // before pc.close(), same reasoning as the local hang-up path above
+          setStatus('peer-hung-up');
+          addChatMessage('peer hung up', 'system');
+          pc.close();
+          returnToDialerAfterHangup();
+          return;
+        }
+      } catch (e) {
+        log(`signaling loop: bad frame, ending call: ${e.message}`);
+        sessionEnded = true;
         setStatus('peer-hung-up');
-        addChatMessage('peer hung up', 'system');
+        addChatMessage('connection lost (a corrupted or unexpected signaling frame arrived)', 'system');
         pc.close();
         returnToDialerAfterHangup();
         return;
