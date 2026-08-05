@@ -2976,7 +2976,23 @@ async function run() {
     channel.addEventListener('message', () => {
       lastSeen = Date.now();
     });
-    channel.addEventListener('close', () => endCallDueToPeerLoss('heartbeat channel closed'));
+    channel.addEventListener('close', () => {
+      // CADS-webconference-demo#38 (finding 5): a data channel can close on
+      // its own -- e.g. a transient SCTP stream reset -- without the
+      // underlying peer connection being dead. Treating ANY heartbeat-
+      // channel close as fatal ended calls on a recoverable blip. Only
+      // escalate immediately if the peer connection itself has ALSO
+      // already failed; otherwise this is logged but not fatal on its
+      // own. The HEARTBEAT_TIMEOUT_MS watchdog above (35s of heartbeat
+      // silence) and pc.onconnectionstatechange's own 'failed' handling
+      // (#19, with an active ICE-restart attempt) remain the real
+      // peer-loss detectors -- this close event alone is no longer one.
+      if (pc.connectionState === 'failed') {
+        endCallDueToPeerLoss('heartbeat channel closed (peer connection also failed)');
+      } else {
+        log(`heartbeat channel closed (connection state: ${pc.connectionState}) -- not treating as fatal on its own`);
+      }
+    });
   }
 
   // Chat: a second, real WebRTC data channel alongside the media tracks --
