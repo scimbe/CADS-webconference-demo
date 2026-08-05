@@ -1457,7 +1457,10 @@ accessRemoveForm.addEventListener('submit', async (ev) => {
   if (!isValidEmail(email)) return setAccessNote('error', `"${email}" doesn't look like a valid email address.`);
   accessRemoveConsoleLink.hidden = true;
   setAccessNote('info', `Revoking access for ${email}…`);
-  const resp = await api('/allowlist/remove', { body: { email, callerEmail: myEmail } });
+  // CADS-webconference-demo#9/#10: no callerEmail to send -- the bridge
+  // derives the admin check from X-Gate-Email itself now, same as
+  // /api/is-admin (#46) and approve/decline (#41).
+  const resp = await api('/allowlist/remove', { body: { email } });
   if (resp.error) return setAccessNote('error', `Couldn't revoke access: ${resp.error}`);
   // Revoking someone's login is also "I don't want to hear from them" --
   // fold in the same local block+remove-from-contacts side effects the

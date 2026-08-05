@@ -410,6 +410,38 @@ function sweepExpired() {
 }
 setInterval(sweepExpired, 10_000).unref();
 
+// CADS-webconference-demo#9/#10: the real per-request identity check --
+// X-Gate-Email is set by Caddy's forward_auth only after the gate's own
+// /gate/check verifies a real Keycloak session (same signal /api/whoami,
+// #46's /api/is-admin, and #41's approve/decline already trust
+// exclusively). The bridge itself is only ever reachable via Caddy's
+// reverse proxy on the internal docker network (never exposed directly),
+// so a client cannot forge this header -- Caddy is the one setting it.
+// Re-verifying the JWT/JWKS a second time inside the bridge would just
+// duplicate work the gate already did; trusting this header IS the real
+// per-request verification, not a shortcut around it.
+//
+// Deliberately fails OPEN (returns true -- "can't verify, don't block")
+// when X-Gate-Email is absent: an ungated tunnel, or this browser's own
+// free-text/no-login identity fallback (see runIdentityScreen's own
+// comment in app.js), has no gate-verified identity to check against at
+// all. Those deployment modes keep exactly today's trust level (whatever
+// the body claims) -- this closes the impersonation gap for a REAL gated
+// deployment (the actual production configuration) without silently
+// breaking the free-text/testing fallback the app is also built to
+// support. A tunnel operator who wants the stronger guarantee everywhere
+// enables gate enforcement for that tunnel; that's an existing per-tunnel
+// setting, not something this bridge can force from here.
+function gateVerifiedEmail(req) {
+  const email = req.headers['x-gate-email'];
+  return email ? email.trim().toLowerCase() : null;
+}
+function identityAllowed(req, claimedEmail) {
+  const verified = gateVerifiedEmail(req);
+  if (!verified) return true; // can't verify -- don't block (see comment above)
+  return verified === (claimedEmail || '').trim().toLowerCase();
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://bridge');
   try {
@@ -425,6 +457,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/register') {
       const { email, holderPub, noisePub } = await readBody(req);
       if (!email || !holderPub || !noisePub) return json(res, 400, { error: 'email, holderPub, noisePub required' });
+      // CADS-webconference-demo#9: registering overwrites directory[email]
+      // with caller-supplied public keys, unconditionally -- a gate-verified
+      // caller could register as anyone else, taking over future calls to
+      // that victim (see identityAllowed's own comment for the trust model).
+      if (!identityAllowed(req, email)) return json(res, 403, { error: 'email does not match your verified identity' });
       directory.set(email.toLowerCase(), { holderPub, noisePub, lastSeen: Date.now() });
       return json(res, 200, { ok: true });
     }
@@ -484,16 +521,26 @@ const server = http.createServer(async (req, res) => {
     // to pass the gate at all) -- proxies the control plane's own portal
     // form-POST routes (login_allowlist_add_route/_remove_route in
     // CADS-Tunnel's portal_api.rs), reusing the exact same session-cookie
-    // credential cpFetch() already holds for channel registration. Adding is
-    // still open to any gate-verified caller (that's the same action as
-    // adding a contact, from the user's side -- see msgSearchForm in app.js);
-    // removing is gated to ADMIN_EMAILS above, since letting any caller
-    // revoke *anyone's* access was a real privilege gap, not a deliberate
-    // design choice.
+    // credential cpFetch() already holds for channel registration.
+    // CADS-webconference-demo#10: adding used to be open to ANY gate-verified
+    // caller, for an ARBITRARY email -- not "add myself," an actual
+    // privilege-escalation surface into the tunnel's login system (self-
+    // approve any account, not just your own). Gated to ADMIN_EMAILS now,
+    // the same as remove already was. msgSearchForm's "add a contact"
+    // action in app.js already treats this call as best-effort (the contact
+    // still gets added locally, and the invited person still gets a
+    // contact-request notification, either way) -- a non-admin adding
+    // someone not yet on the allow-list now needs that person to separately
+    // self-request access via the #36 flow (request-access.html) for an
+    // admin to approve, rather than being silently self-granted.
     if (req.method === 'POST' && url.pathname === '/api/allowlist/add') {
       if (!TUNNEL_ID) return json(res, 503, { error: 'WEBCONFERENCE_TUNNEL_ID not configured' });
       const { email } = await readBody(req);
       if (!email) return json(res, 400, { error: 'email required' });
+      const caller = gateVerifiedEmail(req) || '';
+      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has(caller)) {
+        return json(res, 403, { error: 'admin only' });
+      }
       const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email });
       if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}` });
       return json(res, 200, { ok: true });
@@ -532,9 +579,14 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/api/allowlist/remove') {
       if (!TUNNEL_ID) return json(res, 503, { error: 'WEBCONFERENCE_TUNNEL_ID not configured' });
-      const { email, callerEmail } = await readBody(req);
+      const { email } = await readBody(req);
       if (!email) return json(res, 400, { error: 'email required' });
-      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has((callerEmail || '').trim().toLowerCase())) {
+      // CADS-webconference-demo#9/#10: same fix as /api/is-admin (#46) and
+      // approve/decline (#41) -- was checking the client-supplied
+      // callerEmail body field, letting any gate-admitted non-admin spoof
+      // it to a real admin's address and revoke anyone's access.
+      const caller = gateVerifiedEmail(req) || '';
+      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has(caller)) {
         return json(res, 403, { error: 'admin only' });
       }
       const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist/${encodeURIComponent(email)}/remove`, {});
@@ -605,6 +657,12 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/api/call') {
       const { fromEmail, toEmail, transport, kind } = await readBody(req);
+      // CADS-webconference-demo#9: fromEmail used to be trusted outright --
+      // a gate-verified caller could place a call "from" any registered
+      // victim and receive grantForCaller, joining as that victim. toEmail
+      // deliberately ISN'T checked here -- calling someone else is the
+      // whole point of this endpoint.
+      if (!identityAllowed(req, fromEmail)) return json(res, 403, { error: 'fromEmail does not match your verified identity' });
       const from = (fromEmail || '').toLowerCase();
       const to = (toEmail || '').toLowerCase();
       const caller = directory.get(from);
@@ -701,7 +759,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/api/incoming') {
-      const email = (url.searchParams.get('email') || '').toLowerCase();
+      // CADS-webconference-demo#9: the single most severe vector -- this
+      // returns grant: call.grantForCallee, a bearer credential that joins
+      // the call as the callee, to whoever asks with ?email=<anyone>. A
+      // gate-verified caller could steal any other user's incoming call
+      // grant with no check that they own that email at all.
+      const rawEmail = url.searchParams.get('email') || '';
+      if (!identityAllowed(req, rawEmail)) return json(res, 403, { error: 'email does not match your verified identity' });
+      const email = rawEmail.toLowerCase();
       const channel = incomingByEmail.get(email);
       if (!channel) return json(res, 200, { incoming: null });
       const call = pendingCalls.get(channel);
@@ -736,9 +801,22 @@ const server = http.createServer(async (req, res) => {
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, 'http://bridge');
-  const email = (url.searchParams.get('email') || '').toLowerCase();
+  const rawEmail = url.searchParams.get('email') || '';
+  const email = rawEmail.toLowerCase();
   const key = req.headers['sec-websocket-key'];
   if (url.pathname !== '/api/ws' || !email || !key) {
+    socket.destroy();
+    return;
+  }
+  // CADS-webconference-demo#9: first-connector-wins with no auth at all --
+  // an attacker connecting as the victim's email received the victim's own
+  // incoming-call grant over this socket (wsPush in /api/call). Same
+  // gate-verified-header check as every other identity-sensitive endpoint;
+  // this request goes through the SAME Caddy route (gate check, then
+  // reverse_proxy) as any other /api/* call before it ever reaches here, so
+  // X-Gate-Email should be present under the same conditions it is
+  // anywhere else.
+  if (!identityAllowed(req, rawEmail)) {
     socket.destroy();
     return;
   }
