@@ -325,6 +325,10 @@
  .msg-back-btn{display:none}
  .msg-conv-title{flex:1;min-width:0}
  .msg-conv-title #conv-name{font-size:.92rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ /* CADS-webconference-demo#54 */
+ .msg-conv-name-row{display:flex;align-items:center;gap:.35rem;min-width:0}
+ .msg-rename-btn{flex-shrink:0;background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:.8rem;padding:.1rem .2rem;border-radius:4px;line-height:1}
+ .msg-rename-btn:hover{color:var(--text);background:var(--panel2)}
  .msg-conv-status{font-size:.74rem;font-family:var(--mono);color:var(--muted)}
  .msg-conv-status[data-online="1"]{color:var(--accent2)}
  .msg-conv-messages{flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.5rem}
@@ -514,7 +518,10 @@
           <button class="msg-icon-btn msg-back-btn" id="msg-back-btn" type="button" aria-label="Back">←</button>
           <div class="contact-avatar" id="conv-avatar"></div>
           <div class="msg-conv-title">
-            <div id="conv-name"></div>
+            <div class="msg-conv-name-row">
+              <div id="conv-name"></div>
+              <button type="button" id="conv-rename-btn" class="msg-rename-btn" aria-label="Rename this contact" title="Rename">✎</button>
+            </div>
             <div class="msg-conv-status" id="conv-status">offline</div>
           </div>
           <button class="msg-icon-btn" id="msg-block-btn" type="button" aria-label="Block this contact">🚫</button>

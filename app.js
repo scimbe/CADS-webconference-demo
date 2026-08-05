@@ -76,6 +76,65 @@ function isValidEmail(s) {
   return typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
+// CADS-webconference-demo#55: requested once per session, lazily -- not on
+// page load (bad practice, browsers increasingly auto-suppress a
+// permission prompt fired before any real interaction) but the first time
+// runDialer actually establishes a real identity, which is itself already
+// downstream of at least one real user action (the identity form, or an
+// already-verified gate login). `default` is the only state worth acting
+// on: 'granted'/'denied' both mean the user already decided.
+let notificationPermissionRequested = false;
+function ensureNotificationPermission() {
+  if (typeof Notification === 'undefined' || notificationPermissionRequested) return;
+  notificationPermissionRequested = true;
+  if (Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+}
+// Only actually notifies if permission is granted AND the tab genuinely
+// isn't what the user is looking at right now (hidden OR unfocused) --
+// a real messenger doesn't also toast-notify you about a message you're
+// already reading. Clicking the notification focuses this tab back, same
+// as any real chat app's own notifications.
+function notifyIfHidden(title, body) {
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  if (!document.hidden && document.hasFocus()) return;
+  try {
+    const n = new Notification(title, { body });
+    n.onclick = () => { window.focus(); n.close(); };
+  } catch (_) {}
+}
+
+// CADS-webconference-demo#56: a short synthesized tone via Web Audio
+// instead of bundling an actual audio asset -- no file to fetch/host/
+// license, works identically everywhere, and is trivially easy to change
+// later if a real sound file is ever wanted instead. Wrapped in try/catch
+// throughout: browser autoplay policy can reject audio before any user
+// gesture has happened on the page at all (rare here in practice, since
+// reaching a real identity already implies at least one prior
+// interaction) -- a rejected chime should never be a reason to break the
+// call/message flow it's just decorating.
+let audioCtx = null;
+function playChime(freqs, toneMs = 150) {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const now = audioCtx.currentTime;
+    freqs.forEach((freq, i) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = freq;
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      const start = now + i * (toneMs / 1000);
+      const end = start + toneMs / 1000;
+      gain.gain.setValueAtTime(0.15, start);
+      gain.gain.exponentialRampToValueAtTime(0.001, end);
+      osc.start(start);
+      osc.stop(end);
+    });
+  } catch (_) {}
+}
+function playIncomingCallSound() { playChime([880, 660], 180); }
+function playMessageSound() { playChime([660], 100); }
+
 function log(msg) {
   // Timestamped (HH:MM:SS.mmm) so the Technical readout panel can show how
   // far apart events actually happened -- important for diagnosing stalls/
@@ -643,6 +702,8 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
           send(JSON.stringify({ ack: seq }));
           if (currentConversationEmail === peerEmail.toLowerCase()) appendConvMessage(recorded);
           refreshContacts();
+          notifyIfHidden(peerEmail, `📎 ${name || 'Sent a file'}`); // CADS-webconference-demo#55/#56
+          playMessageSound();
         }
         continue;
       }
@@ -670,6 +731,8 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
         send(JSON.stringify({ ack: seq })); // CADS-webconference-demo#21 -- see createAckWaiter's comment
         if (currentConversationEmail === peerEmail.toLowerCase()) appendConvMessage({ from: 'peer', text, pending: false });
         refreshContacts(); // updates the list-pane preview text
+        notifyIfHidden(peerEmail, text); // CADS-webconference-demo#55/#56
+        playMessageSound();
       }
     }
   } catch {
@@ -1025,6 +1088,7 @@ const msgAttachBtn = document.getElementById('msg-attach-btn');
 const msgAttachInput = document.getElementById('msg-attach-input');
 const convAvatar = document.getElementById('conv-avatar');
 const convName = document.getElementById('conv-name');
+const convRenameBtn = document.getElementById('conv-rename-btn');
 const convStatus = document.getElementById('conv-status');
 const convMessages = document.getElementById('conv-messages');
 const onlyContactsToggle = document.getElementById('only-contacts-toggle');
@@ -1212,7 +1276,35 @@ function localSetFor(kind, email) {
   };
 }
 
+// CADS-webconference-demo#54: contacts showed only the raw email with no
+// way to label them -- a real gap versus any basic messenger. Local-only
+// (same trust/durability tier as myContacts/blockedEmails above -- this
+// identity's own private labels, never sent to the bridge or the peer),
+// keyed the same way localSetFor's own storage key is.
+function nameMapFor(email) {
+  const key = `ct-webconference-names:${email.toLowerCase()}`;
+  function all() {
+    try {
+      return JSON.parse(localStorage.getItem(key) || '{}');
+    } catch (_) {
+      return {};
+    }
+  }
+  return {
+    get(e) {
+      return all()[e.toLowerCase()] || null;
+    },
+    set(e, name) {
+      const map = all();
+      const trimmed = (name || '').trim();
+      if (trimmed) map[e.toLowerCase()] = trimmed;
+      else delete map[e.toLowerCase()]; // empty name clears the label, falls back to the email
+      localStorage.setItem(key, JSON.stringify(map));
+    },
+  };
+}
 let myContacts = null;
+let myNames = null;
 let blockedEmails = null;
 let onlyAcceptFromContacts = false;
 let myEmail = null; // set once in runDialer -- the logged-in identity's own email
@@ -1310,7 +1402,10 @@ async function renderContacts(contacts) {
     top.className = 'msg-row-top';
     const nameEl = document.createElement('div');
     nameEl.className = 'msg-row-name';
-    nameEl.textContent = email;
+    // CADS-webconference-demo#54: shows the display name if one's been set
+    // (myNames, local-only -- see nameMapFor's own comment), the raw email
+    // otherwise -- exactly the same fallback openConversation's header uses.
+    nameEl.textContent = myNames?.get(email) || email;
     top.appendChild(nameEl);
     const preview = document.createElement('div');
     preview.className = 'msg-row-preview';
@@ -1507,7 +1602,7 @@ async function openConversation(email) {
   msgConversation.hidden = false;
   messengerShell.dataset.conversationOpen = '1';
   convAvatar.textContent = (email[0] || '?').toUpperCase();
-  convName.textContent = email;
+  convName.textContent = myNames?.get(email) || email; // CADS-webconference-demo#54
   const presence = await api(`/presence?email=${encodeURIComponent(email)}`);
   convStatus.textContent = presence.online ? 'online' : 'offline';
   convStatus.dataset.online = presence.online ? '1' : '0';
@@ -1690,6 +1785,21 @@ msgSearchForm.addEventListener('submit', async (ev) => {
 });
 msgBackBtn.addEventListener('click', closeConversation);
 msgCallBtn.addEventListener('click', () => dialForm.requestSubmit());
+// CADS-webconference-demo#54: a real display name, editable per contact --
+// local-only (see nameMapFor's own comment), never sent anywhere. prompt()
+// is a deliberately minimal editor (pre-filled with the current label or
+// the email itself) rather than a custom inline-edit UI, matching this
+// app's existing pattern for simple one-off text entry (see the identity
+// screen's own free-text form).
+convRenameBtn.addEventListener('click', () => {
+  if (!currentConversationEmail || !myNames) return;
+  const current = myNames.get(currentConversationEmail) || '';
+  const next = prompt(`Display name for ${currentConversationEmail}:`, current);
+  if (next === null) return; // cancelled
+  myNames.set(currentConversationEmail, next);
+  convName.textContent = myNames.get(currentConversationEmail) || currentConversationEmail;
+  refreshContacts(); // updates the list-pane row's own name
+});
 msgComposeForm.addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const text = msgComposeInput.value.trim();
@@ -1770,6 +1880,7 @@ async function runDialer(identity, { verified = false } = {}) {
   myEmail = identity.email;
   myIdentity = identity;
   myContacts = localSetFor('contacts', identity.email);
+  myNames = nameMapFor(identity.email);
   blockedEmails = localSetFor('blocked', identity.email);
   onlyAcceptFromContacts = localStorage.getItem(`ct-webconference-settings:${identity.email.toLowerCase()}`) === '1';
   onlyContactsToggle.checked = onlyAcceptFromContacts;
@@ -1796,6 +1907,7 @@ async function runDialer(identity, { verified = false } = {}) {
 
   await api('/register', { body: { email: identity.email, holderPub: identity.holderPub, noisePub: identity.noisePub } });
   setInterval(() => api('/heartbeat', { body: { email: identity.email } }), 15000);
+  ensureNotificationPermission(); // CADS-webconference-demo#55
 
   dialForm.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -1918,6 +2030,12 @@ async function runDialer(identity, { verified = false } = {}) {
     currentIncoming = incoming;
     incomingFrom.textContent = incoming.fromEmail;
     incomingCard.hidden = false;
+    // CADS-webconference-demo#55/#56: a real incoming call is exactly the
+    // moment a notification/sound matters most -- notifyIfHidden itself
+    // no-ops if the tab is already visible+focused (you're already looking
+    // at the ringing card).
+    notifyIfHidden('Incoming call', `${incoming.fromEmail} is calling…`);
+    playIncomingCallSound();
     currentIncomingTimer = setTimeout(() => {
       // CADS-webconference-demo#39 (finding 4): this only ever cleared
       // local state -- the bridge/caller had no idea this side gave up,
