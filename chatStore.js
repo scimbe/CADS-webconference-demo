@@ -261,9 +261,37 @@ export class ChatStore {
   // the live channel. Never true for a received message.
   async record({ peerEmail, from, text, seq, received = false, pending = false }) {
     if (received) this.clock.observe(seq);
+    const conversation = conversationKey(this.identity.email, peerEmail);
+    const db = await this._getDb();
+    // CADS-webconference-demo#43 (finding 1): flushOutbox breaks (without
+    // marking delivered) when an ack times out even though the peer DID
+    // receive and persist the message -- the ack was just lost/slow in
+    // transit. The sender then retries the same seq next session; without
+    // this check the receiver recorded (and rendered) it a second time,
+    // directly contradicting the "exactly-once" intent of the ack-confirmed
+    // delivery work #21 added. byConversation is [conversation, seq], not
+    // unique per `from` -- a real schema change (compound unique index)
+    // would need a DB_VERSION bump, more than this pass covers; a
+    // get-before-add check against the existing index reaches the same
+    // outcome without touching the schema. 'me' sends aren't checked here:
+    // their seq always comes fresh from nextSeqForSend() (this identity's
+    // own Lamport tick), never replayed the way a resent peer seq is.
+    if (received) {
+      const existing = await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readonly');
+        const idx = tx.objectStore(STORE).index('byConversation');
+        const req = idx.getAll(IDBKeyRange.only([conversation, seq]));
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      const duplicate = existing.find((r) => r.from === from);
+      if (duplicate) {
+        return { peerEmail: duplicate.peerEmail, seq, from, text: await this._decrypt(duplicate.iv, duplicate.ciphertext), ts: duplicate.ts, pending: duplicate.pending };
+      }
+    }
     const { iv, ciphertext } = await this._encrypt(text);
     const record = {
-      conversation: conversationKey(this.identity.email, peerEmail),
+      conversation,
       peerEmail: peerEmail.toLowerCase(),
       seq,
       from, // 'me' | 'peer'
@@ -272,7 +300,6 @@ export class ChatStore {
       iv,
       ciphertext,
     };
-    const db = await this._getDb();
     await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite');
       tx.objectStore(STORE).add(record);

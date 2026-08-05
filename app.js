@@ -453,10 +453,19 @@ async function flushOutbox(chatStore, peerEmail, send, ackWaiter) {
   if (!chatStore || !peerEmail) return;
   const outbox = await chatStore.pendingOutbox(peerEmail);
   for (const m of outbox) {
-    send(JSON.stringify({ seq: m.seq, text: m.text }));
+    // CADS-webconference-demo#43 (finding 3): only ackWaiter.wait() was
+    // wrapped -- send() itself could throw synchronously (e.g. a data
+    // channel raising InvalidStateError mid-close) and propagate straight
+    // out of this function. Both call sites are fire-and-forget with no
+    // .catch(), so that surfaced as an unhandled promise rejection. The
+    // message was never actually lost either way (it just stays pending,
+    // same as an ack timeout) -- this only changes whether the failure is
+    // handled cleanly or crashes out as unhandled.
     try {
+      send(JSON.stringify({ seq: m.seq, text: m.text }));
       await ackWaiter.wait(m.seq);
-    } catch {
+    } catch (e) {
+      log(`flushOutbox: stopping (seq ${m.seq} to ${peerEmail} not confirmed: ${e.message || e}) -- rest stays queued for next attempt`);
       break;
     }
     await chatStore.markDelivered(peerEmail, m.seq);
@@ -537,8 +546,14 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
       }
       const { seq, text } = parsed;
       if (chatStore && peerEmail && seq != null && text != null) {
-        send(JSON.stringify({ ack: seq })); // CADS-webconference-demo#21 -- see createAckWaiter's comment
+        // CADS-webconference-demo#43 (finding 2): used to send the ack
+        // BEFORE persisting -- if record() ever threw, the sender would
+        // already have its ack and mark the message delivered even though
+        // this side never actually stored it, a narrow window where #21's
+        // "ack implies persisted" guarantee didn't fully hold. Persist
+        // first, ack only once that succeeds.
         await chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
+        send(JSON.stringify({ ack: seq })); // CADS-webconference-demo#21 -- see createAckWaiter's comment
         if (currentConversationEmail === peerEmail.toLowerCase()) appendConvMessage({ from: 'peer', text, pending: false });
         refreshContacts(); // updates the list-pane preview text
       }
@@ -687,7 +702,7 @@ function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
     chatInput.disabled = true;
     chatSend.disabled = true;
   });
-  channel.addEventListener('message', (ev) => {
+  channel.addEventListener('message', async (ev) => {
     if (ev.data === NO_CAMERA_SENTINEL) {
       addChatMessage('Your peer joined without a working camera/microphone -- that\'s why you can\'t see or hear them, not a bug.', 'system');
       remoteEmpty.textContent = 'peer has no camera';
@@ -710,8 +725,12 @@ function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
     const { seq, text } = parsed;
     addChatMessage(text, 'peer');
     if (chatStore && peerEmail && seq != null) {
+      // CADS-webconference-demo#43 (finding 2) -- see backgroundChatSession's
+      // matching comment. Used to send the ack (and not even await record()
+      // at all) before persisting; persist first now, ack only once that
+      // succeeds.
+      await chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
       channel.send(JSON.stringify({ ack: seq }));
-      chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
     }
   });
   chatForm.addEventListener('submit', async (ev) => {
@@ -2091,8 +2110,11 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
               const { seq, text } = parsed;
               addChatMessage(text, 'peer');
               if (chatStore && peerEmail && seq != null) {
+                // CADS-webconference-demo#43 (finding 2) -- see
+                // backgroundChatSession's matching comment. Persist before
+                // acking, not after (or not at all, as before).
+                await chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
                 sendText(TAG_CHAT, JSON.stringify({ ack: seq })); // CADS-webconference-demo#21
-                chatStore.record({ peerEmail, from: 'peer', text, seq, received: true });
               }
             }
           }
