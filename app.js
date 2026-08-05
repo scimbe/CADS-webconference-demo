@@ -25,6 +25,8 @@ import { ChatStore } from './chatStore.js';
 
 const setupScreen = document.getElementById('setup-screen');
 const callScreen = document.getElementById('call-screen');
+const siteHero = document.getElementById('site-hero');
+const landingMain = document.getElementById('landing-main');
 const statusEl = document.getElementById('status');
 const iceEl = document.getElementById('ice-state');
 const logEl = document.getElementById('log');
@@ -467,6 +469,9 @@ function returnToDialerAfterHangup(delayMs = 1200) {
 
 function showCallScreen() {
   setupScreen.hidden = true;
+  siteHero.hidden = true;
+  landingMain.hidden = true;
+  messengerShell.hidden = true;
   callScreen.hidden = false;
 }
 
@@ -509,7 +514,6 @@ function computeAttestation(channelHex, holderPrivHex, holderPubHex, noisePubHex
 }
 
 const idEntry = document.getElementById('id-entry');
-const idDialer = document.getElementById('id-dialer');
 const idForm = document.getElementById('id-form');
 const idEmailInput = document.getElementById('id-email');
 const myEmailEl = document.getElementById('my-email');
@@ -533,6 +537,19 @@ const accessNote = document.getElementById('access-note');
 const videoGrid = document.getElementById('video-grid');
 const localTile = document.getElementById('local-tile');
 const btnSwitchCamera = document.getElementById('btn-switch-camera');
+const messengerShell = document.getElementById('messenger-shell');
+const msgMenuToggle = document.getElementById('msg-menu-toggle');
+const msgMenu = document.getElementById('msg-menu');
+const msgSearchForm = document.getElementById('msg-search-form');
+const msgSearchInput = document.getElementById('msg-search');
+const msgConvPlaceholder = document.getElementById('msg-conv-placeholder');
+const msgConversation = document.getElementById('msg-conversation');
+const msgBackBtn = document.getElementById('msg-back-btn');
+const msgCallBtn = document.getElementById('msg-call-btn');
+const convAvatar = document.getElementById('conv-avatar');
+const convName = document.getElementById('conv-name');
+const convStatus = document.getElementById('conv-status');
+const convMessages = document.getElementById('conv-messages');
 
 // A real account switch needs BOTH halves cleared -- confirmed live (2026-08-03):
 // /gate/logout alone clears ct_gate_session, but the gate's own check silently
@@ -651,35 +668,96 @@ function startCallFromIdentity(identity, { role, channel, grant, ws, transport, 
 async function refreshContacts() {
   const resp = await api('/contacts');
   if (resp.error) return; // best-effort -- leave whatever list is already showing
-  renderContacts(resp.contacts || []);
+  await renderContacts(resp.contacts || []);
 }
 
-function renderContacts(contacts) {
+function formatMsgTime(ts) {
+  const d = new Date(ts);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+// Renders the chat list (messenger-row: avatar, name, last-message preview,
+// timestamp, online dot) -- a real chat list, not a bare directory. Pulls
+// the last message per contact from chatStore (if one exists yet) so a
+// contact you've actually talked to shows a preview, same as any real
+// messenger; a contact with no history yet just shows online/offline.
+async function renderContacts(contacts) {
   contactsList.querySelectorAll('li:not(#contacts-empty)').forEach((li) => li.remove());
   contactsEmpty.hidden = contacts.length > 0;
   for (const { email, online } of contacts) {
     const li = document.createElement('li');
     li.dataset.online = online ? '1' : '0';
+    if (email === currentConversationEmail) li.classList.add('active');
     const avatar = document.createElement('div');
     avatar.className = 'contact-avatar';
     avatar.textContent = (email[0] || '?').toUpperCase();
-    const info = document.createElement('div');
-    info.className = 'contact-info';
-    const emailEl = document.createElement('div');
-    emailEl.className = 'contact-email';
-    emailEl.textContent = email;
-    const statusEl = document.createElement('div');
-    statusEl.className = 'contact-status';
-    statusEl.innerHTML = '<span class="dot"></span>';
-    statusEl.append(online ? 'online' : 'offline');
-    info.append(emailEl, statusEl);
-    li.append(avatar, info);
-    li.addEventListener('click', () => {
-      dialEmailInput.value = email;
-      dialForm.requestSubmit();
-    });
+    const body = document.createElement('div');
+    body.className = 'msg-row-body';
+    const top = document.createElement('div');
+    top.className = 'msg-row-top';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'msg-row-name';
+    nameEl.textContent = email;
+    top.appendChild(nameEl);
+    const preview = document.createElement('div');
+    preview.className = 'msg-row-preview';
+    preview.textContent = 'No messages yet';
+    if (dialerChatStore) {
+      const history = await dialerChatStore.history(email);
+      const last = history[history.length - 1];
+      if (last) {
+        const time = document.createElement('span');
+        time.className = 'msg-row-time';
+        time.textContent = formatMsgTime(last.ts);
+        top.appendChild(time);
+        preview.textContent = last.from === 'me' ? `You: ${last.text}` : last.text;
+      }
+    }
+    body.append(top, preview);
+    li.append(avatar, body);
+    li.addEventListener('click', () => openConversation(email));
     contactsList.appendChild(li);
   }
+}
+
+// State for the currently-open conversation (messenger shell's right pane /
+// mobile full-screen conversation view). null when nothing is selected.
+let currentConversationEmail = null;
+
+async function openConversation(email) {
+  currentConversationEmail = email;
+  dialEmailInput.value = email; // dial-form's existing submit handler reads this as the call target
+  msgConvPlaceholder.hidden = true;
+  msgConversation.hidden = false;
+  messengerShell.dataset.conversationOpen = '1';
+  convAvatar.textContent = (email[0] || '?').toUpperCase();
+  convName.textContent = email;
+  const presence = await api(`/presence?email=${encodeURIComponent(email)}`);
+  convStatus.textContent = presence.online ? 'online' : 'offline';
+  convStatus.dataset.online = presence.online ? '1' : '0';
+  convMessages.innerHTML = '';
+  if (dialerChatStore) {
+    const history = await dialerChatStore.history(email);
+    for (const m of history) {
+      const div = document.createElement('div');
+      div.className = `chat-msg ${m.from}`;
+      const body = document.createElement('div');
+      body.textContent = m.text;
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = m.from === 'me' ? 'you' : 'peer';
+      div.append(body, meta);
+      convMessages.appendChild(div);
+    }
+    convMessages.scrollTop = convMessages.scrollHeight;
+  }
+  await refreshContacts(); // updates the .active row highlight
+}
+
+function closeConversation() {
+  currentConversationEmail = null;
+  messengerShell.dataset.conversationOpen = '0';
 }
 
 function setAccessNote(kind, text) {
@@ -714,9 +792,33 @@ accessRemoveForm.addEventListener('submit', async (ev) => {
 // no-op on desktop, which never applies that class visually.
 localTile.addEventListener('click', () => videoGrid.classList.toggle('swapped'));
 
+msgMenuToggle.addEventListener('click', () => { msgMenu.hidden = !msgMenu.hidden; });
+document.addEventListener('click', (ev) => {
+  if (!msgMenu.hidden && !msgMenu.contains(ev.target) && ev.target !== msgMenuToggle) msgMenu.hidden = true;
+});
+msgSearchForm.addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const email = msgSearchInput.value.trim();
+  if (!email) return;
+  openConversation(email);
+  msgSearchInput.value = '';
+});
+msgBackBtn.addEventListener('click', closeConversation);
+msgCallBtn.addEventListener('click', () => dialForm.requestSubmit());
+
+// Instantiated once identity is known so the chat list can show last-message
+// previews (chatStore.history()) even before any call has been placed this
+// session -- a separate instance from run()'s call-scoped one (different
+// module load, this page never reaches run()'s call-setup path at all until
+// a call actually starts and reloads into it).
+let dialerChatStore = null;
+
 async function runDialer(identity, { verified = false } = {}) {
-  idEntry.hidden = true;
-  idDialer.hidden = false;
+  setupScreen.hidden = true;
+  siteHero.hidden = true;
+  landingMain.hidden = true;
+  messengerShell.hidden = false;
+  dialerChatStore = new ChatStore(identity);
   myEmailEl.textContent = identity.email + (verified ? ' (verified via login)' : '');
   // Only meaningful for a real gate-verified session (X-Gate-Email) -- a
   // free-text identity was never actually logged in anywhere to log out of.

@@ -200,10 +200,82 @@
  @media (max-width:640px){
   .contacts-list,.access-form,details.manage-access{max-width:none}
  }
+
+ /* ---- messenger app shell -- the actual app, shown once identified/online. ----
+    ---- Full-viewport, edge-to-edge, no landing-page chrome: real messengers  ----
+    ---- (WhatsApp, Signal, Telegram) never show marketing copy once you're    ----
+    ---- past onboarding, they open straight into the chat list.              ---- */
+ #messenger-shell{position:fixed;inset:0;z-index:10;background:var(--bg);display:flex;flex-direction:column}
+ #messenger-shell[hidden]{display:none} /* author display:flex above otherwise beats [hidden] */
+ .msg-topbar{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:.85rem 1.1rem;border-bottom:1px solid var(--line);background:var(--panel)}
+ .msg-brand{font-family:var(--serif);font-weight:600;font-size:1.05rem;display:flex;align-items:center;gap:.5rem}
+ .msg-brand .flame{width:8px;height:8px;border-radius:50%;background:var(--accent2);box-shadow:0 0 0 3px rgba(95,184,171,.2)}
+ .msg-icon-btn{font-family:inherit;background:transparent;border:none;color:var(--muted2);font-size:1.15rem;cursor:pointer;
+  width:2.3rem;height:2.3rem;border-radius:50%;display:flex;align-items:center;justify-content:center;transition:background .12s}
+ .msg-icon-btn:hover{background:var(--panel2);color:var(--text)}
+
+ .msg-menu{position:absolute;top:3.5rem;right:1rem;z-index:5;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.35);padding:1rem;min-width:16rem;font-size:.85rem}
+ .msg-menu-email{font-family:var(--mono);font-size:.78rem;color:var(--muted2);word-break:break-all;margin-bottom:.7rem;
+  padding-bottom:.7rem;border-bottom:1px solid var(--line-soft)}
+ .msg-menu a.logout{display:block;margin-top:.8rem;color:var(--danger);text-decoration:none;font-weight:600}
+ .msg-menu label.transport-toggle{display:flex;align-items:flex-start;gap:.5rem;margin-top:.8rem;padding-top:.8rem;
+  border-top:1px solid var(--line-soft);font-size:.78rem;color:var(--muted)}
+
+ .msg-body{flex:1;display:flex;min-height:0}
+ .msg-list-pane{width:100%;display:flex;flex-direction:column;border-right:1px solid var(--line)}
+ @media (min-width:860px){.msg-list-pane{width:23rem;flex-shrink:0}}
+ .msg-search-row{flex-shrink:0;padding:.7rem .9rem;border-bottom:1px solid var(--line-soft)}
+ .msg-search-row input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:99px;color:var(--text);
+  padding:.55rem 1rem;font:inherit;font-size:.86rem}
+ .msg-search-row input:focus{outline:none;border-color:var(--accent2)}
+ .msg-chat-list{list-style:none;margin:0;padding:0;overflow-y:auto;flex:1}
+ .msg-chat-list li{display:flex;align-items:center;gap:.75rem;padding:.75rem .9rem;cursor:pointer;border-bottom:1px solid var(--line-soft);transition:background .12s}
+ .msg-chat-list li:hover,.msg-chat-list li.active{background:var(--panel2)}
+ .msg-chat-list li[hidden]{display:none}
+ .msg-chat-list .contact-avatar{width:2.6rem;height:2.6rem;font-size:1rem;flex-shrink:0}
+ .msg-row-body{flex:1;min-width:0}
+ .msg-row-top{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem}
+ .msg-row-name{font-size:.92rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .msg-row-time{font-size:.72rem;font-family:var(--mono);color:var(--muted);flex-shrink:0}
+ .msg-row-preview{font-size:.82rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:.15rem}
+ .msg-row-preview .you{color:var(--muted2)}
+ .msg-chat-list li[data-online="1"] .msg-row-name::after{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:var(--accent2);margin-left:.45rem;box-shadow:0 0 0 2px rgba(95,184,171,.2)}
+
+ .msg-conversation-pane{flex:1;display:flex;flex-direction:column;min-width:0}
+ .msg-conv-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:.9rem;text-align:center;padding:2rem}
+ .msg-conv-placeholder[hidden],.msg-conversation[hidden]{display:none} /* author display:flex above otherwise beats [hidden] */
+ @media (max-width:859px){.msg-conversation-pane{display:none}}
+ .msg-conversation{flex:1;display:flex;flex-direction:column;min-height:0}
+ .msg-conv-header{flex-shrink:0;display:flex;align-items:center;gap:.7rem;padding:.7rem .9rem;border-bottom:1px solid var(--line);background:var(--panel)}
+ .msg-back-btn{display:none}
+ .msg-conv-title{flex:1;min-width:0}
+ .msg-conv-title #conv-name{font-size:.92rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .msg-conv-status{font-size:.74rem;font-family:var(--mono);color:var(--muted)}
+ .msg-conv-status[data-online="1"]{color:var(--accent2)}
+ .msg-conv-messages{flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.5rem}
+ .msg-conv-note{padding:0 1rem;font-size:.8rem;color:var(--muted);text-align:center}
+ .msg-conv-input{flex-shrink:0;padding:.8rem .9rem calc(.8rem + env(safe-area-inset-bottom));border-top:1px solid var(--line)}
+ .msg-start-call-btn{width:100%;font-family:inherit;background:var(--accent2);color:#08211d;border:none;border-radius:99px;
+  padding:.75rem 1rem;font-size:.92rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:.5rem}
+ .msg-start-call-btn:hover{filter:brightness(1.05)}
+ .msg-start-call-btn:disabled{opacity:.5;cursor:not-allowed}
+
+ .msg-incoming-banner{position:absolute;top:3.6rem;left:50%;transform:translateX(-50%);z-index:6;background:var(--panel);
+  border:1px solid var(--accent2);border-radius:10px;padding:.9rem 1.1rem;box-shadow:0 8px 28px rgba(0,0,0,.35);
+  font-size:.86rem;min-width:16rem}
+ .msg-incoming-banner .row{display:flex;gap:.6rem;margin-top:.7rem}
+
+ @media (max-width:859px){
+  #messenger-shell[data-conversation-open="1"] .msg-list-pane{display:none}
+  #messenger-shell[data-conversation-open="1"] .msg-conversation-pane{display:flex}
+  #messenger-shell[data-conversation-open="1"] .msg-back-btn{display:flex}
+ }
 </style>
 </head>
 <body>
-<div class="hero">
+<div class="hero" id="site-hero">
   <div class="wrap hero-top">
     <div class="brand"><span class="flame"></span>CADS-Tunnel <span class="tld">video call</span></div>
     <nav class="hero-nav">
@@ -213,7 +285,7 @@
   </div>
 </div>
 
-<main class="wrap">
+<main class="wrap" id="landing-main">
   <div class="eyebrow">REAL WEBRTC · NOISE_IK ENCRYPTED · ZERO-KNOWLEDGE SIGNALING</div>
 
   <!-- ============ IDENTITY / DIALER SCREEN (shown until ws/grant/holderPriv/noisePriv/role are all present) ============ -->
@@ -239,61 +311,6 @@
             browser (never leaves it) and registers only its <em>public</em> half against your e-mail.</p>
         </div>
 
-        <div id="id-dialer" hidden>
-          <div class="online-badge"><span class="dot"></span>Online as <b id="my-email">&nbsp;</b></div>
-          <a id="logout-link" href="https://bunsenbrenner.org/portal/logout" hidden style="display:inline-block;margin-top:.4rem;font-size:.8rem;color:var(--muted2);text-decoration:underline;cursor:pointer">Log out</a>
-          <h2>Call someone</h2>
-          <form class="dialer-row" id="dial-form">
-            <input id="dial-email" type="email" placeholder="their@email.com" required autocomplete="off" />
-            <button type="submit" class="btn">Call →</button>
-          </form>
-          <label style="display:flex;align-items:center;gap:.5rem;margin-top:.6rem;font-size:.8rem;color:var(--muted)">
-            <input type="checkbox" id="transport-channel" style="accent-color:var(--accent2)" />
-            Use direct-channel media (experimental) — tunnels audio/video/chat through the
-            same Noise_IK-encrypted Agent-Fabric channel instead of negotiating WebRTC/ICE;
-            no STUN/TURN needed, works behind stricter NATs/firewalls, at the cost of higher latency.
-          </label>
-          <div id="call-note"></div>
-          <button class="decline" id="btn-cancel-call" type="button" hidden style="margin-top:.6rem">Cancel call</button>
-          <div id="incoming-card" class="incoming-card" hidden>
-            <div>Incoming call from <b id="incoming-from"></b></div>
-            <div class="row">
-              <button class="accept" id="btn-accept" type="button">Accept</button>
-              <button class="decline" id="btn-decline" type="button">Decline</button>
-            </div>
-          </div>
-
-          <div class="contacts-panel">
-            <h2 style="font-size:.95rem;margin:1.3rem 0 .6rem">Contacts</h2>
-            <ul class="contacts-list" id="contacts-list">
-              <li class="contacts-empty" id="contacts-empty">No one else has gone online yet.</li>
-            </ul>
-            <details class="manage-access">
-              <summary>Manage who's allowed to log in</summary>
-              <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">Adds/removes an email on this
-                tunnel's login allow-list. There's no read-back here (the portal itself is the source of
-                truth for who's currently listed) — this just lets you grant or revoke access without
-                leaving the call app.</p>
-              <form class="access-form" id="access-add-form">
-                <input id="access-add-email" type="email" placeholder="someone@example.com" required autocomplete="off" />
-                <button type="submit">Grant access</button>
-              </form>
-              <form class="access-form" id="access-remove-form">
-                <input id="access-remove-email" type="email" placeholder="someone@example.com" required autocomplete="off" />
-                <button type="submit" class="danger">Revoke access</button>
-              </form>
-              <div id="access-note"></div>
-            </details>
-          </div>
-        </div>
-
-        <details class="manual-fallback">
-          <summary>Have a manual call link instead?</summary>
-          <p>Someone can also mint a call offline with <code>ct-video-call-grant &lt;your_holder_pub&gt;
-            &lt;their_holder_pub&gt;</code> (pure local signing, keys never leave their machine) and hand you
-            back a full <code>?ws=&amp;grant=&amp;holderPriv=&amp;noisePriv=&amp;role=</code> link — opening
-            it drops you straight into the call below.</p>
-        </details>
       </div>
       <div class="panel-card" style="background:var(--panel2)">
         <h2 style="font-size:.95rem;margin-bottom:.6rem">What's real, what's not</h2>
@@ -306,9 +323,102 @@
       </div>
     </div>
   </section>
+</main>
 
-  <!-- ============ CALL SCREEN ============ -->
-  <section id="call-screen" hidden>
+<!-- ============ MESSENGER APP SHELL -- the real app, shown once identified/    ============
+     ============ online. No landing-page chrome once you're actually in it.    ============ -->
+<section id="messenger-shell" hidden>
+  <div class="msg-topbar">
+    <div class="msg-brand"><span class="flame"></span>Messages</div>
+    <button class="msg-icon-btn" id="msg-menu-toggle" type="button" aria-label="Menu">⋮</button>
+  </div>
+
+  <div class="msg-menu" id="msg-menu" hidden>
+    <div class="msg-menu-email">Online as <b id="my-email"></b></div>
+    <label class="transport-toggle">
+      <input type="checkbox" id="transport-channel" style="accent-color:var(--accent2)" />
+      Use direct-channel media (experimental) — tunnels audio/video/chat through the same
+      Noise_IK-encrypted Agent-Fabric channel instead of WebRTC/ICE; no STUN/TURN needed, higher latency.
+    </label>
+    <details class="manage-access">
+      <summary>Manage who's allowed to log in</summary>
+      <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">Adds/removes an email on this
+        tunnel's login allow-list. There's no read-back here (the portal itself is the source of
+        truth for who's currently listed) — this just lets you grant or revoke access without
+        leaving the app.</p>
+      <form class="access-form" id="access-add-form">
+        <input id="access-add-email" type="email" placeholder="someone@example.com" required autocomplete="off" />
+        <button type="submit">Grant access</button>
+      </form>
+      <form class="access-form" id="access-remove-form">
+        <input id="access-remove-email" type="email" placeholder="someone@example.com" required autocomplete="off" />
+        <button type="submit" class="danger">Revoke access</button>
+      </form>
+      <div id="access-note"></div>
+    </details>
+    <details class="manual-fallback">
+      <summary>Have a manual call link instead?</summary>
+      <p>Someone can also mint a call offline with <code>ct-video-call-grant &lt;your_holder_pub&gt;
+        &lt;their_holder_pub&gt;</code> (pure local signing, keys never leave their machine) and hand you
+        back a full <code>?ws=&amp;grant=&amp;holderPriv=&amp;noisePriv=&amp;role=</code> link — opening
+        it drops you straight into a call.</p>
+    </details>
+    <a class="logout" id="logout-link" href="https://bunsenbrenner.org/portal/logout" hidden>Log out</a>
+  </div>
+
+  <div class="msg-incoming-banner" id="incoming-card" hidden>
+    <div>Incoming call from <b id="incoming-from"></b></div>
+    <div class="row">
+      <button class="accept" id="btn-accept" type="button">Accept</button>
+      <button class="decline" id="btn-decline" type="button">Decline</button>
+    </div>
+  </div>
+
+  <div class="msg-body" id="msg-body">
+    <div class="msg-list-pane">
+      <form class="msg-search-row" id="msg-search-form">
+        <input id="msg-search" type="email" placeholder="Search or start a chat by email" autocomplete="off" />
+      </form>
+      <ul class="msg-chat-list" id="contacts-list">
+        <li class="msg-empty" id="contacts-empty">No conversations yet — enter an email above to start one.</li>
+      </ul>
+    </div>
+
+    <div class="msg-conversation-pane">
+      <div class="msg-conv-placeholder" id="msg-conv-placeholder">Select a contact to start chatting</div>
+      <div class="msg-conversation" id="msg-conversation" hidden>
+        <div class="msg-conv-header">
+          <button class="msg-icon-btn msg-back-btn" id="msg-back-btn" type="button" aria-label="Back">←</button>
+          <div class="contact-avatar" id="conv-avatar"></div>
+          <div class="msg-conv-title">
+            <div id="conv-name"></div>
+            <div class="msg-conv-status" id="conv-status">offline</div>
+          </div>
+          <button class="msg-icon-btn msg-call-btn" id="msg-call-btn" type="button" aria-label="Video call">📹</button>
+        </div>
+        <div class="msg-conv-messages" id="conv-messages"></div>
+        <button class="decline" id="btn-cancel-call" type="button" hidden style="margin:0 .9rem .6rem">Cancel call</button>
+        <div class="msg-conv-note" id="call-note"></div>
+        <!-- Real-time text only exists over a live call (no server-relay/
+             store-and-forward in this demo) -- rather than a text box that
+             silently can't deliver anything until connected, this is one
+             explicit action, honest about what it does. dial-email stays a
+             hidden field carrying the target (set by openConversation/the
+             contact click handler) so the existing dial-form submit logic
+             (POST /call -> /attest -> startCallFromIdentity) needs no
+             rewrite, just a different way of getting its target address. -->
+        <form class="msg-conv-input" id="dial-form">
+          <input id="dial-email" type="hidden" />
+          <button type="submit" class="msg-start-call-btn">📹 Start a call to chat live</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CALL SCREEN ============ -->
+<main class="wrap">
+<section id="call-screen" hidden>
     <div class="call-header">
       <h1 style="font-size:1.3rem">Your call</h1>
       <div style="display:flex;gap:.6rem;align-items:center">
