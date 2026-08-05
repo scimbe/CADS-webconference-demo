@@ -1610,6 +1610,17 @@ function renderBlockedList() {
 // State for the currently-open conversation (messenger shell's right pane /
 // mobile full-screen conversation view). null when nothing is selected.
 let currentConversationEmail = null;
+// CADS-webconference-demo#59: every blob: URL appendConvMessage creates for
+// a file message is tracked here so it can be revoked before the next
+// render replaces it -- without this, URL.createObjectURL was never
+// balanced by a revokeObjectURL anywhere, so re-opening an attachment-heavy
+// conversation leaked a fresh, unreclaimable set of blob URLs (each pinning
+// up to MAX_FILE_BYTES of decrypted bytes) every single time.
+let convBlobUrls = [];
+function revokeConvBlobUrls() {
+  for (const url of convBlobUrls) URL.revokeObjectURL(url);
+  convBlobUrls = [];
+}
 
 async function openConversation(email) {
   currentConversationEmail = email;
@@ -1622,6 +1633,7 @@ async function openConversation(email) {
   const presence = await api(`/presence?email=${encodeURIComponent(email)}`);
   convStatus.textContent = presence.online ? 'online' : 'offline';
   convStatus.dataset.online = presence.online ? '1' : '0';
+  revokeConvBlobUrls(); // #59 -- release the previous render's file-attachment blob URLs before creating new ones
   convMessages.innerHTML = '';
   if (dialerChatStore) {
     const history = await dialerChatStore.history(email);
@@ -1681,6 +1693,7 @@ function appendConvMessage({ from, text, pending, corrupted, seq, kind, fileName
     // anything else renders as a filename + size + download link -- no
     // in-page preview attempted for arbitrary file types.
     const url = URL.createObjectURL(blob);
+    convBlobUrls.push(url); // #59 -- revoked by revokeConvBlobUrls() on the next render or conversation close
     if (SAFE_INLINE_IMAGE_MIME_TYPES.has(fileMimeType || '')) {
       const link = document.createElement('a');
       link.href = url;
@@ -1730,6 +1743,7 @@ function markConvMessageDelivered(seq) {
 }
 
 function closeConversation() {
+  revokeConvBlobUrls(); // #59 -- nothing left open to re-render into, so release now rather than waiting for the next openConversation
   currentConversationEmail = null;
   messengerShell.dataset.conversationOpen = '0';
   // data-conversation-open only gates layout below the 859px breakpoint
