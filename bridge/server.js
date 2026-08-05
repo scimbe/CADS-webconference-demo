@@ -146,17 +146,38 @@ const ACCESS_REQUEST_RATE_LIMIT = 5; // per IP, per window
 const ACCESS_REQUEST_RATE_WINDOW_MS = 10 * 60 * 1000;
 const ACCESS_REQUEST_MAX_PENDING = 200;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const accessRequestRateLimits = new Map(); // ip -> { count, windowStart }
-function accessRequestRateLimited(ip) {
-  const now = Date.now();
-  const entry = accessRequestRateLimits.get(ip);
-  if (!entry || now - entry.windowStart > ACCESS_REQUEST_RATE_WINDOW_MS) {
-    accessRequestRateLimits.set(ip, { count: 1, windowStart: now });
-    return false;
-  }
-  entry.count++;
-  return entry.count > ACCESS_REQUEST_RATE_LIMIT;
+// Simple fixed-window limiter (not sliding, not persisted across
+// restarts -- matches this whole bridge's existing in-memory-only
+// durability tier). Generalized out of what was originally a one-off for
+// access-requests, now also used by /api/call (CADS-webconference-demo#12,
+// finding 8's "rate-limit /api/call per identity" -- keyed by IP rather
+// than the claimed fromEmail specifically, since an ungated deployment has
+// no way to verify that email is real, and per-IP still bounds the actual
+// resource cost: each call spawns a real execFile process).
+function makeRateLimiter(maxCount, windowMs) {
+  const hits = new Map(); // key -> { count, windowStart }
+  return function rateLimited(key) {
+    const now = Date.now();
+    const entry = hits.get(key);
+    if (!entry || now - entry.windowStart > windowMs) {
+      hits.set(key, { count: 1, windowStart: now });
+      return false;
+    }
+    entry.count++;
+    return entry.count > maxCount;
+  };
 }
+const accessRequestRateLimited = makeRateLimiter(ACCESS_REQUEST_RATE_LIMIT, ACCESS_REQUEST_RATE_WINDOW_MS);
+// CADS-webconference-demo#12 (finding 8): each /api/call spawns a real
+// execFile process (mintGrants) -- with no cap at all, hammering this
+// endpoint forks a new process per request, exhausting the process table
+// (or at minimum burning real CPU signing grants nobody will ever use).
+// 20/min per caller IP is generous for real usage (placing a call, or a
+// background chat-delivery attempt, is a rare human-paced action) while
+// still bounding the actual fork rate an attacker could sustain.
+const CALL_RATE_LIMIT = 20;
+const CALL_RATE_WINDOW_MS = 60 * 1000;
+const callRateLimited = makeRateLimiter(CALL_RATE_LIMIT, CALL_RATE_WINDOW_MS);
 // Real client IP, not the reverse proxy's own socket -- Caddy's
 // reverse_proxy sets X-Forwarded-For by default; falls back to the raw
 // socket address if that's ever missing (e.g. a direct request bypassing
@@ -209,20 +230,62 @@ function wsPush(email, obj) {
   const socket = wsClients.get(email);
   if (!socket || socket.destroyed) return false;
   try {
-    socket.write(wsFrame(obj));
+    // CADS-webconference-demo#12 (finding 5): socket.write()'s return value
+    // (false = the kernel send buffer is full, data is queued in userspace
+    // instead) used to be ignored entirely -- a slow-draining or stalled
+    // client would have frames buffer up in Node's own memory unbounded.
+    // Real backpressure (pause upstream production until 'drain') doesn't
+    // apply here -- there's no upstream to pause, each push is triggered by
+    // an independent incoming call -- so this instead just surfaces the
+    // signal: a client repeatedly failing to drain is either gone or badly
+    // stalled, worth logging so it's visible rather than silently growing.
+    const drained = socket.write(wsFrame(obj));
+    if (!drained) console.warn(`bridge: wsPush to ${email} did not drain immediately (client reading slowly or stalled)`);
     return true;
   } catch (_) {
     return false;
   }
 }
 
-// Drains client->server frames (unmasking per spec, since client frames are
-// always masked) just enough to keep the TCP stream flowing and detect a
-// close frame -- this channel is push-only (server->client), the client
-// never sends application data over it.
+// CADS-webconference-demo#12 (findings 1, 3, 4): this channel is push-only
+// (server->client) -- a real client only ever sends tiny RFC 6455 control
+// frames (close/ping/pong), never application data. Three real gaps this
+// closes:
+// - No frame size cap at all: `len` came straight from an attacker-
+//   controlled 16- or 64-bit length field and was trusted outright: a
+//   client claiming a multi-GB payload while trickling bytes would have
+//   made this buffer without bound waiting for a frame that never
+//   completes. WS_MAX_CLIENT_FRAME_BYTES rejects (destroys the socket on)
+//   anything bigger than any legitimate control frame could ever need.
+// - O(n^2) buffering: Buffer.concat([buf, chunk]) on EVERY incoming chunk
+//   re-copies the entire accumulated buffer each time -- a slow byte-drip
+//   with no complete frame arriving is quadratic in total bytes received.
+//   Capping the buffer size above also bounds the blast radius of this
+//   (a real fix would restructure to an array of chunks + lazy concat, but
+//   with the size cap in place the worst case is now O(WS_MAX^2), a fixed
+//   small constant, not O(attacker-controlled n^2)).
+// - No heartbeat: a silently-dropped half-open TCP connection (network
+//   blip, killed client, no clean FIN/close frame ever sent) left wsClients
+//   holding a socket forever, with wsPush still writing into it (the
+//   .destroyed check only catches a CLEANLY closed socket, not a half-open
+//   one the OS hasn't noticed is dead yet). Server-side pings + a
+//   last-pong watchdog (below, alongside sweepExpired) now detects and
+//   cleans these up instead of leaking indefinitely.
+const WS_MAX_CLIENT_FRAME_BYTES = 1024;
+const WS_PING_INTERVAL_MS = 30_000;
+const WS_PONG_TIMEOUT_MS = 90_000; // 3 missed pings -- forgiving of a slow/busy client, not of a genuinely dead one
+function wsPingFrame() {
+  return Buffer.from([0x89, 0x00]); // FIN=1, opcode 0x9 (ping), empty payload, unmasked (server frame)
+}
 function wsAttachReader(socket, onClose) {
   let buf = Buffer.alloc(0);
+  socket._wsLastPong = Date.now();
   const onData = (chunk) => {
+    if (buf.length + chunk.length > WS_MAX_CLIENT_FRAME_BYTES) {
+      onClose();
+      try { socket.destroy(); } catch (_) {}
+      return;
+    }
     buf = Buffer.concat([buf, chunk]);
     while (buf.length >= 2) {
       const b1 = buf[1];
@@ -238,6 +301,11 @@ function wsAttachReader(socket, onClose) {
         len = Number(buf.readBigUInt64BE(2));
         offset = 10;
       }
+      if (len > WS_MAX_CLIENT_FRAME_BYTES) {
+        onClose();
+        try { socket.destroy(); } catch (_) {}
+        return;
+      }
       const maskLen = masked ? 4 : 0;
       if (buf.length < offset + maskLen + len) return; // wait for the rest
       const opcode = buf[0] & 0x0f;
@@ -246,13 +314,34 @@ function wsAttachReader(socket, onClose) {
         onClose();
         try { socket.end(); } catch (_) {}
         return;
+      } else if (opcode === 0xa) {
+        socket._wsLastPong = Date.now(); // pong
       }
+      // 0x9 (ping) from a client is unexpected on this push-only channel --
+      // no server-side use for responding to it, safely ignored.
     }
   };
   socket.on('data', onData);
   socket.on('close', onClose);
   socket.on('error', onClose);
 }
+function wsHeartbeatSweep() {
+  const now = Date.now();
+  for (const [email, socket] of wsClients) {
+    if (socket.destroyed) {
+      wsClients.delete(email);
+      continue;
+    }
+    if (now - socket._wsLastPong > WS_PONG_TIMEOUT_MS) {
+      console.warn(`bridge: WS client ${email} missed ${WS_PONG_TIMEOUT_MS / WS_PING_INTERVAL_MS} pongs -- treating as dead, closing`);
+      try { socket.destroy(); } catch (_) {}
+      wsClients.delete(email);
+      continue;
+    }
+    try { socket.write(wsPingFrame()); } catch (_) {}
+  }
+}
+setInterval(wsHeartbeatSweep, WS_PING_INTERVAL_MS).unref();
 
 function isOnline(entry) {
   return !!entry && Date.now() - entry.lastSeen < PRESENCE_TTL_MS;
@@ -264,7 +353,13 @@ function mintGrants(holderAPub, holderBPub) {
     // ct-video-call-grant process left this request (and the caller
     // awaiting it) stuck forever. Local key-signing has no reason to take
     // anywhere near this long; 10s is a generous ceiling, not a tight one.
-    execFile(GRANT_BIN, [holderAPub, holderBPub, '--operator-private', OPERATOR_KEY, '--ttl-secs', '3600'], { timeout: 10_000 }, (err, stdout) => {
+    // maxBuffer: Node's own default (1MB) already covers this CLI's real
+    // output (a few lines of hex, well under a KB) with room to spare --
+    // set explicitly rather than left implicit, so a future change to this
+    // CLI that somehow started spamming stdout fails loudly (ERR_CHILD_
+    // PROCESS_STDIO_MAXBUFFER) instead of silently relying on whatever
+    // Node's own default happens to be on a given version.
+    execFile(GRANT_BIN, [holderAPub, holderBPub, '--operator-private', OPERATOR_KEY, '--ttl-secs', '3600'], { timeout: 10_000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err) return reject(err);
       const out = {};
       for (const line of stdout.trim().split('\n')) {
@@ -426,6 +521,21 @@ function readBody(req) {
   });
 }
 
+// CADS-webconference-demo#12 (finding 2): directory and contactRequests
+// were never swept at all -- entries only ever left on a clean
+// unregister/clear that doesn't exist for either map, so a client that
+// simply disappears (closes the tab, network dies, abandons a test
+// identity) leaked its entry forever. Neither causes a FUNCTIONAL bug on
+// its own (isOnline() already treats a stale directory entry as offline
+// via PRESENCE_TTL_MS, regardless of whether the entry still exists) --
+// this is purely about bounding unbounded memory growth over the
+// deployment's lifetime. Thresholds deliberately generous (days, not the
+// ~45s PRESENCE_TTL_MS) -- this is a leak-prevention sweep, not a
+// liveness check; a real but currently-offline user's directory
+// registration shouldn't vanish just because they haven't opened the app
+// in a while.
+const DIRECTORY_STALE_MS = 7 * 24 * 60 * 60 * 1000;
+const CONTACT_REQUEST_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 function sweepExpired() {
   const now = Date.now();
   for (const [channel, call] of pendingCalls) {
@@ -433,6 +543,24 @@ function sweepExpired() {
       pendingCalls.delete(channel);
       if (incomingByEmail.get(call.calleeEmail) === channel) incomingByEmail.delete(call.calleeEmail);
     }
+  }
+  for (const [email, entry] of directory) {
+    if (now - entry.lastSeen > DIRECTORY_STALE_MS) directory.delete(email);
+  }
+  for (const [toEmail, list] of contactRequests) {
+    const fresh = list.filter((r) => now - r.createdAt <= CONTACT_REQUEST_STALE_MS);
+    if (fresh.length !== list.length) {
+      if (fresh.length) contactRequests.set(toEmail, fresh);
+      else contactRequests.delete(toEmail);
+    }
+  }
+  // Defensive only -- wsHeartbeatSweep (its own, faster interval) already
+  // removes a destroyed socket the moment its ping/pong watchdog notices;
+  // this just catches anything that ever slips past that for another
+  // reason (e.g. the 'close'/'error' handlers in wsAttachReader, which
+  // already delete their own entry via onClose -- true belt-and-suspenders).
+  for (const [email, socket] of wsClients) {
+    if (socket.destroyed) wsClients.delete(email);
   }
 }
 setInterval(sweepExpired, 10_000).unref();
@@ -683,6 +811,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && url.pathname === '/api/call') {
+      // CADS-webconference-demo#12 (finding 8) -- see callRateLimited's own
+      // comment for why this is keyed by IP.
+      if (callRateLimited(clientIp(req))) return json(res, 429, { error: 'too many calls -- try again in a moment' });
       const { fromEmail, toEmail, transport, kind } = await readBody(req);
       // CADS-webconference-demo#9: fromEmail used to be trusted outright --
       // a gate-verified caller could place a call "from" any registered
@@ -858,6 +989,17 @@ server.on('upgrade', (req, socket, head) => {
     if (wsClients.get(email) === socket) wsClients.delete(email);
   });
 });
+
+// CADS-webconference-demo#12 (finding 7): Node has no default request
+// timeout as of the version this runs on -- a slowloris client (headers or
+// body trickled in at ~1 byte/sec) held a connection, and readBody's own
+// accumulation, open indefinitely. headersTimeout bounds how long the
+// initial request line + headers can take to arrive; requestTimeout bounds
+// the whole request (headers through body) -- both well above any
+// legitimate real-world latency this bridge would ever see for its own
+// tiny JSON payloads.
+server.headersTimeout = 10_000;
+server.requestTimeout = 30_000;
 
 const [host, port] = LISTEN.split(':');
 server.listen(Number(port), host, () => {
