@@ -529,8 +529,6 @@ const logoutLink = document.getElementById('logout-link');
 const transportChannelCheckbox = document.getElementById('transport-channel');
 const contactsList = document.getElementById('contacts-list');
 const contactsEmpty = document.getElementById('contacts-empty');
-const accessAddForm = document.getElementById('access-add-form');
-const accessAddEmail = document.getElementById('access-add-email');
 const accessRemoveForm = document.getElementById('access-remove-form');
 const accessRemoveEmail = document.getElementById('access-remove-email');
 const accessNote = document.getElementById('access-note');
@@ -546,10 +544,19 @@ const msgConvPlaceholder = document.getElementById('msg-conv-placeholder');
 const msgConversation = document.getElementById('msg-conversation');
 const msgBackBtn = document.getElementById('msg-back-btn');
 const msgCallBtn = document.getElementById('msg-call-btn');
+const msgBlockBtn = document.getElementById('msg-block-btn');
 const convAvatar = document.getElementById('conv-avatar');
 const convName = document.getElementById('conv-name');
 const convStatus = document.getElementById('conv-status');
 const convMessages = document.getElementById('conv-messages');
+const onlyContactsToggle = document.getElementById('only-contacts-toggle');
+const blockedList = document.getElementById('blocked-list');
+const blockedEmpty = document.getElementById('blocked-empty');
+const tabChats = document.getElementById('tab-chats');
+const tabRequests = document.getElementById('tab-requests');
+const requestsBadge = document.getElementById('requests-badge');
+const requestsList = document.getElementById('requests-list');
+const requestsEmpty = document.getElementById('requests-empty');
 
 // A real account switch needs BOTH halves cleared -- confirmed live (2026-08-03):
 // /gate/logout alone clears ct_gate_session, but the gate's own check silently
@@ -660,15 +667,67 @@ function startCallFromIdentity(identity, { role, channel, grant, ws, transport, 
   location.search = params.toString(); // reload into the call screen -- keeps run() as the single entry point
 }
 
+// ============ Local contacts / block list / privacy setting ============
+// Purely client-side (localStorage), scoped per identity like chatStore's
+// Lamport clock -- distinct from BOTH presence (/api/contacts: who's
+// actually online right now) and the tunnel's login allow-list (who's
+// PERMITTED to authenticate at all). This is MY OWN curated "people I
+// actually talk to" list. Adding someone here also grants them login
+// access (see msgSearchForm's submit handler below) -- from the user's
+// side these were never two different actions, just two different admin
+// surfaces for the same intent. Removing/blocking, deliberately, does NOT
+// revoke that access -- it only changes what *I* see; a real access-revoke
+// stays a separate, explicit action (the "Revoke someone's login access"
+// panel in the menu), since conflating "I don't want to see them" with
+// "they may never log in again" would be a much bigger, easy-to-regret
+// action to hide behind a small ✕.
+function localSetFor(kind, email) {
+  const key = `ct-webconference-${kind}:${email.toLowerCase()}`;
+  return {
+    all() {
+      try {
+        return JSON.parse(localStorage.getItem(key) || '[]');
+      } catch (_) {
+        return [];
+      }
+    },
+    has(e) {
+      return this.all().includes(e.toLowerCase());
+    },
+    add(e) {
+      const s = new Set(this.all());
+      s.add(e.toLowerCase());
+      localStorage.setItem(key, JSON.stringify([...s]));
+    },
+    remove(e) {
+      const s = new Set(this.all());
+      s.delete(e.toLowerCase());
+      localStorage.setItem(key, JSON.stringify([...s]));
+    },
+  };
+}
+
+let myContacts = null;
+let blockedEmails = null;
+let onlyAcceptFromContacts = false;
+// Non-contact incoming attempts held for review instead of ringing
+// immediately (only populated when onlyAcceptFromContacts is on) -- see
+// showIncoming's gating logic. In-memory only: a real "missed request"
+// notification that outlives a reload would need server-side storage this
+// bridge doesn't have; this is deliberately a same-session convenience,
+// not pretended to be more durable than it is.
+let pendingRequests = [];
+
 // ============ Contacts / address book ============
-// The list itself is presence data (who has actually registered here, same
-// directory /api/call already checks) -- NOT the gate's login allow-list,
-// which this bridge can write to (grant/revoke below) but has no JSON API to
-// read yet. See CADS-Tunnel request for a GET .../login-allowlist endpoint.
+// The list itself is now MY CONTACTS (myContacts, local), not raw presence
+// -- /api/contacts (presence) is only consulted to annotate each contact's
+// online/offline status, not to decide who's shown at all.
 async function refreshContacts() {
   const resp = await api('/contacts');
-  if (resp.error) return; // best-effort -- leave whatever list is already showing
-  await renderContacts(resp.contacts || []);
+  const presence = new Map((resp.error ? [] : resp.contacts || []).map((c) => [c.email, c.online]));
+  const contacts = myContacts.all().map((email) => ({ email, online: presence.get(email) || false }));
+  await renderContacts(contacts);
+  renderRequests();
 }
 
 function formatMsgTime(ts) {
@@ -678,10 +737,11 @@ function formatMsgTime(ts) {
 }
 
 // Renders the chat list (messenger-row: avatar, name, last-message preview,
-// timestamp, online dot) -- a real chat list, not a bare directory. Pulls
-// the last message per contact from chatStore (if one exists yet) so a
-// contact you've actually talked to shows a preview, same as any real
-// messenger; a contact with no history yet just shows online/offline.
+// timestamp, online dot, + chat/call/remove action icons) -- a real chat
+// list, not a bare directory. Pulls the last message per contact from
+// chatStore (if one exists yet) so a contact you've actually talked to
+// shows a preview, same as any real messenger; a contact with no history
+// yet just shows online/offline.
 async function renderContacts(contacts) {
   contactsList.querySelectorAll('li:not(#contacts-empty)').forEach((li) => li.remove());
   contactsEmpty.hidden = contacts.length > 0;
@@ -715,9 +775,110 @@ async function renderContacts(contacts) {
       }
     }
     body.append(top, preview);
-    li.append(avatar, body);
+
+    const actions = document.createElement('div');
+    actions.className = 'msg-row-actions';
+    const chatBtn = document.createElement('button');
+    chatBtn.type = 'button';
+    chatBtn.setAttribute('aria-label', `Chat with ${email}`);
+    chatBtn.textContent = '💬';
+    chatBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openConversation(email);
+    });
+    const callBtn = document.createElement('button');
+    callBtn.type = 'button';
+    callBtn.setAttribute('aria-label', `Call ${email}`);
+    callBtn.textContent = '📞';
+    callBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openConversation(email).then(() => dialForm.requestSubmit());
+    });
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'danger';
+    removeBtn.setAttribute('aria-label', `Remove ${email} from contacts`);
+    removeBtn.textContent = '✕';
+    removeBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      myContacts.remove(email);
+      if (currentConversationEmail === email) closeConversation();
+      refreshContacts();
+    });
+    actions.append(chatBtn, callBtn, removeBtn);
+
+    li.append(avatar, body, actions);
     li.addEventListener('click', () => openConversation(email));
     contactsList.appendChild(li);
+  }
+}
+
+// ============ Requests (non-contact incoming attempts, held for review) ==
+function renderRequests() {
+  requestsList.querySelectorAll('li:not(#requests-empty)').forEach((li) => li.remove());
+  requestsEmpty.hidden = pendingRequests.length > 0;
+  requestsBadge.hidden = pendingRequests.length === 0;
+  requestsBadge.textContent = String(pendingRequests.length);
+  for (const { email } of pendingRequests) {
+    const li = document.createElement('li');
+    const avatar = document.createElement('div');
+    avatar.className = 'contact-avatar';
+    avatar.textContent = (email[0] || '?').toUpperCase();
+    const body = document.createElement('div');
+    body.className = 'msg-row-body';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'msg-row-name';
+    nameEl.textContent = email;
+    const note = document.createElement('div');
+    note.className = 'msg-row-preview';
+    note.textContent = 'Wants to be added to your contacts';
+    body.append(nameEl, note);
+    const actions = document.createElement('div');
+    actions.className = 'msg-request-actions';
+    const acceptBtn = document.createElement('button');
+    acceptBtn.type = 'button';
+    acceptBtn.className = 'accept';
+    acceptBtn.textContent = 'Add';
+    acceptBtn.addEventListener('click', () => {
+      myContacts.add(email);
+      pendingRequests = pendingRequests.filter((r) => r.email !== email);
+      refreshContacts();
+    });
+    const declineBtn = document.createElement('button');
+    declineBtn.type = 'button';
+    declineBtn.className = 'decline';
+    declineBtn.textContent = 'Dismiss';
+    declineBtn.addEventListener('click', () => {
+      pendingRequests = pendingRequests.filter((r) => r.email !== email);
+      renderRequests();
+    });
+    actions.append(acceptBtn, declineBtn);
+    li.append(avatar, body, actions);
+    requestsList.appendChild(li);
+  }
+}
+
+function renderBlockedList() {
+  blockedList.querySelectorAll('li:not(#blocked-empty)').forEach((li) => li.remove());
+  const blocked = blockedEmails.all();
+  blockedEmpty.hidden = blocked.length > 0;
+  for (const email of blocked) {
+    const li = document.createElement('li');
+    li.style.cursor = 'default';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'msg-row-body';
+    nameEl.textContent = email;
+    const unblockBtn = document.createElement('button');
+    unblockBtn.type = 'button';
+    unblockBtn.className = 'decline';
+    unblockBtn.style.flexShrink = '0';
+    unblockBtn.textContent = 'Unblock';
+    unblockBtn.addEventListener('click', () => {
+      blockedEmails.remove(email);
+      renderBlockedList();
+    });
+    li.append(nameEl, unblockBtn);
+    blockedList.appendChild(li);
   }
 }
 
@@ -758,23 +919,18 @@ async function openConversation(email) {
 function closeConversation() {
   currentConversationEmail = null;
   messengerShell.dataset.conversationOpen = '0';
+  // data-conversation-open only gates layout below the 859px breakpoint
+  // (index.html's media query) -- on desktop's always-visible split pane,
+  // these two hidden flags are the only thing selecting placeholder vs.
+  // conversation, so both paths need resetting here too.
+  msgConvPlaceholder.hidden = false;
+  msgConversation.hidden = true;
 }
 
 function setAccessNote(kind, text) {
   accessNote.textContent = text;
   accessNote.dataset.kind = kind;
 }
-
-accessAddForm.addEventListener('submit', async (ev) => {
-  ev.preventDefault();
-  const email = accessAddEmail.value.trim();
-  if (!email) return;
-  setAccessNote('info', `Granting access to ${email}…`);
-  const resp = await api('/allowlist/add', { body: { email } });
-  if (resp.error) return setAccessNote('error', `Couldn't grant access: ${resp.error}`);
-  setAccessNote('ok', `${email} can now log in.`);
-  accessAddEmail.value = '';
-});
 
 accessRemoveForm.addEventListener('submit', async (ev) => {
   ev.preventDefault();
@@ -796,15 +952,52 @@ msgMenuToggle.addEventListener('click', () => { msgMenu.hidden = !msgMenu.hidden
 document.addEventListener('click', (ev) => {
   if (!msgMenu.hidden && !msgMenu.contains(ev.target) && ev.target !== msgMenuToggle) msgMenu.hidden = true;
 });
-msgSearchForm.addEventListener('submit', (ev) => {
+// Adding a contact IS granting them access (see localSetFor's comment) --
+// one action, both effects: /api/allowlist/add (server-side, so they can
+// actually log in) and myContacts.add (client-side, so they show up in
+// MY list). The allowlist call is best-effort -- report it, but still add
+// the contact locally either way, since a duplicate/already-listed email
+// isn't a real failure worth blocking on.
+msgSearchForm.addEventListener('submit', async (ev) => {
   ev.preventDefault();
-  const email = msgSearchInput.value.trim();
+  const email = msgSearchInput.value.trim().toLowerCase();
   if (!email) return;
-  openConversation(email);
   msgSearchInput.value = '';
+  myContacts.add(email);
+  const resp = await api('/allowlist/add', { body: { email } });
+  if (resp.error) log(`allowlist/add for ${email} failed (added as a local contact anyway): ${resp.error}`);
+  await refreshContacts();
+  openConversation(email);
 });
 msgBackBtn.addEventListener('click', closeConversation);
 msgCallBtn.addEventListener('click', () => dialForm.requestSubmit());
+msgBlockBtn.addEventListener('click', () => {
+  if (!currentConversationEmail) return;
+  const email = currentConversationEmail;
+  blockedEmails.add(email);
+  myContacts.remove(email);
+  renderBlockedList();
+  closeConversation();
+  refreshContacts();
+});
+
+tabChats.addEventListener('click', () => {
+  tabChats.classList.add('active');
+  tabRequests.classList.remove('active');
+  contactsList.hidden = false;
+  requestsList.hidden = true;
+});
+tabRequests.addEventListener('click', () => {
+  tabRequests.classList.add('active');
+  tabChats.classList.remove('active');
+  contactsList.hidden = true;
+  requestsList.hidden = false;
+});
+
+onlyContactsToggle.addEventListener('change', () => {
+  onlyAcceptFromContacts = onlyContactsToggle.checked;
+  localStorage.setItem(`ct-webconference-settings:${dialerChatStore.identity.email.toLowerCase()}`, onlyAcceptFromContacts ? '1' : '0');
+});
 
 // Instantiated once identity is known so the chat list can show last-message
 // previews (chatStore.history()) even before any call has been placed this
@@ -819,6 +1012,11 @@ async function runDialer(identity, { verified = false } = {}) {
   landingMain.hidden = true;
   messengerShell.hidden = false;
   dialerChatStore = new ChatStore(identity);
+  myContacts = localSetFor('contacts', identity.email);
+  blockedEmails = localSetFor('blocked', identity.email);
+  onlyAcceptFromContacts = localStorage.getItem(`ct-webconference-settings:${identity.email.toLowerCase()}`) === '1';
+  onlyContactsToggle.checked = onlyAcceptFromContacts;
+  renderBlockedList();
   myEmailEl.textContent = identity.email + (verified ? ' (verified via login)' : '');
   // Only meaningful for a real gate-verified session (X-Gate-Email) -- a
   // free-text identity was never actually logged in anywhere to log out of.
@@ -904,6 +1102,27 @@ async function runDialer(identity, { verified = false } = {}) {
 
   function showIncoming(incoming) {
     if (currentIncoming) return;
+    const from = incoming.fromEmail.toLowerCase();
+    // Blocked: silently declined, never rings, never shows up in Requests
+    // either -- the whole point of blocking is not having to think about
+    // them again, not just not being interrupted this once.
+    if (blockedEmails.has(from)) {
+      api('/decline', { body: { channel: incoming.channel } }).catch(() => {});
+      return;
+    }
+    // Privacy mode on and this isn't someone I've actually added: don't
+    // ring -- decline this specific attempt (by the time anyone reviews
+    // Requests, its own ~60s ringing window has likely already passed
+    // anyway) and hold it in Requests so accepting there means "let them
+    // reach me next time," not a claim this live call can still connect.
+    if (onlyAcceptFromContacts && !myContacts.has(from)) {
+      api('/decline', { body: { channel: incoming.channel } }).catch(() => {});
+      if (!pendingRequests.some((r) => r.email === from)) {
+        pendingRequests.push({ email: from });
+        renderRequests();
+      }
+      return;
+    }
     currentIncoming = incoming;
     incomingFrom.textContent = incoming.fromEmail;
     incomingCard.hidden = false;

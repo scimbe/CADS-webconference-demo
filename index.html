@@ -229,8 +229,16 @@
  .msg-search-row input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:99px;color:var(--text);
   padding:.55rem 1rem;font:inherit;font-size:.86rem}
  .msg-search-row input:focus{outline:none;border-color:var(--accent2)}
+
+ .msg-tabs{flex-shrink:0;display:flex;gap:.4rem;padding:.5rem .9rem;border-bottom:1px solid var(--line-soft)}
+ .msg-tab{font-family:inherit;background:transparent;border:none;color:var(--muted);font-size:.82rem;font-weight:600;
+  padding:.4rem .8rem;border-radius:99px;cursor:pointer;display:flex;align-items:center;gap:.4rem}
+ .msg-tab:hover{background:var(--panel2)}
+ .msg-tab.active{background:rgba(95,184,171,.14);color:var(--accent2)}
+ .msg-tab-badge{background:var(--danger);color:#fff;font-size:.68rem;font-weight:700;border-radius:99px;padding:.05rem .4rem;line-height:1.3}
+
  .msg-chat-list{list-style:none;margin:0;padding:0;overflow-y:auto;flex:1}
- .msg-chat-list li{display:flex;align-items:center;gap:.75rem;padding:.75rem .9rem;cursor:pointer;border-bottom:1px solid var(--line-soft);transition:background .12s}
+ .msg-chat-list li{display:flex;align-items:center;gap:.75rem;padding:.65rem .9rem;cursor:pointer;border-bottom:1px solid var(--line-soft);transition:background .12s}
  .msg-chat-list li:hover,.msg-chat-list li.active{background:var(--panel2)}
  .msg-chat-list li[hidden]{display:none}
  .msg-chat-list .contact-avatar{width:2.6rem;height:2.6rem;font-size:1rem;flex-shrink:0}
@@ -242,6 +250,21 @@
  .msg-row-preview .you{color:var(--muted2)}
  .msg-chat-list li[data-online="1"] .msg-row-name::after{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
   background:var(--accent2);margin-left:.45rem;box-shadow:0 0 0 2px rgba(95,184,171,.2)}
+
+ /* Per-contact chat/call icons -- direct actions right on the row, so you
+    don't have to open a conversation just to place a call. stopPropagation
+    on click (see app.js) so tapping an icon doesn't ALSO fire the row's own
+    "open this conversation" handler. */
+ .msg-row-actions{display:flex;gap:.3rem;flex-shrink:0}
+ .msg-row-actions button{font-family:inherit;background:transparent;border:none;color:var(--muted2);font-size:1rem;
+  cursor:pointer;width:2rem;height:2rem;border-radius:50%;display:flex;align-items:center;justify-content:center}
+ .msg-row-actions button:hover{background:var(--panel);color:var(--accent2)}
+ .msg-row-actions button.danger:hover{color:var(--danger)}
+
+ .msg-request-actions{display:flex;gap:.4rem;flex-shrink:0}
+ .msg-request-actions button{font-family:inherit;border-radius:99px;padding:.35rem .8rem;font-size:.78rem;font-weight:600;cursor:pointer}
+ .msg-request-actions button.accept{background:var(--accent2);color:#08211d;border:none}
+ .msg-request-actions button.decline{background:transparent;color:var(--muted2);border:1px solid var(--line)}
 
  .msg-conversation-pane{flex:1;display:flex;flex-direction:column;min-width:0}
  .msg-conv-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:.9rem;text-align:center;padding:2rem}
@@ -340,16 +363,23 @@
       Use direct-channel media (experimental) — tunnels audio/video/chat through the same
       Noise_IK-encrypted Agent-Fabric channel instead of WebRTC/ICE; no STUN/TURN needed, higher latency.
     </label>
+    <label class="transport-toggle">
+      <input type="checkbox" id="only-contacts-toggle" style="accent-color:var(--accent2)" />
+      Only take calls/chats from contacts — anyone else lands in Requests instead of ringing right away.
+    </label>
     <details class="manage-access">
-      <summary>Manage who's allowed to log in</summary>
-      <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">Adds/removes an email on this
-        tunnel's login allow-list. There's no read-back here (the portal itself is the source of
-        truth for who's currently listed) — this just lets you grant or revoke access without
-        leaving the app.</p>
-      <form class="access-form" id="access-add-form">
-        <input id="access-add-email" type="email" placeholder="someone@example.com" required autocomplete="off" />
-        <button type="submit">Grant access</button>
-      </form>
+      <summary>Blocked</summary>
+      <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">Blocked emails are silently
+        declined — never rings, never shows up in Requests either.</p>
+      <ul class="msg-chat-list" id="blocked-list" style="border-radius:8px">
+        <li class="msg-empty" id="blocked-empty">No one blocked.</li>
+      </ul>
+    </details>
+    <details class="manage-access">
+      <summary>Revoke someone's login access</summary>
+      <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">Separate from removing/blocking a
+        contact (which only changes what <em>you</em> see) — this revokes them from the tunnel's login
+        allow-list entirely, so they can no longer sign in at all.</p>
       <form class="access-form" id="access-remove-form">
         <input id="access-remove-email" type="email" placeholder="someone@example.com" required autocomplete="off" />
         <button type="submit" class="danger">Revoke access</button>
@@ -376,11 +406,24 @@
 
   <div class="msg-body" id="msg-body">
     <div class="msg-list-pane">
+      <!-- Adding a contact IS granting them access -- from the user's side
+           these were never two different actions, just two different admin
+           panels for the same intent. One search box does both:
+           POST /api/allowlist/add (server-side, so they can actually log
+           in) and adds the email to the local contacts set (client-side,
+           so it's *my* curated list, not raw presence). -->
       <form class="msg-search-row" id="msg-search-form">
-        <input id="msg-search" type="email" placeholder="Search or start a chat by email" autocomplete="off" />
+        <input id="msg-search" type="email" placeholder="Add a contact by email" autocomplete="off" />
       </form>
+      <div class="msg-tabs">
+        <button class="msg-tab active" id="tab-chats" type="button">Chats</button>
+        <button class="msg-tab" id="tab-requests" type="button">Requests<span class="msg-tab-badge" id="requests-badge" hidden>0</span></button>
+      </div>
       <ul class="msg-chat-list" id="contacts-list">
-        <li class="msg-empty" id="contacts-empty">No conversations yet — enter an email above to start one.</li>
+        <li class="msg-empty" id="contacts-empty">No contacts yet — add one by email above.</li>
+      </ul>
+      <ul class="msg-chat-list" id="requests-list" hidden>
+        <li class="msg-empty" id="requests-empty">No pending requests.</li>
       </ul>
     </div>
 
@@ -394,6 +437,7 @@
             <div id="conv-name"></div>
             <div class="msg-conv-status" id="conv-status">offline</div>
           </div>
+          <button class="msg-icon-btn" id="msg-block-btn" type="button" aria-label="Block this contact">🚫</button>
           <button class="msg-icon-btn msg-call-btn" id="msg-call-btn" type="button" aria-label="Video call">📹</button>
         </div>
         <div class="msg-conv-messages" id="conv-messages"></div>
