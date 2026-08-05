@@ -99,8 +99,46 @@ const pendingCalls = new Map();
 const contactRequests = new Map();
 // email (lowercased) -> { email, createdAt }. CADS-webconference-demo#36 --
 // someone not yet on the login allow-list asking to be admitted. Same
-// durability tier as the maps above (in-memory, cleared on bridge restart).
+// durability tier as the maps above (in-memory, cleared on bridge restart) --
+// CADS-webconference-demo#41 (finding 3) flags that a restart loses every
+// pending request with no notification; real persistence (or an admin
+// notification path) is a bigger piece of work than this pass covers, left
+// as an open question on the issue rather than guessed at here.
 const accessRequests = new Map();
+// CADS-webconference-demo#41 (finding 2): this is the one endpoint the
+// gate exemption in Caddyfile.selfservice deliberately leaves reachable
+// with NO authentication at all -- by design (it's the one way a rejected
+// registrant can reach this bridge before being admitted), but that also
+// means it's open to the whole internet with none of the "already
+// gate-authenticated" cost every other endpoint implicitly has. Simple
+// fixed-window per-IP cap (not sliding, not persisted across restarts --
+// this whole feature is already in-memory-only per the comment above) plus
+// a hard ceiling on total pending requests, so flooding this can't grow
+// memory or spam the admin panel unbounded.
+const ACCESS_REQUEST_RATE_LIMIT = 5; // per IP, per window
+const ACCESS_REQUEST_RATE_WINDOW_MS = 10 * 60 * 1000;
+const ACCESS_REQUEST_MAX_PENDING = 200;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const accessRequestRateLimits = new Map(); // ip -> { count, windowStart }
+function accessRequestRateLimited(ip) {
+  const now = Date.now();
+  const entry = accessRequestRateLimits.get(ip);
+  if (!entry || now - entry.windowStart > ACCESS_REQUEST_RATE_WINDOW_MS) {
+    accessRequestRateLimits.set(ip, { count: 1, windowStart: now });
+    return false;
+  }
+  entry.count++;
+  return entry.count > ACCESS_REQUEST_RATE_LIMIT;
+}
+// Real client IP, not the reverse proxy's own socket -- Caddy's
+// reverse_proxy sets X-Forwarded-For by default; falls back to the raw
+// socket address if that's ever missing (e.g. a direct request bypassing
+// Caddy entirely, which happens routinely in local/dev testing).
+function clientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return xff.split(',')[0].trim();
+  return req.socket.remoteAddress || 'unknown';
+}
 // email -> channel (the most recent incoming call offered to this email)
 const incomingByEmail = new Map();
 
@@ -515,9 +553,17 @@ const server = http.createServer(async (req, res) => {
     // already-admitted caller grant a THIRD party's access is a bigger
     // privilege than adding your own contact.
     if (req.method === 'POST' && url.pathname === '/api/access-requests') {
+      // CADS-webconference-demo#41 (finding 2): the one gate-exempt,
+      // fully-unauthenticated endpoint in this bridge -- rate-limited per
+      // IP, email-format-checked, and capped in total, see the constants'
+      // own comment above for why.
+      if (accessRequestRateLimited(clientIp(req))) return json(res, 429, { error: 'too many requests -- try again later' });
       const { email } = await readBody(req);
-      if (!email) return json(res, 400, { error: 'email required' });
+      if (!email || !EMAIL_RE.test(email.trim())) return json(res, 400, { error: 'a valid email is required' });
       const key = email.trim().toLowerCase();
+      if (!accessRequests.has(key) && accessRequests.size >= ACCESS_REQUEST_MAX_PENDING) {
+        return json(res, 503, { error: 'too many pending requests -- try again later' });
+      }
       if (!accessRequests.has(key)) accessRequests.set(key, { email: email.trim(), createdAt: Date.now() });
       return json(res, 200, { ok: true });
     }
@@ -526,9 +572,18 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/access-requests/approve') {
       if (!TUNNEL_ID) return json(res, 503, { error: 'WEBCONFERENCE_TUNNEL_ID not configured' });
-      const { email, callerEmail } = await readBody(req);
+      const { email } = await readBody(req);
       if (!email) return json(res, 400, { error: 'email required' });
-      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has((callerEmail || '').trim().toLowerCase())) {
+      // CADS-webconference-demo#41 (finding 1): used to check the
+      // client-supplied `callerEmail` body field -- any gate-admitted
+      // NON-admin could POST callerEmail: "<a real admin's email>" and
+      // approve/decline arbitrary requests, bypassing the admin-only gate
+      // this feature claims to have. X-Gate-Email is the same
+      // gate-verified signal /api/whoami and (#46) /api/is-admin already
+      // trust -- never client-supplied, set by Caddy's forward_auth only
+      // after a real verified session.
+      const caller = (req.headers['x-gate-email'] || '').trim().toLowerCase();
+      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has(caller)) {
         return json(res, 403, { error: 'admin only' });
       }
       const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email });
@@ -537,9 +592,11 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/api/access-requests/decline') {
-      const { email, callerEmail } = await readBody(req);
+      const { email } = await readBody(req);
       if (!email) return json(res, 400, { error: 'email required' });
-      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has((callerEmail || '').trim().toLowerCase())) {
+      // CADS-webconference-demo#41 (finding 1) -- see approve's matching comment.
+      const caller = (req.headers['x-gate-email'] || '').trim().toLowerCase();
+      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has(caller)) {
         return json(res, 403, { error: 'admin only' });
       }
       accessRequests.delete(email.trim().toLowerCase());

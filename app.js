@@ -1306,7 +1306,11 @@ function renderAccessRequests(requests) {
     approveBtn.textContent = 'Admit';
     approveBtn.addEventListener('click', async () => {
       approveBtn.disabled = true;
-      const resp = await api('/access-requests/approve', { body: { email, callerEmail: myEmail } });
+      // CADS-webconference-demo#41 (finding 1): no callerEmail to send --
+      // the bridge derives the admin check from X-Gate-Email itself now,
+      // same as /api/is-admin (#46). Never actually a real admin proof to
+      // begin with; sending it was misleading.
+      const resp = await api('/access-requests/approve', { body: { email } });
       if (resp.error) { approveBtn.disabled = false; log(`couldn't admit ${email}: ${resp.error}`); return; }
       refreshAccessRequests();
     });
@@ -1316,7 +1320,7 @@ function renderAccessRequests(requests) {
     declineBtn.textContent = 'Dismiss';
     declineBtn.addEventListener('click', async () => {
       declineBtn.disabled = true;
-      await api('/access-requests/decline', { body: { email, callerEmail: myEmail } });
+      await api('/access-requests/decline', { body: { email } });
       refreshAccessRequests();
     });
     actions.append(approveBtn, declineBtn);
