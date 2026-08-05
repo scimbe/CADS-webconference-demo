@@ -1498,10 +1498,13 @@ async function runDialer(identity, { verified = false } = {}) {
   renderBlockedList();
   myEmailEl.textContent = identity.email + (verified ? ' (verified via login)' : '');
   // Revoke-access is admin-only -- hidden until proven otherwise. is-admin
-  // only ever returns a boolean (never the admin list itself), so this is
-  // safe to call unauthenticated; the bridge enforces the real gate
+  // only ever returns a boolean (never the admin list itself), and (#46) now
+  // answers only about the gate-verified caller -- no ?email= to send, the
+  // bridge reads X-Gate-Email itself; identity.email here may not even be a
+  // gate-verified identity (free-text/local login), so it was never actually
+  // meaningful to send anyway. The bridge also still enforces the real gate
   // server-side on the revoke call itself regardless of what this shows.
-  api(`/is-admin?email=${encodeURIComponent(identity.email)}`).then((resp) => {
+  api('/is-admin').then((resp) => {
     revokeAccessDetails.hidden = !resp.isAdmin;
     accessRequestsDetails.hidden = !resp.isAdmin;
     if (resp.isAdmin) {

@@ -426,11 +426,20 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Lets the frontend decide whether to show admin-only UI (the revoke
-    // panel) at all -- returns only a boolean, never the admin list itself,
-    // so this can't be used to enumerate who's an admin.
+    // panel) at all -- returns only a boolean, never the admin list itself.
+    // CADS-webconference-demo#46: used to trust a client-supplied ?email=
+    // instead of the gate-verified X-Gate-Email header (same pattern
+    // /api/whoami already gets right, above) -- the "only a boolean, so it
+    // can't enumerate admins" comment was wrong: a boolean per arbitrary
+    // *chosen* identity is exactly an enumeration oracle, one guess per
+    // request, no auth required at all. Answers only about the CALLER now
+    // (whoever the gate actually verified), never an arbitrary queried
+    // identity -- absent X-Gate-Email (tunnel isn't gated, or this is the
+    // free-text/no-login identity path) means no verified caller exists, so
+    // isAdmin is unconditionally false rather than trusting a guess.
     if (req.method === 'GET' && url.pathname === '/api/is-admin') {
-      const email = (url.searchParams.get('email') || '').trim().toLowerCase();
-      return json(res, 200, { isAdmin: ADMIN_EMAILS.size > 0 && ADMIN_EMAILS.has(email) });
+      const email = (req.headers['x-gate-email'] || '').trim().toLowerCase();
+      return json(res, 200, { isAdmin: !!email && ADMIN_EMAILS.size > 0 && ADMIN_EMAILS.has(email) });
     }
 
     // Add/remove an email on the tunnel's login allow-list (who's permitted
