@@ -2828,26 +2828,91 @@ async function run() {
     returnToDialerAfterHangup();
   }
 
+  // CADS-webconference-demo#19: a network change (WiFi -> cellular, DHCP
+  // renewal, a transient packet-loss burst) drives ICE to 'disconnected'
+  // then 'failed', and previously the call just ended with no recovery
+  // attempt -- purely passive, waiting on the browser's own ICE engine to
+  // either self-heal or eventually give up. This adds one real, active
+  // recovery attempt per failure episode: the caller re-negotiates with
+  // pc.createOffer({iceRestart:true}) and sends it over the SAME
+  // Noise-encrypted signaling channel already in use -- the receiving
+  // side needs zero new code, since the signaling loop's existing 'offer'
+  // branch (below) already handles setRemoteDescription/createAnswer for
+  // ANY incoming offer generically, restart or not. Only the caller
+  // initiates (matching the existing isCaller-gated initial-offer flow --
+  // never both sides, which would glare).
+  const ICE_RESTART_GRACE_MS = 20000;
+  let iceRestartAttempted = false;
+  let disconnectedGraceTimer = null;
+  function attemptIceRestart(reason) {
+    if (iceRestartAttempted) {
+      endCallDueToPeerLoss(`${reason} (restart already attempted this episode)`);
+      return;
+    }
+    iceRestartAttempted = true;
+    if (isCaller) {
+      log(`${reason} -- attempting an ICE restart`);
+      addChatMessage('connection lost -- attempting to reconnect…', 'system');
+      pc.createOffer({ iceRestart: true }).then(async (offer) => {
+        await pc.setLocalDescription(offer);
+        sendSignal(wasm.encodeSignalOffer(offer.sdp));
+      }).catch((e) => {
+        log(`ICE restart offer failed: ${e.message}`);
+        endCallDueToPeerLoss(`${reason} (restart attempt itself failed: ${e.message})`);
+      });
+    } else {
+      // Callee has nothing to actively send -- the caller's restart offer
+      // (if it comes) arrives through the existing generic 'offer' handler.
+      log(`${reason} -- waiting for the caller to attempt an ICE restart`);
+    }
+    // Whichever side, give the restart round-trip a real window before
+    // declaring it failed for good -- ICE candidate gathering/connectivity
+    // checks over a genuinely new network path can take several seconds,
+    // not just the offer/answer exchange itself.
+    setTimeout(() => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        endCallDueToPeerLoss(`${reason} (no recovery within ${ICE_RESTART_GRACE_MS / 1000}s)`);
+      }
+    }, ICE_RESTART_GRACE_MS);
+  }
+
   pc.oniceconnectionstatechange = () => setIceState(pc.iceConnectionState);
   pc.onconnectionstatechange = () => {
     log(`connection state: ${pc.connectionState}`);
-    // 'disconnected' can be transient (a brief network blip WebRTC itself
-    // recovers from) -- only 'failed' is a genuine, unrecoverable end-to-end
-    // loss. 'closed' after our own local hang-up is the expected, already-
-    // handled case (sessionEnded is already true by then, so this no-ops).
-    if (pc.connectionState === 'failed') endCallDueToPeerLoss('ICE failed');
-    // Reported live (both sides, consistently): the "Connecting to X..."
-    // banner stayed up forever despite a fully working call -- audio/video
-    // flowing, chat working. setIceState (fed by oniceconnectionstatechange
-    // above) was the ONLY place hideConnecting() got called; a real capture
-    // showed pc.connectionState reaching 'connected' while iceConnectionState
-    // apparently never fired the matching 'connected'/'completed' transition
-    // in that same run (browsers don't guarantee the two fire together, or
-    // even both fire at all -- connectionState is the spec's own aggregate
-    // signal, arguably the more authoritative one to begin with). Hooking
-    // both, plus ontrack below, so any one of the three real-connectivity
-    // signals that actually fires is enough to clear it.
-    if (pc.connectionState === 'connected') hideConnecting();
+    // 'closed' after our own local hang-up is the expected, already-handled
+    // case (sessionEnded is already true by then, so endCallDueToPeerLoss
+    // below no-ops).
+    if (pc.connectionState === 'failed') {
+      if (disconnectedGraceTimer) { clearTimeout(disconnectedGraceTimer); disconnectedGraceTimer = null; }
+      attemptIceRestart('ICE failed');
+    } else if (pc.connectionState === 'disconnected' && !disconnectedGraceTimer) {
+      // 'disconnected' is often transient -- WebRTC's own ICE engine keeps
+      // retrying connectivity checks on the existing candidates without any
+      // restart needed, and frequently self-heals within a few seconds. Only
+      // escalate to an active restart if it's STILL disconnected (not
+      // recovered, and not already escalated to 'failed' on its own, which
+      // the branch above already handles on its own timeline) after a grace
+      // period -- matches the issue's own "start a grace timer" suggestion.
+      disconnectedGraceTimer = setTimeout(() => {
+        disconnectedGraceTimer = null;
+        if (pc.connectionState === 'disconnected') attemptIceRestart('ICE disconnected');
+      }, ICE_RESTART_GRACE_MS / 2);
+    } else if (pc.connectionState === 'connected') {
+      if (disconnectedGraceTimer) { clearTimeout(disconnectedGraceTimer); disconnectedGraceTimer = null; }
+      iceRestartAttempted = false; // a fresh recovery -- a LATER failure gets its own restart attempt
+      // Reported live (both sides, consistently): the "Connecting to X..."
+      // banner stayed up forever despite a fully working call -- audio/video
+      // flowing, chat working. setIceState (fed by oniceconnectionstatechange
+      // above) was the ONLY place hideConnecting() got called; a real capture
+      // showed pc.connectionState reaching 'connected' while iceConnectionState
+      // apparently never fired the matching 'connected'/'completed' transition
+      // in that same run (browsers don't guarantee the two fire together, or
+      // even both fire at all -- connectionState is the spec's own aggregate
+      // signal, arguably the more authoritative one to begin with). Hooking
+      // both, plus ontrack below, so any one of the three real-connectivity
+      // signals that actually fires is enough to clear it.
+      hideConnecting();
+    }
   };
   pc.ontrack = (ev) => {
     remoteVideo.srcObject = ev.streams[0];
