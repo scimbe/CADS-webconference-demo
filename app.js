@@ -566,12 +566,26 @@ async function tryBackgroundDeliver(identity, peerEmail) {
   const key = peerEmail.toLowerCase();
   if (deliveryInFlight.has(key)) return;
   if (!dialerChatStore) return;
-  const outbox = await dialerChatStore.pendingOutbox(peerEmail);
-  if (!outbox.length) return;
-  const presence = await api(`/presence?email=${encodeURIComponent(peerEmail)}`);
-  if (!presence.online) return;
+  // CADS-webconference-demo#39 (finding 1): blocking someone is supposed to
+  // stop them being reached "at all" (see showIncoming's own comment on the
+  // inbound side, which already checks this) -- this outbound sweep never
+  // did, so a queued outbox message to a peer blocked AFTER composing it
+  // still got delivered on the next sweep.
+  if (blockedEmails.has(key)) return;
+  // CADS-webconference-demo#39 (finding 2): used to add(key) only after
+  // awaiting pendingOutbox()/presence below -- two concurrent triggers for
+  // the same peer (the compose-time call and the 10s periodic sweep landing
+  // together) both passed the has() check above before either finished
+  // those awaits, both proceeded, and both delivered the entire outbox --
+  // every queued message sent twice. Marking in-flight synchronously here,
+  // before any await, closes that window; the try/finally below now covers
+  // every return path so this always gets cleared.
   deliveryInFlight.add(key);
   try {
+    const outbox = await dialerChatStore.pendingOutbox(peerEmail);
+    if (!outbox.length) return;
+    const presence = await api(`/presence?email=${encodeURIComponent(peerEmail)}`);
+    if (!presence.online) return;
     await ensureWasmInit();
     const resp = await api('/call', { body: { fromEmail: identity.email, toEmail: peerEmail, transport: 'channel', kind: 'chat-delivery' } });
     if (resp.error || resp.status === 'offline') return;
@@ -1666,11 +1680,26 @@ async function runDialer(identity, { verified = false } = {}) {
       autoAcceptChatDelivery(incoming, identity);
       return;
     }
-    if (currentIncoming) return;
+    // CADS-webconference-demo#39 (finding 3): a second incoming call while
+    // one is already showing used to just be dropped here -- no /decline,
+    // so that second caller kept ringing (from their own side) for the
+    // full 60s bridge CALL_TTL with no indication anything had happened on
+    // this end at all. Declining it explicitly gives them the same prompt
+    // "not available" feedback a real busy line would.
+    if (currentIncoming) {
+      api('/decline', { body: { channel: incoming.channel } }).catch(() => {});
+      return;
+    }
     currentIncoming = incoming;
     incomingFrom.textContent = incoming.fromEmail;
     incomingCard.hidden = false;
     currentIncomingTimer = setTimeout(() => {
+      // CADS-webconference-demo#39 (finding 4): this only ever cleared
+      // local state -- the bridge/caller had no idea this side gave up,
+      // and kept the channel "ringing" until its own 60s CALL_TTL expired
+      // 15s later. Declining here tells the caller immediately instead of
+      // leaving them hanging for that extra window.
+      api('/decline', { body: { channel: incoming.channel } }).catch(() => {});
       clearIncoming();
       setCallNote('warn', `${incoming.fromEmail}'s call is no longer available (it expired).`);
     }, INCOMING_CARD_TIMEOUT_MS);
