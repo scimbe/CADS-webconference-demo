@@ -888,10 +888,21 @@ function storageKeyFor(email) {
   return `ct-webconference-identity:${email.toLowerCase()}`;
 }
 
-function loadOrCreateIdentity(email) {
+// CADS-webconference-demo#42: run()'s #13-era key recovery (myEmail ->
+// localStorage) needs to tell "no identity here yet" apart from "found the
+// existing one" -- silently minting a FRESH identity in that case (this
+// function's normal, correct behavior for the real registration/login path)
+// would hand run() keys that don't match what the grant/attestation was
+// actually issued for, producing an opaque join failure instead of an
+// honest "this browser/profile doesn't have it" error. requireExisting is
+// only ever passed true from that one call site.
+function loadOrCreateIdentity(email, { requireExisting = false } = {}) {
   const key = storageKeyFor(email);
   const existing = localStorage.getItem(key);
   if (existing) return JSON.parse(existing);
+  if (requireExisting) {
+    throw new Error(`no local identity found for ${email} -- this call link only works in the same browser profile that placed or accepted it`);
+  }
   const holder = wasm.generate_holder_identity();
   const noise = wasm.generate_noise_identity();
   const identity = {
@@ -2068,9 +2079,15 @@ async function run() {
   // long before this call was placed or accepted. myEmail is enough to load
   // them straight back out of there -- loadOrCreateIdentity is idempotent,
   // and this identity necessarily already exists, since it's what placed or
-  // accepted the call in the first place.
+  // accepted the call in the first place. requireExisting: true (#42) --
+  // "necessarily already exists" only holds for the SAME browser profile
+  // that placed/accepted the call; opening this same URL in a different
+  // browser/private window has no such identity, and silently minting a
+  // fresh one here would hand the rest of run() keys that don't match what
+  // the grant/attestation were actually issued for -- an opaque join
+  // failure instead of an honest error about why.
   if ((!holderPrivHex || !noisePrivHex) && myEmail) {
-    const identity = loadOrCreateIdentity(myEmail);
+    const identity = loadOrCreateIdentity(myEmail, { requireExisting: true });
     holderPrivHex = identity.holderPriv;
     noisePrivHex = identity.noisePriv;
   }
@@ -2159,11 +2176,24 @@ async function run() {
     // loss. 'closed' after our own local hang-up is the expected, already-
     // handled case (sessionEnded is already true by then, so this no-ops).
     if (pc.connectionState === 'failed') endCallDueToPeerLoss('ICE failed');
+    // Reported live (both sides, consistently): the "Connecting to X..."
+    // banner stayed up forever despite a fully working call -- audio/video
+    // flowing, chat working. setIceState (fed by oniceconnectionstatechange
+    // above) was the ONLY place hideConnecting() got called; a real capture
+    // showed pc.connectionState reaching 'connected' while iceConnectionState
+    // apparently never fired the matching 'connected'/'completed' transition
+    // in that same run (browsers don't guarantee the two fire together, or
+    // even both fire at all -- connectionState is the spec's own aggregate
+    // signal, arguably the more authoritative one to begin with). Hooking
+    // both, plus ontrack below, so any one of the three real-connectivity
+    // signals that actually fires is enough to clear it.
+    if (pc.connectionState === 'connected') hideConnecting();
   };
   pc.ontrack = (ev) => {
     remoteVideo.srcObject = ev.streams[0];
     remoteEmpty.style.display = 'none';
     log(`remote track received: ${ev.track.kind}`);
+    hideConnecting(); // decrypted remote media arriving is itself unambiguous proof the call is live
   };
 
   function sendSignal(bytes) {
