@@ -576,9 +576,32 @@ async function autoAcceptChatDelivery(incoming, identity) {
   try {
     await ensureWasmInit();
     const attestation = computeAttestation(incoming.channel, identity.holderPriv, identity.holderPub, identity.noisePub);
-    await api('/attest', {
+    const attestResp = await api('/attest', {
       body: { channel: incoming.channel, role: 'callee', holderPub: identity.holderPub, noisePub: identity.noisePub, attestation },
     });
+    // The callee's incoming WS push fires the instant the bridge mints the
+    // channel -- BEFORE the caller has even issued its own /api/attest call
+    // (a separate, later HTTP round-trip on the caller's side). This attest
+    // call almost always lands first, with the caller's own callerAttest
+    // still null -- the bridge's tryRegister() then no-ops (needs both
+    // sides) and this response's status stays 'ringing', not
+    // 'accepted_and_registered'. The channel's members are only actually
+    // registered with the control plane once BOTH attestations are in, and
+    // the edge refuses a join for a not-yet-registered member -- joining
+    // immediately here, without waiting for that, is exactly what produced
+    // a consistent, reproducible "channel join refused" on every background
+    // delivery tested live. tryBackgroundDeliver (the caller-initiated half
+    // of this same feature) already polls for this same reason; this was
+    // the one call site that didn't.
+    if (attestResp.status?.state !== 'accepted_and_registered') {
+      let accepted = false;
+      await pollCallStatus(incoming.channel, {
+        timeoutMs: 10000,
+        intervalMs: 500,
+        onDone: (ok) => { accepted = ok; },
+      });
+      if (!accepted) return;
+    }
     const { stream, noiseTransport } = await connectBackgroundChannel(incoming.ws, incoming.grant, identity.holderPriv, identity.noisePriv, false);
     await backgroundChatSession(stream, noiseTransport, false, dialerChatStore, incoming.fromEmail);
   } catch (e) {
@@ -999,12 +1022,30 @@ let pendingRequests = [];
 async function refreshContacts() {
   const mine = myContacts.all();
   // CADS-webconference-demo#11: scoped to exactly the emails this call
-  // needs presence for -- see the endpoint's own comment for why.
+  // needs presence for -- see the endpoint's own comment for why. Already
+  // bounded by MY OWN contact list, not by total account count -- this
+  // poll's cost is O(my contacts), the same regardless of how many other
+  // accounts exist on the server, so it stays cheap even at a very large
+  // total user count.
   const resp = mine.length ? await api(`/contacts?emails=${encodeURIComponent(mine.join(','))}`) : { contacts: [] };
   const presence = new Map((resp.error ? [] : resp.contacts || []).map((c) => [c.email, c.online]));
   const contacts = mine.map((email) => ({ email, online: presence.get(email) || false }));
   await renderContacts(contacts);
   renderRequests();
+  // The open conversation's own header used to be set once, in
+  // openConversation(), and never touched again -- if the peer's presence
+  // changed while you kept that conversation open, the header just sat
+  // there stale (confirmed live: still showed "offline" 7+ seconds after
+  // the peer had genuinely come online and started heartbeating). Reusing
+  // this SAME already-scoped poll instead of adding a second one -- the
+  // open conversation's peer is always a contact (openConversation is only
+  // ever reached from the contacts list), so its presence is already in
+  // the map above at zero extra request cost.
+  if (currentConversationEmail && presence.has(currentConversationEmail)) {
+    const online = presence.get(currentConversationEmail);
+    convStatus.textContent = online ? 'online' : 'offline';
+    convStatus.dataset.online = online ? '1' : '0';
+  }
 }
 
 function formatMsgTime(ts) {
