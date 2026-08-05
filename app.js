@@ -923,16 +923,15 @@ async function pollCallStatus(channel, { onDone, timeoutMs = 15000, intervalMs =
 }
 
 function startCallFromIdentity(identity, { role, channel, grant, ws, transport, peerEmail }) {
-  const params = new URLSearchParams({ ws, grant, holderPriv: identity.holderPriv, noisePriv: identity.noisePriv, role });
+  // CADS-webconference-demo#13: holderPriv/noisePriv deliberately left out
+  // of this URL -- see run()'s matching comment for why (localStorage
+  // recovery via myEmail instead). myEmail is now unconditional rather than
+  // peerEmail-gated, since it's load-bearing for that recovery on every
+  // in-app call, not just an optional chat-store-keying nicety anymore.
+  const params = new URLSearchParams({ ws, grant, role, myEmail: identity.email });
   if (transport === 'channel') params.set('transport', 'channel');
-  // Optional: only used to key the encrypted local chat store (chatStore.js)
-  // to the right (me, peer) conversation. A hand-built manual call link
-  // (see index.html's "manual call link" fallback) won't have these -- chat
-  // persistence just quietly stays off for that link, same as it always has.
-  if (peerEmail) {
-    params.set('myEmail', identity.email);
-    params.set('peerEmail', peerEmail);
-  }
+  // peerEmail alone stays optional/chat-store-keying-only, same as before.
+  if (peerEmail) params.set('peerEmail', peerEmail);
   location.search = params.toString(); // reload into the call screen -- keeps run() as the single entry point
 }
 
@@ -2003,16 +2002,43 @@ async function run() {
   // wrong host still just works against THIS host, harmlessly).
   const wsUrl = params.has('ws') ? `wss://${location.host}/ws/channel` : null;
   const grantHex = params.get('grant');
-  const holderPrivHex = params.get('holderPriv');
-  const noisePrivHex = params.get('noisePriv');
+  let holderPrivHex = params.get('holderPriv');
+  let noisePrivHex = params.get('noisePriv');
   const role = params.get('role'); // 'caller' | 'callee'
   const transportMode = params.get('transport') === 'channel' ? 'channel' : 'webrtc';
-  // Optional -- see startCallFromIdentity's comment. A manually-built call
-  // link won't have these; chat just isn't persisted for that session.
+  // Optional for a manually-built call link, which has no identity to key
+  // the chat store to -- chat just isn't persisted for that session, same
+  // as always. Unconditional (not just chat-store keying) for every
+  // in-app call now -- see the #13 key-recovery block right below.
   const myEmail = params.get('myEmail');
   const peerEmail = params.get('peerEmail');
 
-  if (!wsUrl || !grantHex || !holderPrivHex || !noisePrivHex || !role) {
+  if (!wsUrl || !grantHex || !role) {
+    await runIdentityScreen();
+    return;
+  }
+  // CADS-webconference-demo#13: holderPriv/noisePriv used to ride in this
+  // same URL for every in-app call (startCallFromIdentity's reload) --
+  // meaning both private keys sat in browser history and in every proxy/
+  // server access log for that page-load GET, for as long as those persist.
+  // Neither key ever actually needs to leave the tab: this identity's keys
+  // are already sitting in localStorage (loadOrCreateIdentity's own
+  // storage, keyed by email) from whenever this identity was first created,
+  // long before this call was placed or accepted. myEmail is enough to load
+  // them straight back out of there -- loadOrCreateIdentity is idempotent,
+  // and this identity necessarily already exists, since it's what placed or
+  // accepted the call in the first place.
+  if ((!holderPrivHex || !noisePrivHex) && myEmail) {
+    const identity = loadOrCreateIdentity(myEmail);
+    holderPrivHex = identity.holderPriv;
+    noisePrivHex = identity.noisePriv;
+  }
+  // Falls through here for a manually-built/CLI call link, which has no
+  // myEmail to recover keys from locally and so still carries them in the
+  // URL -- that's a separate, pre-existing sharing mechanism (its whole
+  // point is to be pasted somewhere else), not something this pass
+  // redesigns; flagged as remaining scope on the issue.
+  if (!holderPrivHex || !noisePrivHex) {
     await runIdentityScreen();
     return;
   }
