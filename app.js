@@ -48,11 +48,25 @@ const routeSignal = document.getElementById('route-signal');
 const routeWebrtc = document.getElementById('route-webrtc');
 const routePeer = document.getElementById('route-peer');
 
+// CADS-webconference-demo#31: a WASM-thrown crypto error (holderSign,
+// NoiseHandshake, encrypt/decrypt, etc.) can echo its offending input in
+// the message string -- common in Rust-derived panic/error text -- and
+// every key/secret this app ever handles (holderPriv, noisePriv, the
+// operator pubkey, channel/grant hex) is exactly 64 hex characters. Applied
+// at log()'s single choke point below (every log(...) call site in the
+// file goes through it) rather than patched at each of the dozen+
+// individual call sites, so this can't be defeated by a future call site
+// someone forgets to sanitize by hand.
+function sanitizeErrorMessage(msg) {
+  return String(msg).replace(/\b[0-9a-fA-F]{64}\b/g, '[redacted]');
+}
+
 function log(msg) {
   // Timestamped (HH:MM:SS.mmm) so the Technical readout panel can show how
   // far apart events actually happened -- important for diagnosing stalls/
   // reconnects, where "it happened eventually" vs "it happened instantly"
   // is the whole question.
+  msg = sanitizeErrorMessage(msg);
   const ts = new Date().toISOString().slice(11, 23);
   const line = document.createElement('div');
   line.textContent = `[${ts}] ${msg}`;
@@ -2153,7 +2167,11 @@ async function run() {
 }
 
 run().catch((e) => {
-  console.error(e);
-  setStatus('error: ' + (e.message || e));
-  log(`error: ${e.message || e}`);
+  // See sanitizeErrorMessage's own comment -- log() already sanitizes what
+  // it's given, but this is the one place an error can ALSO reach
+  // console.error and #status directly, neither of which goes through it.
+  const safeMessage = sanitizeErrorMessage(e.message || e);
+  console.error('run() failed:', safeMessage);
+  setStatus('error: ' + safeMessage);
+  log(`error: ${safeMessage}`);
 });

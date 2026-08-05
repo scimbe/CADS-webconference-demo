@@ -325,16 +325,28 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
     let bytes = 0;
+    let rejected = false;
     req.on('data', (c) => {
+      if (rejected) return; // already over the cap -- drop further chunks, memory growth already stopped
       bytes += c.length;
       if (bytes > MAX_BODY_BYTES) {
+        rejected = true;
+        // Deliberately NOT req.destroy() here (regression, caught live): it
+        // tears down the request's underlying socket, which the response
+        // shares -- Caddy then saw the backend connection just die and
+        // reported a bare 502 to the browser instead of ever getting the
+        // clean 413 below a chance to be written. Just stop accumulating
+        // and let the connection wind down normally once the client
+        // finishes sending (or times out on its own) -- the memory-growth
+        // concern this cap exists for is already fully addressed by no
+        // longer appending to `data`.
         reject(new Error('request body too large'));
-        req.destroy();
         return;
       }
       data += c;
     });
     req.on('end', () => {
+      if (rejected) return; // already settled via the reject() above
       try {
         resolve(data ? JSON.parse(data) : {});
       } catch (e) {
@@ -491,7 +503,11 @@ const server = http.createServer(async (req, res) => {
       try {
         minted = await mintGrants(caller.holderPub, callee.holderPub);
       } catch (e) {
-        return json(res, 500, { error: `grant minting failed: ${e.message}` });
+        // CADS-webconference-demo#31: e.message here can be raw execFile
+        // internals (stderr from the grant binary, an ENOENT-shaped path
+        // error) -- logged in full server-side, generic to the client.
+        console.error('bridge: grant minting failed:', e);
+        return json(res, 500, { error: 'grant minting failed' });
       }
       const call = {
         channel: minted.channel,
@@ -586,7 +602,23 @@ const server = http.createServer(async (req, res) => {
 
     json(res, 404, { error: 'not found' });
   } catch (e) {
-    json(res, 500, { error: e.message });
+    // CADS-webconference-demo#31: this used to return e.message verbatim to
+    // the client for ANY uncaught error, including a JSON.parse failure on
+    // a malformed body (readBody) surfacing its raw parse message, and
+    // (were one to ever reach here) a stack-trace-adjacent detail from
+    // somewhere deeper. Malformed input is a client mistake worth a real
+    // 400 with a real reason; anything else is unexpected enough that the
+    // client doesn't need (and shouldn't get) the internals -- logged
+    // server-side in full instead, where whoever operates this bridge can
+    // actually act on it.
+    if (e instanceof SyntaxError) {
+      return json(res, 400, { error: 'invalid JSON body' });
+    }
+    if (e.message === 'request body too large') {
+      return json(res, 413, { error: e.message }); // readBody's own message is already client-safe, not internal detail
+    }
+    console.error(`bridge: unhandled error on ${req.method} ${url.pathname}:`, e);
+    json(res, 500, { error: 'internal error' });
   }
 });
 
