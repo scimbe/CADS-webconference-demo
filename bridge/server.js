@@ -77,6 +77,18 @@ if (!AGENT_HOSTNAME) {
 }
 const WS_URL = `wss://${AGENT_HOSTNAME}/ws/channel`;
 const OPERATOR_KEY = readSecret('CT_CHANNEL_OPERATOR_KEY'); // 64-hex private key, from `ct-agent channel operator-init`
+// CADS-webconference-demo#30: readSecret() above already supports the
+// _FILE convention for reading OPERATOR_KEY into this process's own
+// memory -- but mintGrants() below used to pass OPERATOR_KEY inline on
+// the child's argv regardless of where it came from, which still put the
+// key in /proc/<pid>/cmdline (visible to any same-user process) for the
+// duration of every mint call. Kept separately from the read-and-trimmed
+// OPERATOR_KEY above so mintGrants can hand the CHILD the file path
+// itself (via ct-video-call-grant's own --operator-private-file, which
+// reads it in-process) instead of the key value, whenever a file backs
+// it. Falls back to the inline form only when no _FILE is configured --
+// unavoidable without one, same as before this fix.
+const OPERATOR_KEY_FILE = process.env.CT_CHANNEL_OPERATOR_KEY_FILE;
 const GRANT_BIN = process.env.CT_VIDEO_CALL_GRANT_BIN || '/usr/local/bin/ct-video-call-grant';
 // This tunnel's own portal id (the UUID-ish string in /portal/tunnels/:id/...),
 // needed only for the login-allowlist add/remove proxy below -- optional
@@ -386,7 +398,11 @@ function mintGrants(holderAPub, holderBPub) {
     // CLI that somehow started spamming stdout fails loudly (ERR_CHILD_
     // PROCESS_STDIO_MAXBUFFER) instead of silently relying on whatever
     // Node's own default happens to be on a given version.
-    execFile(GRANT_BIN, [holderAPub, holderBPub, '--operator-private', OPERATOR_KEY, '--ttl-secs', '3600'], { timeout: 10_000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    // CADS-webconference-demo#30: --operator-private-file (read by the child
+    // itself) when a file backs the key, so it never appears on this argv at
+    // all -- see OPERATOR_KEY_FILE's own comment above for why.
+    const operatorArgs = OPERATOR_KEY_FILE ? ['--operator-private-file', OPERATOR_KEY_FILE] : ['--operator-private', OPERATOR_KEY];
+    execFile(GRANT_BIN, [holderAPub, holderBPub, ...operatorArgs, '--ttl-secs', '3600'], { timeout: 10_000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err) return reject(err);
       const out = {};
       for (const line of stdout.trim().split('\n')) {

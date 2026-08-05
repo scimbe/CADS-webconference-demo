@@ -71,8 +71,15 @@ services:
       # anyone who can reach this host or the docker socket. server.js now
       # supports the standard Docker-secrets convention for all three: set
       # `<NAME>_FILE=/run/secrets/<name>` instead and it reads the value
-      # from that file (never landing in `environment:` at all). NOT
-      # switched over here yet -- that needs the actual secret VALUES
+      # from that file (never landing in `environment:` at all). For
+      # CT_CHANNEL_OPERATOR_KEY specifically, this now closes the argv
+      # window too: when CT_CHANNEL_OPERATOR_KEY_FILE is set, mintGrants()
+      # hands ct-video-call-grant the file path via its own
+      # --operator-private-file flag (which reads the key in-process)
+      # instead of the key value on argv -- so the key never appears in
+      # this bridge's own environment output OR in /proc/<pid>/cmdline for
+      # the grant-minting child process either. NOT switched over here
+      # yet -- that needs the actual secret VALUES
       # written to real files outside this repo (e.g. under a
       # git-ignored ./secrets/ directory) and this service's `secrets:`
       # list wired to them; left as plain env vars below (unchanged

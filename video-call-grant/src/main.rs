@@ -19,7 +19,14 @@
 //! an OIDC session.
 //!
 //! Usage:
-//!   ct-video-call-grant <holder_a_hex> <holder_b_hex> [--operator-private <hex>] [--ttl-secs <n>]
+//!   ct-video-call-grant <holder_a_hex> <holder_b_hex> [--operator-private <hex> | --operator-private-file <path>] [--ttl-secs <n>]
+//!
+//! CADS-webconference-demo#30: `--operator-private-file` reads the key from a file in-process
+//! instead of taking it inline -- the bridge (bridge/server.js's `mintGrants`) shells out to
+//! this binary via `execFile`, and an inline `--operator-private <hex>` argument sits in this
+//! process's argv (visible to any same-user process via e.g. `/proc/<pid>/cmdline`) for the
+//! duration of every mint call. The file path itself is not a secret; only its contents are,
+//! and those never appear on the command line.
 //!
 //! Prints, one line per field:
 //!   operator_public_hex=<...>   (register this exact channel with POST /me/channels)
@@ -65,26 +72,43 @@ fn from_hex32(s: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
+// Shared by both --operator-private and --operator-private-file so the
+// all-zero-key rejection (#34) applies identically regardless of which one
+// supplied the bytes -- a misconfigured key is a misconfigured key either way.
+fn validate_operator_key(bytes: [u8; 32]) -> Result<[u8; 32], String> {
+    if bytes == [0u8; 32] {
+        return Err("must not be the all-zero key".to_string());
+    }
+    Ok(bytes)
+}
+
 fn parse_args(raw: &[String]) -> Result<Args, String> {
     let mut positional = Vec::new();
     let mut operator_private = None;
+    let mut operator_private_source: Option<&'static str> = None; // for the mutual-exclusivity error message
     let mut ttl_secs = DEFAULT_TTL_SECS;
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
             "--operator-private" => {
+                if let Some(prior) = operator_private_source {
+                    return Err(format!("--operator-private conflicts with {prior} -- pass only one"));
+                }
                 let v = raw.get(i + 1).ok_or("--operator-private needs a value")?;
                 let bytes = from_hex32(v).map_err(|e| format!("--operator-private: {e}"))?;
-                // CADS-webconference-demo#34: SigningKey::from_bytes accepts any 32
-                // bytes including all-zero -- a misconfigured all-zero operator key
-                // would silently "work" (internally consistent, verifiable
-                // signatures under the zero key) instead of failing loudly at the
-                // one point (key import) where a canonical-key check is cheap and
-                // the mistake is still easy to explain.
-                if bytes == [0u8; 32] {
-                    return Err("--operator-private must not be the all-zero key".to_string());
+                operator_private = Some(validate_operator_key(bytes).map_err(|e| format!("--operator-private {e}"))?);
+                operator_private_source = Some("--operator-private");
+                i += 2;
+            }
+            "--operator-private-file" => {
+                if let Some(prior) = operator_private_source {
+                    return Err(format!("--operator-private-file conflicts with {prior} -- pass only one"));
                 }
-                operator_private = Some(bytes);
+                let path = raw.get(i + 1).ok_or("--operator-private-file needs a value")?;
+                let contents = std::fs::read_to_string(path).map_err(|e| format!("--operator-private-file {path}: {e}"))?;
+                let bytes = from_hex32(contents.trim()).map_err(|e| format!("--operator-private-file {path}: {e}"))?;
+                operator_private = Some(validate_operator_key(bytes).map_err(|e| format!("--operator-private-file {e}"))?);
+                operator_private_source = Some("--operator-private-file");
                 i += 2;
             }
             "--ttl-secs" => {
@@ -158,7 +182,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!("ct-video-call-grant: {e}");
-            eprintln!("usage: ct-video-call-grant <holder_a_hex> <holder_b_hex> [--operator-private <hex>] [--ttl-secs <n>]");
+            eprintln!("usage: ct-video-call-grant <holder_a_hex> <holder_b_hex> [--operator-private <hex> | --operator-private-file <path>] [--ttl-secs <n>]");
             std::process::exit(2);
         }
     };
@@ -288,6 +312,81 @@ mod tests {
             hex(&[0u8; 32]),
         ];
         assert!(parse_args(&raw).is_err());
+    }
+
+    // CADS-webconference-demo#30
+    fn write_temp_key_file(bytes: [u8; 32]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "ct-video-call-grant-test-key-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::write(&path, hex(&bytes)).unwrap();
+        path
+    }
+
+    #[test]
+    fn parse_args_reads_operator_private_from_a_file() {
+        let key = [0x42u8; 32];
+        let path = write_temp_key_file(key);
+        let raw = vec![hex(&[0u8; 32]), hex(&[1u8; 32]), "--operator-private-file".to_string(), path.to_str().unwrap().to_string()];
+        let parsed = parse_args(&raw).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(parsed.operator_private, Some(key));
+    }
+
+    #[test]
+    fn parse_args_trims_whitespace_from_the_key_file_contents() {
+        // A real file (echo/a text editor) commonly carries a trailing newline --
+        // from_hex32's exact-64-char check would otherwise reject an
+        // otherwise-valid key purely because of how it was written to disk.
+        let key = [0x7eu8; 32];
+        let path = std::env::temp_dir().join(format!(
+            "ct-video-call-grant-test-key-nl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::write(&path, format!("{}\n", hex(&key))).unwrap();
+        let raw = vec![hex(&[0u8; 32]), hex(&[1u8; 32]), "--operator-private-file".to_string(), path.to_str().unwrap().to_string()];
+        let parsed = parse_args(&raw).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(parsed.operator_private, Some(key));
+    }
+
+    #[test]
+    fn parse_args_rejects_all_zero_operator_key_from_a_file() {
+        let path = write_temp_key_file([0u8; 32]);
+        let raw = vec![hex(&[0u8; 32]), hex(&[1u8; 32]), "--operator-private-file".to_string(), path.to_str().unwrap().to_string()];
+        let result = parse_args(&raw);
+        std::fs::remove_file(&path).ok();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_args_rejects_a_missing_operator_private_file() {
+        let raw = vec![
+            hex(&[0u8; 32]),
+            hex(&[1u8; 32]),
+            "--operator-private-file".to_string(),
+            "/nonexistent/path/that/should/not/exist".to_string(),
+        ];
+        assert!(parse_args(&raw).is_err());
+    }
+
+    #[test]
+    fn parse_args_rejects_both_operator_private_and_operator_private_file_together() {
+        let path = write_temp_key_file([0x11u8; 32]);
+        let raw = vec![
+            hex(&[0u8; 32]),
+            hex(&[1u8; 32]),
+            "--operator-private".to_string(),
+            hex(&[0x22u8; 32]),
+            "--operator-private-file".to_string(),
+            path.to_str().unwrap().to_string(),
+        ];
+        let result = parse_args(&raw);
+        std::fs::remove_file(&path).ok();
+        assert!(result.is_err(), "specifying both should be rejected, not silently pick one");
     }
 
     fn hex_decode(s: &str) -> Vec<u8> {
