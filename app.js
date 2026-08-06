@@ -1061,27 +1061,37 @@ function setCtlLabel(btn, icon, label) {
 function setupControls(media, onHangup) {
   let micOn = true;
   let camOn = true;
-  btnMic.addEventListener('click', () => {
+  // CADS-webconference-demo#67: property assignment, not addEventListener --
+  // a webrtc->channel transport fallback mid-call (attemptChannelFallback)
+  // calls runChannelMediaCall, which calls this a SECOND time for the same
+  // call. addEventListener would have stacked a second listener per button
+  // on top of the first (double-fired Hang Up, double-toggled mic/cam,
+  // and -- worse -- the stale first onHangup closure closing over the
+  // now-reused signaling `stream` out from under the fallback's own call).
+  // Direct property assignment fully replaces the prior handler instead,
+  // making a second setupControls() call for the same call safe by
+  // construction, with no behavior change for the single-call case.
+  btnMic.onclick = () => {
     if (media.kind !== 'media') return;
     micOn = !micOn;
     for (const t of media.stream.getAudioTracks()) t.enabled = micOn;
     setCtlLabel(btnMic, micOn ? '🎤' : '🔇', micOn ? 'Mute' : 'Unmute');
     btnMic.dataset.off = micOn ? '0' : '1';
-  });
-  btnCam.addEventListener('click', () => {
+  };
+  btnCam.onclick = () => {
     if (media.kind !== 'media') return;
     camOn = !camOn;
     for (const t of media.stream.getVideoTracks()) t.enabled = camOn;
     setCtlLabel(btnCam, '📷', camOn ? 'Camera off' : 'Camera on');
     btnCam.dataset.off = camOn ? '0' : '1';
-  });
-  btnSwitchCamera.addEventListener('click', () => switchCamera(media));
-  btnHangup.addEventListener('click', () => {
+  };
+  btnSwitchCamera.onclick = () => switchCamera(media);
+  btnHangup.onclick = () => {
     try { onHangup(); } catch {}
     setStatus('you-hung-up');
     for (const t of (media.kind === 'media' ? media.stream.getTracks() : [])) t.stop();
     returnToDialerAfterHangup();
-  });
+  };
 }
 
 function showSetupScreen() {
@@ -3301,6 +3311,7 @@ async function run() {
   // data channel (plus the browser's native connection-state signal) is what
   // actually reflects whether the peer is still there.
   let sessionEnded = false;
+  let capturedMedia = null; // set once getLocalMedia() below resolves; used by attemptChannelFallback to release the pc-bound tracks before runChannelMediaCall grabs its own
   function endCallDueToPeerLoss(reason) {
     if (sessionEnded) return;
     sessionEnded = true;
@@ -3334,7 +3345,7 @@ async function run() {
   let disconnectedGraceTimer = null;
   function attemptIceRestart(reason) {
     if (iceRestartAttempted) {
-      endCallDueToPeerLoss(`${reason} (restart already attempted this episode)`);
+      attemptChannelFallback(`${reason} (restart already attempted this episode)`);
       return;
     }
     iceRestartAttempted = true;
@@ -3346,7 +3357,7 @@ async function run() {
         sendSignal(wasm.encodeSignalOffer(offer.sdp));
       }).catch((e) => {
         log(`ICE restart offer failed: ${e.message}`);
-        endCallDueToPeerLoss(`${reason} (restart attempt itself failed: ${e.message})`);
+        attemptChannelFallback(`${reason} (restart attempt itself failed: ${e.message})`);
       });
     } else {
       // Callee has nothing to actively send -- the caller's restart offer
@@ -3359,9 +3370,56 @@ async function run() {
     // not just the offer/answer exchange itself.
     setTimeout(() => {
       if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-        endCallDueToPeerLoss(`${reason} (no recovery within ${ICE_RESTART_GRACE_MS / 1000}s)`);
+        attemptChannelFallback(`${reason} (no recovery within ${ICE_RESTART_GRACE_MS / 1000}s)`);
       }
     }, ICE_RESTART_GRACE_MS);
+  }
+
+  // CADS-webconference-demo#67: previously, once an ICE restart also failed
+  // to recover within its grace window, the call just ended -- even though
+  // the direct-channel transport (this same call's Noise_IK signaling
+  // socket, `stream`/`noiseTransport`, already open and authenticated since
+  // before the offer/answer exchange even started) was sitting right there
+  // as exactly the fallback #18/#37 designed it to be. This is precisely
+  // the STUN-only-ICE/no-TURN/cross-NAT gap those issues left open: webrtc
+  // can fail to establish connectivity at all on a genuinely hard network,
+  // and until now the only "fix" was retrying the same ICE path that just
+  // failed. One fallback attempt per call (channelFallbackAttempted) --
+  // same one-shot-then-terminal shape as every other recovery latch in this
+  // file (iceRestartAttempted, channelReconnectAttempted); a SECOND failure
+  // after the fallback itself is already running ends the call for real via
+  // endCallDueToPeerLoss, same as before this fix existed.
+  let channelFallbackAttempted = false;
+  function attemptChannelFallback(reason) {
+    if (channelFallbackAttempted) {
+      endCallDueToPeerLoss(`${reason} (channel fallback already attempted this call)`);
+      return;
+    }
+    channelFallbackAttempted = true;
+    // Stops every other webrtc-side watchdog (heartbeat close/timeout,
+    // onconnectionstatechange) from also firing once pc.close() below runs
+    // -- same "already ended, no-op" guard endCallDueToPeerLoss itself
+    // relies on for a local hang-up, reused here since we're leaving pc
+    // behind for good, not actually ending the call.
+    sessionEnded = true;
+    log(`${reason} -- WebRTC never established a working connection, falling back to the direct-channel transport`);
+    addChatMessage('WebRTC connection failed -- falling back to a direct relay…', 'system');
+    setStatus('connecting-media');
+    pc.close();
+    activeWebrtcPc = null;
+    // Release the pc-bound camera/mic tracks -- runChannelMediaCall acquires
+    // its own via a fresh getLocalMedia() call, and holding both open at
+    // once would leave a dangling capture session for no reason.
+    if (capturedMedia) capturedMedia.stream.getTracks().forEach((t) => t.stop());
+    document.getElementById('transport-badge').textContent = 'direct-channel (fallback)';
+    document.getElementById('chat-transport-note').textContent =
+      '— tunneled through the same Noise_IK channel (fell back from WebRTC after ICE failed)';
+    // Reuses the SAME stream/noiseTransport this whole call's Noise_IK
+    // handshake already authenticated at the top of run() -- no re-dial,
+    // no fresh grant/handshake needed, exactly the hand-off the #69/#67
+    // threads worked out was safe (the channel was open for signaling the
+    // whole time, just never carrying TAG_MEDIA_* traffic until now).
+    runChannelMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex);
   }
 
   pc.oniceconnectionstatechange = () => setIceState(pc.iceConnectionState);
@@ -3422,6 +3480,7 @@ async function run() {
   };
 
   const media = await getLocalMedia();
+  capturedMedia = media; // CADS-webconference-demo#67 -- so attemptChannelFallback (defined above, but only ever called once ICE has actually failed, i.e. after this line has run) can release these tracks
 
   // Heartbeat: a third, dedicated real WebRTC data channel -- deliberately
   // separate from 'chat' so heartbeat traffic never touches the visible chat
