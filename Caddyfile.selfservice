@@ -90,9 +90,44 @@
 		# does, so it stays stripped through both the gate-check probe and
 		# the final copy_headers set.
 		request_header -X-Gate-Email
+		# CADS-webconference-demo#65: ROOT CAUSE of the "/api/ws upgrade gets
+		# redirected right after login" bug, found by building a real local
+		# repro (caddy:2 + a Node mock backend logging every header it
+		# received for /gate/check, both for a plain GET client request and
+		# a genuine WS-upgrade client request through this exact Caddyfile
+		# shape). When the ORIGINAL client request is itself a WebSocket
+		# upgrade (Connection: Upgrade, Upgrade: websocket -- true for every
+		# /api/ws request, and true for /api/* in general whenever the
+		# browser opens the presence socket), Caddy's reverse_proxy/
+		# forward_auth carries those SAME headers onto its own internal
+		# probe request to /gate/check by default. The mock backend's own
+		# HTTP server then treated the CHECK request itself as an upgrade
+		# attempt (routed to its 'upgrade' handler, not the normal request
+		# handler) and closed the connection without a valid HTTP response
+		# -- reproducing the exact client-visible failure (502/redirect
+		# instead of a clean check) with zero timing/session-propagation
+		# involved. This has NOTHING to do with session validity or gate
+		# state propagating -- gate_check() itself (control-plane
+		# crates/control-plane/src/gate.rs) is fully stateless (pure HMAC
+		# cookie verification, no store lookup), so there was never a
+		# "propagation race" to begin with; the bug is entirely in how the
+		# check request is CONSTRUCTED. `header_up -Connection`/`-Upgrade`
+		# on both probes below strips them ONLY from each probe's own
+		# outgoing sub-request (Caddy's per-handler header_up scoping,
+		# confirmed in the same local repro -- verified NOT to affect the
+		# real reverse_proxy calls to /ws/channel and /api/* later in this
+		# block, which still need Connection/Upgrade intact to actually
+		# perform the real WebSocket upgrade). Fixed the actual root cause
+		# here instead of only mitigating client-side (see app.js's
+		# MAX_INCOMING_SOCKET_ATTEMPTS/reload-on-Reconnect/poll-auto-rearm
+		# history for the earlier, now-largely-redundant mitigation layer --
+		# left in place as defense in depth, but this is what actually stops
+		# the failure from happening in the first place).
 		reverse_proxy https://bunsenbrenner.org {
 			method GET
 			rewrite /gate/check
+			header_up -Connection
+			header_up -Upgrade
 			@good status 2xx
 			handle_response @good {
 			}
@@ -112,9 +147,14 @@
 		# we reach here the block above has already guaranteed a 2xx (or
 		# aborted via `error 401` first), so the shorthand's own "return
 		# raw failure to client" behavior can't actually trigger here.
+		# header_up -Connection/-Upgrade here too -- same #65 root cause,
+		# same fix, this probe's own separate outgoing sub-request needs it
+		# independently of the one above.
 		forward_auth https://bunsenbrenner.org {
 			uri /gate/check
 			copy_headers X-Gate-Email
+			header_up -Connection
+			header_up -Upgrade
 		}
 	}
 

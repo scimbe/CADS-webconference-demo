@@ -91,9 +91,22 @@
 	# reverse_proxy's handle_response.
 	route {
 		request_header -X-Gate-Email
+		# CADS-webconference-demo#65: header_up -Connection/-Upgrade strip
+		# those headers ONLY from this forward_auth call's own outgoing
+		# probe request to /gate/check, not from the real request that
+		# continues past this block -- without them, a WS-upgrade original
+		# request (Connection: Upgrade, Upgrade: websocket -- true for
+		# every /api/ws request) carries those same headers onto the
+		# /gate/check probe itself, which then gets misinterpreted as an
+		# upgrade attempt by the backend instead of a plain GET. Root cause
+		# found and fixed the same way in Caddyfile.selfservice (the
+		# actually-deployed file) -- see that file's much longer comment on
+		# this same block for the full local-repro writeup.
 		forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
 			uri /gate/check
 			copy_headers X-Gate-Email
+			header_up -Connection
+			header_up -Upgrade
 		}
 		# CADS-webconference-demo#62 (second regression, live-confirmed):
 		# route{} forces WRITTEN order, not Caddy's default implicit
