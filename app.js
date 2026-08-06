@@ -428,6 +428,38 @@ capture device attached in this environment`);
 // own webrtc branch below.
 let activeWebrtcPc = null;
 
+// CADS-webconference-demo#38 (finding 6): a closed tab/navigation away from
+// an active call previously sent no 'bye' at all -- the peer only learned
+// via the heartbeat timeout (35s) or ICE 'failed'. Best-effort, not a
+// replacement for either: 'pagehide' fires for tab close/navigation/mobile
+// suspend (unlike 'beforeunload', which is unreliable and increasingly
+// blocked), but a send during pagehide teardown isn't guaranteed to flush
+// before the page is gone. For the common graceful-close case it usually
+// does, and the peer learns ~instantly instead of waiting out the
+// heartbeat; for the hard cases (crash, kill, dropped network) no bye was
+// ever going to fly regardless, and the heartbeat/ICE-failed paths (#19,
+// with an active ICE-restart attempt) remain the reliable fallback,
+// unchanged. Deliberately NOT navigator.sendBeacon -- that's HTTP-only, and
+// there is no HTTP path from this client to the peer's media transport (the
+// WASM agent connects straight to the edge's ws_channel; the bridge isn't
+// in the media path) -- it could only ever reach the bridge, not the peer.
+// Set when either transport's call setup completes, cleared at the single
+// choke point every termination path already funnels through
+// (returnToDialerAfterHangup) so a later pagehide never fires a stale bye
+// against an already-torn-down connection.
+let activeCallBye = null;
+window.addEventListener('pagehide', () => {
+  // Best-effort: onHangup's own close calls are normally reached only via
+  // a real button click, where the underlying connection is expected to
+  // still be healthy. Fired here instead during page teardown, where the
+  // browser may already be proactively tearing down resources before this
+  // handler finishes -- swallow rather than let a mid-teardown exception
+  // abort whatever cleanup steps were still going to run after it.
+  try {
+    if (activeCallBye) activeCallBye();
+  } catch (e) {}
+});
+
 // Live front/back swap. Always correct for the local preview (video elements
 // track live additions/removals on the SAME MediaStream object). For an
 // active WebRTC call, also pushes the new track to the peer via
@@ -997,6 +1029,11 @@ function showSetupScreen() {
 // reloads into a clean setup screen, after a short pause so the "you hung
 // up"/"peer hung up" status is actually visible first.
 function returnToDialerAfterHangup(delayMs = 1200) {
+  // CADS-webconference-demo#38 (finding 6): every termination path (local
+  // hangup, peer bye, peer-loss, bad frame) funnels through here -- the
+  // single choke point to clear activeCallBye so a later pagehide never
+  // fires a stale bye against a connection that's already torn down.
+  activeCallBye = null;
   setTimeout(() => {
     location.href = location.pathname;
   }, delayMs);
@@ -2683,7 +2720,8 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
     sendText(TAG_CHAT, NO_CAMERA_SENTINEL);
   }
 
-  setupControls(media, () => {
+  const onHangup = () => {
+    activeCallBye = null; // #38 finding 6 -- see returnToDialerAfterHangup's matching clear
     sendTagged(TAG_BYE, new Uint8Array(0));
     if (recorder && recorder.state !== 'inactive') recorder.stop();
     // CADS-webconference-demo#38 (finding 9): neither hangup path closed the
@@ -2692,7 +2730,11 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
     // page. Explicit close here (mirrors backgroundChatSession's own
     // stream.ws.close() in its finally block) frees it immediately instead.
     byteStream.ws.close();
-  });
+  };
+  // #38 finding 6 -- same close logic runs on an explicit Hang Up click or a
+  // pagehide (tab close/navigation) while this transport's call is live.
+  activeCallBye = onHangup;
+  setupControls(media, onHangup);
 
   setIceState('connected'); // no real ICE in this mode -- 'connected' just reflects the channel being fully up
   setStatus('in-call');
@@ -3046,7 +3088,8 @@ async function run() {
     pc.createDataChannel('probe');
     localEmpty.textContent = 'no camera available';
   }
-  setupControls(media, () => {
+  const onHangup = () => {
+    activeCallBye = null; // #38 finding 6 -- see returnToDialerAfterHangup's matching clear
     sessionEnded = true; // before pc.close(), so the heartbeat/connection-state
     // watchdogs above see the session as already-ended and don't also fire
     // a redundant "peer connection lost" on top of our own local hang-up.
@@ -3054,7 +3097,11 @@ async function run() {
     pc.close();
     activeWebrtcPc = null;
     stream.ws.close(); // CADS-webconference-demo#38 (finding 9) -- see endCallDueToPeerLoss's matching comment
-  });
+  };
+  // #38 finding 6 -- same close logic runs on an explicit Hang Up click or a
+  // pagehide (tab close/navigation) while this transport's call is live.
+  activeCallBye = onHangup;
+  setupControls(media, onHangup);
 
   // Background loop: every subsequent signaling message (from here on the
   // Noise session is established, so everything is encrypted) is decrypted,
