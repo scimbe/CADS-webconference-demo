@@ -1321,6 +1321,13 @@ document.getElementById('identity-mismatch-reload-btn')?.addEventListener('click
 // next reaches 0 (the next successful call), no manual un-backoff needed.
 function pollEvery(fn, baseMs) {
   const tick = () => {
+    // CADS-webconference-demo#72: a detected identity mismatch is terminal
+    // (see noteApiResult's comment) -- backing off the cadence like a
+    // transient outage still means every one of the six background pollers
+    // keeps firing a doomed 403 forever, just slower. Stop rescheduling
+    // entirely once it's known; the banner already told the user a reload
+    // is what fixes this, retrying can't.
+    if (identityMismatchDetected) return;
     fn();
     const down = apiConsecutiveFailures >= 3;
     const next = down ? Math.min(baseMs * 4, 60000) : baseMs;
@@ -2306,6 +2313,19 @@ async function runDialer(identity, { verified = false } = {}) {
   // (pure bookkeeping, no real socket needed) can be exercised directly --
   // this is exactly what the real listener calls, not a parallel copy.
   function handleIncomingSocketClose(code) {
+    // CADS-webconference-demo#72: the WS upgrade reject path (bridge's
+    // server.on('upgrade')) can't carry code:'identity_mismatch' at all --
+    // it's a raw socket.destroy(), no HTTP response body to put it in (see
+    // cc6aae5's rejection logging, which is what surfaces this server-side
+    // instead). So this loop can never detect a mismatch from its OWN
+    // transport; it has to defer to the HTTP pollers' identityMismatchDetected
+    // flag. Without this check it would keep reconnecting -> rejected ->
+    // backoff -> reconnect for up to MAX_INCOMING_SOCKET_ATTEMPTS, each one
+    // logging a doomed rejection server-side, then show #presence-lost-banner
+    // on top of the already-sticky #identity-mismatch-banner -- both wrong:
+    // more reconnects can't help, and a second banner would contradict the
+    // "reload, not reconnect" guidance the mismatch banner already gives.
+    if (identityMismatchDetected) return;
     incomingSocketAttempt++;
     if (incomingSocketAttempt > MAX_INCOMING_SOCKET_ATTEMPTS) {
       log(`presence socket closed (code ${code}); giving up after ${incomingSocketAttempt - 1} attempts -- incoming calls still arrive via polling, click Reconnect to restore the instant push`);
