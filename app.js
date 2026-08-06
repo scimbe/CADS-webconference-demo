@@ -3364,13 +3364,33 @@ async function run() {
       const sendTimer = setInterval(() => {
         if (channel.readyState === 'open') channel.send('ping');
       }, HEARTBEAT_INTERVAL_MS);
+      // CADS-webconference-demo#79: heartbeat silence alone used to be
+      // treated as proof of peer loss -- but a heartbeat channel can go
+      // silent (an SCTP stream reset, #38 finding 5's own close handler
+      // right below already accounts for the channel closing outright) while
+      // the SAME peer connection keeps delivering real media, since
+      // heartbeat rides its own separate data channel over the shared DTLS/
+      // SCTP association. remoteVideo (this shared element, srcObject-fed
+      // for the webrtc path at ev.streams[0] below) demonstrably advancing
+      // is direct proof the connection is alive regardless of what happened
+      // to the heartbeat channel specifically -- checked on every tick, not
+      // just once, so the watchdog still correctly fires once media ALSO
+      // actually stops.
+      let lastHeartbeatCheckVideoTime = remoteVideo.currentTime;
       const watchdog = setInterval(() => {
         if (sessionEnded) {
           clearInterval(sendTimer);
           clearInterval(watchdog);
           return;
         }
+        const videoTimeNow = remoteVideo.currentTime;
+        const videoAdvancing = videoTimeNow > lastHeartbeatCheckVideoTime;
+        lastHeartbeatCheckVideoTime = videoTimeNow;
         if (Date.now() - lastSeen > HEARTBEAT_TIMEOUT_MS) {
+          if (videoAdvancing) {
+            log('heartbeat silent but remote media still advancing -- not treating as peer loss');
+            return;
+          }
           clearInterval(sendTimer);
           clearInterval(watchdog);
           endCallDueToPeerLoss('heartbeat timeout');
