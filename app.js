@@ -479,6 +479,28 @@ window.addEventListener('pagehide', () => {
   } catch (e) {}
 });
 
+// Live-reported: mobile screen lock/backgrounding can bfcache-freeze this
+// page instead of destroying it -- pagehide above already ran (and sent a
+// 'bye', so the call is genuinely over from the peer's side), but nothing
+// resets THIS page's own UI: a bfcache restore resumes execution from
+// exactly the frozen DOM snapshot it suspended with, so if call-screen was
+// showing when suspended, it's still showing now, with a dead/frozen
+// underlying connection -- looks stuck on the call dialog (on mobile: a
+// frozen local-camera frame with no working remote video/overlay) instead
+// of back at the messenger shell, and nothing the user does short of a
+// manual reload gets them out of it. Scoped to persisted restores while
+// call-screen is actually visible: a fresh navigation (persisted=false)
+// already runs the normal startup path correctly, and a bfcache restore
+// back to the messenger shell (not in a call when suspended) has nothing
+// broken to recover from -- its pollers/sockets are already covered by the
+// visibilitychange handler elsewhere in this file. A full reload is the
+// same guaranteed-correct recovery already used for identity-mismatch/
+// presence-lost: there's no live call left to preserve, pagehide already
+// ended it.
+window.addEventListener('pageshow', (ev) => {
+  if (ev.persisted && !callScreen.hidden) location.reload();
+});
+
 // Live front/back swap. Always correct for the local preview (video elements
 // track live additions/removals on the SAME MediaStream object). For an
 // active WebRTC call, also pushes the new track to the peer via
