@@ -1338,7 +1338,15 @@ function noteApiResult(ok, body) {
     if (connBanner) connBanner.hidden = true;
     const presenceBanner = document.getElementById('presence-lost-banner');
     if (presenceBanner) presenceBanner.hidden = true;
-    log('identity mismatch detected (saved identity no longer matches the current gate session) -- reload required, will not self-resolve by retrying');
+    log('identity mismatch detected (saved identity no longer matches the current gate session) -- reload required, will not self-resolve by retrying; auto-reloading shortly');
+    // CADS-webconference-demo (live-reported): unlike the transient-network
+    // banners, a mismatch has exactly one fix (reload) with no ambiguity --
+    // there's no "maybe it recovers on its own" case to wait out, so making
+    // the user find and click the button themselves is a pointless extra
+    // step, not a safety margin. Auto-reloads after a few seconds (enough
+    // to actually read the message first); the button stays for an
+    // immediate manual reload too.
+    setTimeout(() => location.reload(), 4000);
     return;
   }
   if (identityMismatchDetected) return; // sticky -- see comment above, don't let a later generic failure/success touch the other banners
