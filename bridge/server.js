@@ -666,6 +666,12 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/api/heartbeat') {
       const { email } = await readBody(req);
+      // CADS-webconference-demo#73: no check here let a gate-verified
+      // caller keep ANY registered user's presence artificially fresh
+      // forever (POST {email:"victim@..."} every 15s), same class of gap
+      // #9/f2d199f fixed for register/call/incoming -- this predates that
+      // fix, which didn't touch this endpoint.
+      if (!identityAllowed(req, email)) return json(res, 403, { error: 'email does not match your verified identity', code: 'identity_mismatch' });
       const entry = directory.get((email || '').toLowerCase());
       if (!entry) return json(res, 404, { error: 'not registered' });
       entry.lastSeen = Date.now();
@@ -753,6 +759,13 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/contact-requests') {
       const { fromEmail, toEmail } = await readBody(req);
       if (!fromEmail || !toEmail) return json(res, 400, { error: 'fromEmail and toEmail required' });
+      // CADS-webconference-demo#73: fromEmail was trusted outright -- a
+      // gate-verified caller could POST {fromEmail:"victim@...", toEmail:
+      // "anyone@..."} and the recipient would see a request that appears
+      // to come FROM the victim (toEmail deliberately stays unchecked --
+      // sending someone a request is the whole point). Same impersonation
+      // class #9/f2d199f fixed for /api/call and /api/register.
+      if (!identityAllowed(req, fromEmail)) return json(res, 403, { error: 'fromEmail does not match your verified identity', code: 'identity_mismatch' });
       const to = toEmail.trim().toLowerCase();
       const list = contactRequests.get(to) || [];
       if (!list.some((r) => r.fromEmail.toLowerCase() === fromEmail.trim().toLowerCase())) {
@@ -762,11 +775,24 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
     if (req.method === 'GET' && url.pathname === '/api/contact-requests') {
-      const email = (url.searchParams.get('email') || '').trim().toLowerCase();
+      const rawEmail = url.searchParams.get('email') || '';
+      // CADS-webconference-demo#73: no check here made this an enumeration
+      // oracle -- any gate-verified caller could read who's been sending a
+      // victim contact requests (fromEmail + createdAt per entry) via
+      // ?email=victim@..., the same PII-leak class as #11/#61.
+      if (!identityAllowed(req, rawEmail)) return json(res, 403, { error: 'email does not match your verified identity', code: 'identity_mismatch' });
+      const email = rawEmail.trim().toLowerCase();
       return json(res, 200, { requests: contactRequests.get(email) || [] });
     }
     if (req.method === 'POST' && url.pathname === '/api/contact-requests/clear') {
       const { email, fromEmail } = await readBody(req);
+      // CADS-webconference-demo#73: checked against `email` (whose inbox
+      // this clears), not `fromEmail` (which entry to remove from it) --
+      // without this a gate-verified caller could wipe a victim's pending
+      // inbound contact requests before they're ever seen (delivery DoS).
+      // fromEmail deliberately stays unchecked, same reasoning as toEmail
+      // above: it names which existing entry to drop, not who's acting.
+      if (!identityAllowed(req, email)) return json(res, 403, { error: 'email does not match your verified identity', code: 'identity_mismatch' });
       const to = (email || '').trim().toLowerCase();
       const list = contactRequests.get(to);
       if (list) {
