@@ -2721,6 +2721,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
 
   const media = await getLocalMedia();
   let recorder = null;
+  let activeMediaBackpressureInterval = null; // CADS-webconference-demo#70 -- cleared in onHangup below
   if (media.kind === 'media') {
     localVideo.srcObject = media.stream;
     localEmpty.style.display = 'none';
@@ -2729,6 +2730,32 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
     if (mimeType) {
       sendText(TAG_MEDIA_INIT, mimeType);
       recorder = new MediaRecorder(media.stream, { mimeType });
+      // CADS-webconference-demo#70: this transport is a raw byte pipe over
+      // one WebSocket -- unlike the webrtc path (RTP congestion control /
+      // bitrate adaptation built into RTCPeerConnection), nothing here
+      // adapted the send rate to what the relayed channel could actually
+      // carry. On a slow uplink, ws.send() kept accepting ~245KB/s of
+      // offered load (49KB chunks every 200ms) regardless of drain rate,
+      // so ws.bufferedAmount grew unbounded instead of the video degrading
+      // -- exactly the kind of slow/lossy mobile link #65's live debugging
+      // just confirmed is real on this deployment, not a hypothetical.
+      // recorder.pause()/resume() is the only lever MediaRecorder exposes
+      // to reduce offered load at the source (there's no bitrate knob
+      // reliable enough across browsers to reach for instead) -- pausing
+      // stops ondataavailable from firing at all, so nothing here can
+      // re-check bufferedAmount to un-pause itself; a separate interval
+      // below does that polling while paused.
+      const MEDIA_BACKPRESSURE_HIGH_WATER = 262144; // pause once buffered exceeds this
+      const MEDIA_BACKPRESSURE_LOW_WATER = 65536; // resume once drained below this
+      let backpressurePaused = false;
+      const backpressureCheck = setInterval(() => {
+        if (recorder.state === 'inactive') return;
+        if (backpressurePaused && byteStream.ws.bufferedAmount < MEDIA_BACKPRESSURE_LOW_WATER) {
+          backpressurePaused = false;
+          recorder.resume();
+          log('media send resumed (channel drained)');
+        }
+      }, 250);
       recorder.ondataavailable = async (ev) => {
         if (!ev.data || ev.data.size === 0) return;
         try {
@@ -2747,6 +2774,11 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           for (let off = 0; off < bytes.length; off += MAX_CHUNK_BYTES) {
             sendTagged(TAG_MEDIA_CHUNK, bytes.subarray(off, off + MAX_CHUNK_BYTES));
           }
+          if (!backpressurePaused && byteStream.ws.bufferedAmount > MEDIA_BACKPRESSURE_HIGH_WATER) {
+            backpressurePaused = true;
+            recorder.pause();
+            log(`media send paused (channel congested, ${byteStream.ws.bufferedAmount} bytes buffered) -- video will freeze briefly rather than the tab's memory growing unbounded`);
+          }
         } catch (e) {
           // Was previously an uncaught promise rejection spamming the
           // console on every ~200ms timeslice with no visible diagnosis --
@@ -2756,6 +2788,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
         }
       };
       recorder.start(200); // 200ms timeslices -- a reasonable latency/overhead trade-off for a relayed path
+      activeMediaBackpressureInterval = backpressureCheck;
     } else {
       log('MediaRecorder cannot produce a supported mimeType here -- sending no media, audio/video will not appear');
       sendText(TAG_CHAT, NO_CODEC_SENTINEL);
@@ -2774,6 +2807,10 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
     activeCallBye = null; // #38 finding 6 -- see returnToDialerAfterHangup's matching clear
     sendTagged(TAG_BYE, new Uint8Array(0));
     if (recorder && recorder.state !== 'inactive') recorder.stop();
+    // CADS-webconference-demo#70: the backpressure poll interval outlives
+    // the recorder otherwise -- same leaked-timer shape #38 already fixed
+    // for the signaling WS below.
+    if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
     // CADS-webconference-demo#38 (finding 9): neither hangup path closed the
     // underlying signaling WS -- it lingered open until
     // returnToDialerAfterHangup's ~1200ms-delayed reload tore down the whole
