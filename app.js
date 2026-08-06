@@ -1352,6 +1352,22 @@ async function pollCallStatus(channel, { onDone, timeoutMs = 15000, intervalMs =
 }
 
 function startCallFromIdentity(identity, { role, channel, grant, ws, transport, peerEmail }) {
+  // CADS-webconference-demo#63: the ONLY places that persist a contact were
+  // the Requests-tab "Add" button, the block-list "Unblock" button, and the
+  // "add a contact by email" search form -- placing or accepting a CALL
+  // (this function, the single choke point for both the caller's dialForm
+  // submit and the callee's #btn-accept) never touched myContacts at all.
+  // A user who invites someone by calling them, or accepts an incoming
+  // call, ended up with no durable contact record on either side -- lost on
+  // the next reload/session, and the relationship had to be re-established
+  // from scratch every time. On-attempt (here, before the reload) rather
+  // than gated on the call actually connecting: simpler and more
+  // messenger-like ("I called/answered this person" is itself the
+  // relationship-forming act), matching how the search-form's own add
+  // already works (adds immediately, not contingent on them ever replying).
+  // myContacts.add is idempotent (Set-based dedup in localSetFor), so this
+  // is safe to call on every call attempt without growing unbounded.
+  if (peerEmail && myContacts) myContacts.add(peerEmail);
   // CADS-webconference-demo#13: holderPriv/noisePriv deliberately left out
   // of this URL -- see run()'s matching comment for why (localStorage
   // recovery via myEmail instead). myEmail is now unconditional rather than
