@@ -2690,6 +2690,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   const mediaSource = new MediaSource();
   remoteVideo.src = URL.createObjectURL(mediaSource);
   let sourceBuffer = null;
+  let sourceBufferMimeType = null; // CADS-webconference-demo#78 -- needed to recreate the sourceBuffer below
   const pendingChunks = [];
   // Set once we know the peer's codec can never be played here (e.g. Safari
   // receiving the WebM/VP8/Opus this transport hardcodes -- see
@@ -2700,16 +2701,63 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   // eventually exhausts that tab's heap (observed: Safari tab hangs solid,
   // force-quit required, while the rest of the browser stayed fine).
   let mediaUnsupported = false;
-  // Set the moment an appendBuffer call fails -- once the <video> element's
-  // own .error is non-null (a fatal MSE decode error), Chrome rejects EVERY
-  // subsequent appendBuffer with the exact same "HTMLMediaElement.error
-  // attribute is not null" message forever. Observed live: 100+ identical
-  // log lines flooding the Technical readout for the rest of the call, with
-  // zero new diagnostic value past the first one. Root cause of the
-  // original decode error is still unconfirmed (needs a real camera to
-  // reproduce against) -- this just stops the pipeline from spinning on an
-  // already-fatal stream instead of fixing the fatal error itself.
+  // CADS-webconference-demo#78: previously set permanently on ANY appendBuffer
+  // throw and never reset -- turned a QuotaExceededError (a normal, RECOVERABLE
+  // resource condition on a long call or a backgrounded/paused receiver, where
+  // MSE's own auto-eviction doesn't run) into a permanent "call connected but
+  // remote media dead forever" state, and meant a #69 reconnect restored the
+  // byte stream but never the render. Now only the true last-resort: quota
+  // errors are handled by evicting old buffered data and retrying (below);
+  // other append errors get a bounded number of sourceBuffer
+  // recreate-and-continue attempts (dropping just the one bad chunk) before
+  // this latches. Reset on a successful #69 reconnect (that code's own
+  // comment) so recovering the connection also gives the render a fresh
+  // chance, not just the byte stream.
   let remoteMediaFatal = false;
+  let mediaRecreateAttempts = 0;
+  const MAX_MEDIA_RECREATE_ATTEMPTS = 3;
+  function handleAppendError(e, failedChunk) {
+    if (e.name === 'QuotaExceededError') {
+      // Standard MSE pattern for long-lived streams: evict buffered data
+      // behind current playback, then retry the same chunk once the evict
+      // completes (sourceBuffer.remove() fires the SAME 'updateend' event
+      // flushPending already listens on, so no separate wiring needed).
+      const canEvict = sourceBuffer.buffered.length > 0 && Math.max(0, remoteVideo.currentTime - 5) > sourceBuffer.buffered.start(0);
+      if (canEvict) {
+        pendingChunks.unshift(failedChunk);
+        try {
+          sourceBuffer.remove(sourceBuffer.buffered.start(0), Math.max(0, remoteVideo.currentTime - 5));
+          log('remote video buffer quota hit -- evicting old data and retrying (not fatal)');
+        } catch (removeErr) {
+          pendingChunks.shift(); // eviction itself failed -- undo the unshift rather than leave a duplicate queued forever
+          log(`remote video buffer eviction failed: ${removeErr.message}`);
+        }
+        return;
+      }
+      // Nothing safe to evict yet (buffer still short) -- fall through to
+      // the bounded recreate-retry below rather than spin retrying the same
+      // append against a buffer that has nowhere to shrink.
+    }
+    if (mediaRecreateAttempts < MAX_MEDIA_RECREATE_ATTEMPTS && sourceBufferMimeType) {
+      mediaRecreateAttempts++;
+      log(`remote video append failed (${e.message}) -- recreating the source buffer and continuing (recovery attempt ${mediaRecreateAttempts}/${MAX_MEDIA_RECREATE_ATTEMPTS}), dropping this one chunk`);
+      try {
+        mediaSource.removeSourceBuffer(sourceBuffer);
+        sourceBuffer = mediaSource.addSourceBuffer(sourceBufferMimeType);
+        sourceBuffer.mode = 'sequence';
+        sourceBuffer.addEventListener('updateend', flushPending);
+        pendingChunks.length = 0; // can't safely replay chunks queued for the OLD sourceBuffer into a fresh one mid-stream
+      } catch (recreateErr) {
+        remoteMediaFatal = true;
+        pendingChunks.length = 0;
+        log(`remote video stream failed permanently, recreating the source buffer also failed: ${recreateErr.message}`);
+      }
+      return;
+    }
+    remoteMediaFatal = true;
+    pendingChunks.length = 0;
+    log(`remote video stream failed permanently after ${mediaRecreateAttempts} recovery attempt(s): ${e.message}`);
+  }
   function flushPending() {
     if (remoteMediaFatal) { pendingChunks.length = 0; return; }
     if (sourceBuffer && !sourceBuffer.updating && pendingChunks.length) {
@@ -2717,9 +2765,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
       try {
         sourceBuffer.appendBuffer(next);
       } catch (e) {
-        remoteMediaFatal = true;
-        pendingChunks.length = 0;
-        log(`remote video stream failed permanently, giving up on it (further chunks dropped): ${e.message}`);
+        handleAppendError(e, next);
       }
     }
   }
@@ -2729,9 +2775,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
     try {
       sourceBuffer.appendBuffer(bytes);
     } catch (e) {
-      remoteMediaFatal = true;
-      pendingChunks.length = 0;
-      log(`remote video stream failed permanently, giving up on it (further chunks dropped): ${e.message}`);
+      handleAppendError(e, bytes);
     }
   }
 
@@ -2815,6 +2859,15 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           byteStream = fresh.stream;
           noiseTransport = fresh.noiseTransport;
           channelReconnectAttempted = false; // a fresh recovery -- a LATER drop gets its own attempt, same as attemptIceRestart's own reset
+          // CADS-webconference-demo#78: recovering the byte stream previously
+          // did NOT recover the render if remoteMediaFatal had already
+          // latched before the drop -- the connection came back, remote
+          // media stayed permanently dead. Reset both here too, giving the
+          // (unchanged, still-alive) sourceBuffer a fresh chance on the next
+          // chunk, same "a later problem gets its own attempt" reasoning as
+          // channelReconnectAttempted just above.
+          remoteMediaFatal = false;
+          mediaRecreateAttempts = 0;
           log('channel reconnected -- resuming call');
           addChatMessage('reconnected', 'system');
           setStatus('in-call');
@@ -2845,6 +2898,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
         if (tag === TAG_MEDIA_INIT) {
           const mimeType = new TextDecoder().decode(payload);
           if (mediaSource.readyState === 'open' && MediaSource.isTypeSupported(mimeType)) {
+            sourceBufferMimeType = mimeType; // CADS-webconference-demo#78 -- needed if handleAppendError has to recreate this
             sourceBuffer = mediaSource.addSourceBuffer(mimeType);
             sourceBuffer.mode = 'sequence';
             sourceBuffer.addEventListener('updateend', flushPending);
