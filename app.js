@@ -335,6 +335,14 @@ async function writeFramed(stream, bytes) {
   stream.send(wasm.frame_message(bytes));
 }
 
+// CADS-webconference-demo#69: bounds an arbitrary promise to a deadline
+// without cancelling the underlying work (join/handshake in-flight network
+// calls have no cancellation hook here) -- just stops waiting on it and lets
+// the caller treat a too-slow attempt the same as a failed one.
+function withTimeout(promise, ms, message) {
+  return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))]);
+}
+
 async function readFramed(stream, timeoutMs) {
   const lenBytes = await stream.readExact(2, timeoutMs);
   const len = (lenBytes[0] << 8) | lenBytes[1];
@@ -2564,7 +2572,38 @@ const TAG_FILE_CHUNK = 6;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const FILE_CHUNK_BYTES = 49152; // matches TAG_MEDIA_CHUNK's own chunk size below
 
-async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatStore, peerEmail) {
+// CADS-webconference-demo#69: same joinChannel + Noise_IK handshake dance
+// run()'s own initial-join sequence does inline (deliberately NOT refactored
+// to share this helper -- run()'s version interleaves UI status updates
+// (setStatus('noise-handshake') etc.) between the join and handshake steps
+// that this helper can't reproduce without changing that already-working
+// path's UI timing; a small, safe duplication here beats touching it).
+// Used by runChannelMediaCall's reconnect path below to redo the same
+// sequence after a transient ws_channel drop. Grants are NOT single-use
+// (checked video-call-grant/src/main.rs -- time-bound expires_at, no
+// consumed/claimed tracking), and the edge's channel pairer removes a
+// channel from its `waiting` map only on
+// a successful match, not permanently (crates/edge/src/channel_broker.rs)
+// -- a lone member re-joining an already-relayed channel id parks and waits
+// for its partner exactly like a first-time join (see that file's own "a
+// lone member with no partner parks instead of failing" test), so this is
+// architecturally safe to call again mid-call, not just at call setup.
+async function establishChannelSession(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller) {
+  const { stream, peerNoiseHex } = await joinChannel(wsUrl, grantHex, holderPrivHex);
+  if (!peerNoiseHex) throw new Error('no peer Noise key in ack -- peer not registered with a Noise key');
+  const hs = isCaller ? wasm.NoiseHandshake.newInitiator(noisePrivHex, peerNoiseHex) : wasm.NoiseHandshake.newResponder(noisePrivHex);
+  if (isCaller) {
+    await writeFramed(stream, hs.writeMessage(new Uint8Array(0)));
+    hs.readMessage(await readFramed(stream));
+  } else {
+    hs.readMessage(await readFramed(stream));
+    await writeFramed(stream, hs.writeMessage(new Uint8Array(0)));
+  }
+  if (!hs.isFinished()) throw new Error('Noise handshake did not finish after 2 messages');
+  return { stream, noiseTransport: hs.intoTransport() };
+}
+
+async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex) {
   setStatus('connecting-media');
   routeWebrtc.classList.add('live');
   // Real peer-to-peer connectivity for this transport is already up by the
@@ -2666,25 +2705,71 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   // Background receive loop -- same framing/decrypt pattern as the WebRTC
   // path's signaling loop, just dispatching on our own 1-byte tag instead of
   // wasm.decodeSignalMessage's SDP/ICE-shaped SignalMessage.
+  // CADS-webconference-demo#69: this transport had no transient-drop
+  // recovery at all -- any readFramed failure (a dropped network, a
+  // ws_channel blip on the edge, the STALL_TIMEOUT_MS backstop) went
+  // straight to terminal teardown, asymmetric with the webrtc path's
+  // active attemptIceRestart + grace window. One reconnect attempt per
+  // failure episode (channelReconnectAttempted, same one-shot-then-reset
+  // shape as attemptIceRestart's own iceRestartAttempted): re-run
+  // establishChannelSession (reusing the same grant -- confirmed reusable)
+  // and, on success, swap byteStream/noiseTransport in place and resume
+  // this SAME loop -- deliberately NOT re-sending TAG_MEDIA_INIT or
+  // touching mediaSource/sourceBuffer/recorder, all of which stay exactly
+  // as they were. sourceBuffer's 'sequence' mode has no wall-clock
+  // dependency, so a gap where no TAG_MEDIA_CHUNK arrived just reads as a
+  // brief freeze on resume, not a fatal error -- and the sender's
+  // MediaRecorder keeps running the whole time regardless (it's on the
+  // local stream, independent of this channel), so nothing needs
+  // restarting there either. Both sides run this same code and both
+  // independently notice their own read failure, so both re-join the
+  // channel -- physically symmetric, with the Noise handshake's own
+  // initiator/responder roles (inside establishChannelSession) staying
+  // asymmetric via isCaller exactly like the original call setup. The
+  // edge's "lone member parks waiting for its partner" behavior (see
+  // establishChannelSession's own comment) is what makes the timing of
+  // which side reconnects first not matter.
+  const CHANNEL_RECONNECT_GRACE_MS = 20000; // matches ICE_RESTART_GRACE_MS
+  let channelReconnectAttempted = false;
   (async () => {
     while (true) {
       let cipher;
       try {
         cipher = await readFramed(byteStream);
       } catch (e) {
-        // The channel itself is this transport's only connection to the peer
-        // -- unlike WebRTC mode there's no separate end-to-end link to
-        // heartbeat over, so a read failure here (crashed tab, dropped
-        // network, killed process, or the STALL_TIMEOUT_MS backstop firing)
-        // IS the direct, real signal the peer is gone, exactly like a
-        // received TAG_BYE just without one ever arriving. Previously this
-        // silently returned with no UI feedback or navigation at all,
-        // leaving the call screen stuck, and didn't say why.
-        log(`channel receive loop ended: ${e.message}`);
-        setStatus('peer-hung-up');
-        addChatMessage('peer connection lost', 'system');
-        returnToDialerAfterHangup();
-        return;
+        if (channelReconnectAttempted) {
+          log(`channel receive loop ended: ${e.message} (reconnect already attempted this episode)`);
+          setStatus('peer-hung-up');
+          addChatMessage('peer connection lost', 'system');
+          if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
+          returnToDialerAfterHangup();
+          return;
+        }
+        channelReconnectAttempted = true;
+        log(`channel receive loop ended: ${e.message} -- attempting to reconnect`);
+        addChatMessage('connection lost -- attempting to reconnect…', 'system');
+        setStatus('connecting-media');
+        try {
+          const fresh = await withTimeout(
+            establishChannelSession(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller),
+            CHANNEL_RECONNECT_GRACE_MS,
+            `reconnect timed out after ${CHANNEL_RECONNECT_GRACE_MS / 1000}s`
+          );
+          byteStream = fresh.stream;
+          noiseTransport = fresh.noiseTransport;
+          channelReconnectAttempted = false; // a fresh recovery -- a LATER drop gets its own attempt, same as attemptIceRestart's own reset
+          log('channel reconnected -- resuming call');
+          addChatMessage('reconnected', 'system');
+          setStatus('in-call');
+          continue;
+        } catch (e2) {
+          log(`channel reconnect failed: ${e2.message}`);
+          setStatus('peer-hung-up');
+          addChatMessage('peer connection lost', 'system');
+          if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
+          returnToDialerAfterHangup();
+          return;
+        }
       }
       // CADS-webconference-demo#20: readFramed() above is guarded, but
       // decrypt()/dispatch was not -- one malformed or undecryptable frame
@@ -2996,7 +3081,7 @@ async function run() {
   const chatStore = myEmail && peerEmail ? new ChatStore({ email: myEmail, holderPriv: holderPrivHex }) : null;
 
   if (transportMode === 'channel') {
-    await runChannelMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail);
+    await runChannelMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex);
     return;
   }
 
