@@ -115,8 +115,27 @@ const ADMIN_EMAILS = new Set(
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean)
 );
+// CADS-webconference-demo#76: this warning previously named only
+// /api/allowlist/remove -- but the SAME empty-ADMIN_EMAILS short-circuit
+// (`ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has(caller)` evaluating to
+// false) also opens /api/allowlist/add, GET /api/access-requests, and
+// /api/access-requests/approve|decline to any gate-admitted caller, not
+// just the one revoke-capability endpoint the old message called out.
+// approve and allowlist/add are GRANT-capability endpoints (they add an
+// arbitrary account to the tunnel's login allow-list -- the exact #10
+// escalation) -- materially worse than the revoke/read endpoints the old
+// warning implied was the whole exposure. Those two now fail closed
+// below regardless of this warning; this expanded message covers what's
+// still open (GET/decline/remove) plus documents the change.
 if (ADMIN_EMAILS.size === 0) {
-  console.warn('bridge: WEBCONFERENCE_ADMIN_EMAILS not set -- /api/allowlist/remove is open to any caller');
+  console.warn(
+    'bridge: WEBCONFERENCE_ADMIN_EMAILS not set -- GET /api/access-requests, ' +
+      '/api/access-requests/decline, and /api/allowlist/remove are open to any ' +
+      'gate-admitted caller (read pending requesters\' emails / revoke anyone\'s ' +
+      'access). /api/access-requests/approve and /api/allowlist/add -- which GRANT ' +
+      'tunnel access to an arbitrary account -- now fail closed (503) instead of ' +
+      'also being open; set WEBCONFERENCE_ADMIN_EMAILS to restore them.'
+  );
 }
 
 if (!OPERATOR_KEY || !/^[0-9a-f]{64}$/i.test(OPERATOR_KEY)) {
@@ -742,7 +761,20 @@ const server = http.createServer(async (req, res) => {
       const { email } = await readBody(req);
       if (!email) return json(res, 400, { error: 'email required' });
       const caller = gateVerifiedEmail(req) || '';
-      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has(caller)) {
+      // CADS-webconference-demo#76: this GRANTS tunnel access to an
+      // arbitrary account -- the ADMIN_EMAILS.size>0 short-circuit that
+      // every admin guard here uses meant an unconfigured admin list made
+      // this a no-op check, open to any gate-admitted caller, reopening
+      // exactly the #10 escalation this comment block already describes.
+      // Fails closed instead when unconfigured, unlike the read/revoke
+      // endpoints below (GET access-requests, decline, allowlist/remove),
+      // which stay permissive on an empty ADMIN_EMAILS for the same demo-
+      // ergonomics reason #10's own fix originally allowed -- granting
+      // access is the one action worth requiring real admin config for.
+      if (ADMIN_EMAILS.size === 0) {
+        return json(res, 503, { error: 'admin not configured (WEBCONFERENCE_ADMIN_EMAILS unset) -- cannot grant tunnel access without a configured admin' });
+      }
+      if (!ADMIN_EMAILS.has(caller)) {
         return json(res, 403, { error: 'admin only' });
       }
       const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email });
@@ -875,7 +907,15 @@ const server = http.createServer(async (req, res) => {
       // trust -- never client-supplied, set by Caddy's forward_auth only
       // after a real verified session.
       const caller = (req.headers['x-gate-email'] || '').trim().toLowerCase();
-      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has(caller)) {
+      // CADS-webconference-demo#76: same GRANT-capability reasoning as
+      // allowlist/add's matching comment -- this also adds an arbitrary
+      // account to the tunnel's login allow-list, so it fails closed on an
+      // unconfigured admin list instead of the size>0 short-circuit making
+      // the check a no-op.
+      if (ADMIN_EMAILS.size === 0) {
+        return json(res, 503, { error: 'admin not configured (WEBCONFERENCE_ADMIN_EMAILS unset) -- cannot grant tunnel access without a configured admin' });
+      }
+      if (!ADMIN_EMAILS.has(caller)) {
         return json(res, 403, { error: 'admin only' });
       }
       const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email });

@@ -170,6 +170,17 @@ one, that's the actual first step, not something specific to this repo:
    (see the script's own header comment for the full var list — every one is
    documented there, not just the ones above).
 
+   **Set `WEBCONFERENCE_ADMIN_EMAILS`** (comma-separated, on the bridge
+   service in whichever compose file you're using) **to your own email** once
+   your instance is gated (`CT_GATE_UPSTREAM_HOST`/the tunnel's "Require
+   login" setting). Left unset, the admin-only endpoints that *grant* tunnel
+   access (`/api/access-requests/approve`, `/api/allowlist/add`) refuse to
+   run at all (`503`) rather than silently trusting every gate-admitted
+   caller — set this before you expect either of those to work, not after
+   hitting the `503`.
+
+
+
 4. **Verify it's real**, the same way the operator's instance was verified: mint
    two grants (`video-call-grant/`), open the page as two browser tabs, and
    confirm both reach `RTCPeerConnection` state `connected` — not just that the
