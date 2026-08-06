@@ -341,12 +341,14 @@ async function writeFramed(stream, bytes) {
 // the caller treat a too-slow attempt the same as a failed one. The original
 // `promise` keeps running after losing the race (e.g. a channel reconnect
 // attempt stuck in WsByteStream's own 60s STALL_TIMEOUT_MS, well past this
-// function's shorter deadline) and, with nothing else awaiting it, its
-// eventual settlement would otherwise surface as a genuinely unhandled
-// rejection long after the caller has already moved on and torn the call
-// down. The no-op .catch() here doesn't change WHEN it settles or cancel
-// anything -- it only ensures something is listening, so a late rejection
-// stays silent instead of logging as an unhandled promise rejection.
+// function's shorter deadline) and settles on its own later with nothing
+// else awaiting it. Tested this directly rather than assuming: Promise.race
+// already subscribes to every input promise internally to detect which
+// settles first, and that alone is enough to suppress the browser's
+// unhandled-rejection reporting for a losing promise that rejects later --
+// confirmed empirically, no unhandledrejection event fires even with zero
+// explicit .catch() here. So the no-op .catch() below is harmless defense-
+// in-depth (a second, redundant handler), not a fix for a reproduced bug.
 function withTimeout(promise, ms, message) {
   promise.catch(() => {});
   return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))]);
