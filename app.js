@@ -3562,6 +3562,26 @@ run().catch((e) => {
   console.error('run() failed:', safeMessage);
   setStatus('error: ' + safeMessage);
   log(`error: ${safeMessage}`);
+  // CADS-webconference-demo#83: setStatus/log above write into the call
+  // screen (#status/#status-text/#status-pill/#log), which stays hidden
+  // until a call actually starts -- fine for a failure mid-call (the
+  // "Connecting to X…" case the comment below already covers), but useless
+  // for a failure on a plain landing visit, where runIdentityScreen's very
+  // first line (await init(wasm)) can throw BEFORE showSetupScreen() ever
+  // runs. That left the page looking loaded-but-dead: no setup form, no
+  // error, nothing but a blank hero and a console line nobody but a
+  // developer would see. setupScreen.hidden here is exactly that
+  // signature -- reuse the existing #id-verify-error panel (already
+  // styled as an error with a working Retry-via-reload button) instead of
+  // adding a new element, same "reload to recover" framing #32 and the
+  // identity-mismatch banner already use elsewhere.
+  if (setupScreen.hidden) {
+    setupScreen.hidden = false;
+    idEntry.hidden = true;
+    idVerifyErrorDetail.textContent = `couldn't start: ${safeMessage}`;
+    idVerifyError.hidden = false;
+    idVerifyRetry.addEventListener('click', () => location.reload());
+  }
   // Otherwise a failure here (joinChannel/handshake throwing before real
   // peer connectivity was ever reached) leaves the "Connecting to X…"
   // spinner banner sitting on screen forever with nothing telling the user
