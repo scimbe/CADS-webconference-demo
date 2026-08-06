@@ -401,8 +401,26 @@ function wsHeartbeatSweep() {
 }
 setInterval(wsHeartbeatSweep, WS_PING_INTERVAL_MS).unref();
 
-function isOnline(entry) {
-  return !!entry && Date.now() - entry.lastSeen < PRESENCE_TTL_MS;
+// CADS-webconference-demo#81: this used to consult ONLY the directory
+// entry's lastSeen, which is refreshed exclusively by the client's HTTP
+// /api/heartbeat poll (app.js's pollEvery, 15s base cadence) -- a signal
+// that background-tab browser timer throttling degrades well past
+// PRESENCE_TTL_MS (desktop Chrome slows setTimeout recursion to ~1/min
+// after ~5min backgrounded; mobile browsers routinely freeze it outright).
+// A tab backgrounded for a couple minutes was marked offline and every
+// incoming call refused at the check below, even with its incoming-call
+// WebSocket still open and answering the server's own ping/pong watchdog
+// (wsHeartbeatSweep, WS_PING_INTERVAL_MS/WS_PONG_TIMEOUT_MS above) -- a
+// signal NOT subject to JS-timer throttling, since the ping/pong itself is
+// server-initiated and network-level, not a client setTimeout loop. Now
+// treats a socket that's still in wsClients (not yet swept for a stale
+// pong) as online too -- strictly additive: never makes an actually-dead
+// client look online (wsHeartbeatSweep already removes those), only
+// recognizes a genuinely-alive one the HTTP heartbeat alone was blind to.
+function isOnline(entry, email) {
+  if (entry && Date.now() - entry.lastSeen < PRESENCE_TTL_MS) return true;
+  const sock = email && wsClients.get(email);
+  return !!sock && !sock.destroyed && Date.now() - sock._wsLastPong < WS_PONG_TIMEOUT_MS;
 }
 
 function mintGrants(holderAPub, holderBPub) {
@@ -699,7 +717,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/api/presence') {
       const email = (url.searchParams.get('email') || '').toLowerCase();
-      return json(res, 200, { online: isOnline(directory.get(email)) });
+      return json(res, 200, { online: isOnline(directory.get(email), email) });
     }
 
     // Presence lookup for the caller's OWN contact list -- CADS-webconference-demo#11:
@@ -718,7 +736,7 @@ const server = http.createServer(async (req, res) => {
         .map((e) => e.trim().toLowerCase())
         .filter(Boolean);
       const contacts = requested
-        .map((email) => ({ email, online: isOnline(directory.get(email)) }))
+        .map((email) => ({ email, online: isOnline(directory.get(email), email) }))
         .sort((a, b) => a.email.localeCompare(b.email));
       return json(res, 200, { contacts });
     }
@@ -953,7 +971,7 @@ const server = http.createServer(async (req, res) => {
       const caller = directory.get(from);
       const callee = directory.get(to);
       if (!caller) return json(res, 400, { error: 'caller not registered' });
-      if (!isOnline(callee)) return json(res, 200, { status: 'offline' });
+      if (!isOnline(callee, to)) return json(res, 200, { status: 'offline' });
       let minted;
       try {
         minted = await mintGrants(caller.holderPub, callee.holderPub);
