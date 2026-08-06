@@ -2367,10 +2367,26 @@ async function runDialer(identity, { verified = false } = {}) {
   const MAX_INCOMING_SOCKET_ATTEMPTS = 20;
   let incomingSocketAttempt = 0;
   const presenceLostBanner = document.getElementById('presence-lost-banner');
+  // Live-reported: on mobile (screen lock in particular), the OS can kill the
+  // underlying connection without the WebSocket ever firing its own 'close'
+  // event -- a "zombie" socket that still reports readyState OPEN from JS's
+  // perspective. The reconnect chain below only ever runs off a real 'close',
+  // so a zombie socket never triggers it: nothing recovers until a manual
+  // reload. incomingSocket/incomingSocketGeneration let the visibilitychange
+  // handler below unconditionally supersede whatever socket currently exists
+  // the moment the tab is foregrounded again, without needing to trust
+  // readyState (unreliable for exactly this case) -- the generation counter
+  // makes the old (possibly zombie) socket's eventual close a no-op instead
+  // of double-triggering handleIncomingSocketClose for a socket that was
+  // deliberately replaced, not one that failed on its own.
+  let incomingSocket = null;
+  let incomingSocketGeneration = 0;
   function connectIncomingSocket() {
     if (presenceLostBanner) presenceLostBanner.hidden = true;
+    const myGeneration = ++incomingSocketGeneration;
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const sock = new WebSocket(`${wsProto}//${location.host}/api/ws?email=${encodeURIComponent(identity.email)}`);
+    incomingSocket = sock;
     sock.addEventListener('open', () => {
       if (incomingSocketAttempt > 0) log(`presence socket reconnected (after ${incomingSocketAttempt} attempt(s))`);
       incomingSocketAttempt = 0;
@@ -2386,7 +2402,10 @@ async function runDialer(identity, { verified = false } = {}) {
         }
       } catch (_) {}
     });
-    sock.addEventListener('close', (ev) => handleIncomingSocketClose(ev.code));
+    sock.addEventListener('close', (ev) => {
+      if (myGeneration !== incomingSocketGeneration) return; // superseded (e.g. by visibility-return) -- not a real failure
+      handleIncomingSocketClose(ev.code);
+    });
     sock.addEventListener('error', () => sock.close());
   }
   // Factored out of the 'close' listener above so the cap/banner decision
@@ -2418,6 +2437,22 @@ async function runDialer(identity, { verified = false } = {}) {
     setTimeout(connectIncomingSocket, delay);
   }
   connectIncomingSocket();
+  // Live-reported: mobile screen lock (or the tab simply being backgrounded
+  // long enough for the OS to freeze it) reliably kills connectIncomingSocket's
+  // WS in a way that never fires 'close' -- see the comment on
+  // incomingSocket/incomingSocketGeneration above. Unlike that dead socket,
+  // this listener itself keeps firing: 'visibilitychange' is delivered
+  // immediately on foreground even for a tab whose other timers were frozen
+  // the whole time it was hidden. identityMismatchDetected is checked first
+  // for the same reason handleIncomingSocketClose checks it -- a mismatch
+  // needs a real reload (a fresh /api/whoami), not another socket, and this
+  // must not fight that banner's own already-scheduled auto-reload.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || identityMismatchDetected) return;
+    incomingSocketAttempt = 0;
+    incomingSocket?.close();
+    connectIncomingSocket();
+  });
   // CADS-webconference-demo#65: an in-page retry (just calling
   // connectIncomingSocket() again) never re-runs the initial gate/session
   // handshake a fresh top-level navigation does, so it can't help if the
