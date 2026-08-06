@@ -1024,6 +1024,16 @@ server.on('upgrade', (req, socket, head) => {
   const email = rawEmail.toLowerCase();
   const key = req.headers['sec-websocket-key'];
   if (url.pathname !== '/api/ws' || !email || !key) {
+    // CADS-webconference-demo#65: this destroy (and the identityAllowed one
+    // below) used to be completely silent -- a rejected WS upgrade just
+    // vanished as a raw socket close, indistinguishable from a genuine
+    // network-level drop by anyone looking at server-side logs. Logging why
+    // turned out to matter live: it's what let a real live-reported
+    // "Connection trouble" recurrence be conclusively ruled OUT as an
+    // app-level rejection (zero log lines here across the reproduction
+    // window) rather than staying an open question about whether the fix
+    // in bf8f424 was actually complete.
+    console.warn(`bridge: WS upgrade rejected -- pathname=${url.pathname} email=${email || '(empty)'} hasKey=${!!key}`);
     socket.destroy();
     return;
   }
@@ -1036,6 +1046,7 @@ server.on('upgrade', (req, socket, head) => {
   // X-Gate-Email should be present under the same conditions it is
   // anywhere else.
   if (!identityAllowed(req, rawEmail)) {
+    console.warn(`bridge: WS upgrade rejected -- identityAllowed false for claimed=${rawEmail} verified=${gateVerifiedEmail(req)}`);
     socket.destroy();
     return;
   }
