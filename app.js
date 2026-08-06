@@ -1271,11 +1271,36 @@ function setCallNote(kind, text) {
 // This also feeds pollEvery below (#38 finding 3) -- the same counter
 // that surfaces the outage to the user is what backs the pollers off.
 let apiConsecutiveFailures = 0;
-function noteApiResult(ok) {
+// CADS-webconference-demo (live-reported): a 403 with code:'identity_mismatch'
+// means identity.email (fixed at page load from the gate's verified email at
+// that time) no longer matches the CURRENT gate session on this same open
+// tab -- every identity-scoped call will keep failing this way forever, no
+// amount of retrying fixes it, only a reload (which re-fetches /api/whoami
+// fresh) does. Distinct from a transient outage: shown instead of, not
+// alongside, #conn-trouble-banner/#presence-lost-banner, and skips their
+// "maybe it'll recover" framing for a direct, actionable one. Sticky once
+// set -- a stale identity doesn't un-become stale on its own, so there's no
+// case where clearing this back to false on some later unrelated success
+// would be correct.
+let identityMismatchDetected = false;
+function noteApiResult(ok, body) {
   apiConsecutiveFailures = ok ? 0 : apiConsecutiveFailures + 1;
+  if (!ok && body && body.code === 'identity_mismatch' && !identityMismatchDetected) {
+    identityMismatchDetected = true;
+    const mismatchBanner = document.getElementById('identity-mismatch-banner');
+    if (mismatchBanner) mismatchBanner.hidden = false;
+    const connBanner = document.getElementById('conn-trouble-banner');
+    if (connBanner) connBanner.hidden = true;
+    const presenceBanner = document.getElementById('presence-lost-banner');
+    if (presenceBanner) presenceBanner.hidden = true;
+    log('identity mismatch detected (saved identity no longer matches the current gate session) -- reload required, will not self-resolve by retrying');
+    return;
+  }
+  if (identityMismatchDetected) return; // sticky -- see comment above, don't let a later generic failure/success touch the other banners
   const banner = document.getElementById('conn-trouble-banner');
   if (banner) banner.hidden = apiConsecutiveFailures < 3;
 }
+document.getElementById('identity-mismatch-reload-btn')?.addEventListener('click', () => location.reload());
 
 // CADS-webconference-demo#38 (finding 3): the six independent background
 // polls (heartbeat/incoming/contacts/access-requests/contact-requests/
@@ -1325,7 +1350,7 @@ async function api(path, opts) {
       if (!body.error) body.error = `http ${resp.status}`;
       body._status = resp.status;
     }
-    noteApiResult(resp.ok);
+    noteApiResult(resp.ok, body);
     return body;
   } catch (e) {
     noteApiResult(false);

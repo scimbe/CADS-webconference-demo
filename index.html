@@ -452,6 +452,20 @@
     <button type="button" id="presence-reconnect-btn" class="reconnect-btn">Reconnect</button>
   </div>
 
+  <!-- CADS-webconference-demo (live-reported): a stale identity.email (set
+       once at page load from the gate's verified email at the time) can
+       stop matching a gate session that changed later on the SAME open tab
+       -- every identity-scoped call then 403s with code:'identity_mismatch'
+       forever, indistinguishable from a transient outage to
+       #conn-trouble-banner/#presence-lost-banner, so it kept "retrying"
+       pointlessly instead of explaining what actually needs fixing (a
+       reload to pick up the current login). This banner is shown instead
+       of (never alongside) those two once that specific cause is detected. -->
+  <div class="connecting-banner" id="identity-mismatch-banner" hidden>
+    <span>Your saved login doesn't match your current session. Reload to fix this.</span>
+    <button type="button" id="identity-mismatch-reload-btn" class="reconnect-btn">Reload</button>
+  </div>
+
   <div class="msg-menu" id="msg-menu" hidden>
     <div class="msg-menu-email">Online as <b id="my-email"></b></div>
     <label class="transport-toggle">

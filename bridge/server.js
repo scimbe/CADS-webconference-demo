@@ -659,7 +659,7 @@ const server = http.createServer(async (req, res) => {
       // with caller-supplied public keys, unconditionally -- a gate-verified
       // caller could register as anyone else, taking over future calls to
       // that victim (see identityAllowed's own comment for the trust model).
-      if (!identityAllowed(req, email)) return json(res, 403, { error: 'email does not match your verified identity' });
+      if (!identityAllowed(req, email)) return json(res, 403, { error: 'email does not match your verified identity', code: 'identity_mismatch' });
       directory.set(email.toLowerCase(), { holderPub, noisePub, lastSeen: Date.now() });
       return json(res, 200, { ok: true });
     }
@@ -881,7 +881,7 @@ const server = http.createServer(async (req, res) => {
       // victim and receive grantForCaller, joining as that victim. toEmail
       // deliberately ISN'T checked here -- calling someone else is the
       // whole point of this endpoint.
-      if (!identityAllowed(req, fromEmail)) return json(res, 403, { error: 'fromEmail does not match your verified identity' });
+      if (!identityAllowed(req, fromEmail)) return json(res, 403, { error: 'fromEmail does not match your verified identity', code: 'identity_mismatch' });
       const from = (fromEmail || '').toLowerCase();
       const to = (toEmail || '').toLowerCase();
       const caller = directory.get(from);
@@ -984,7 +984,7 @@ const server = http.createServer(async (req, res) => {
       // gate-verified caller could steal any other user's incoming call
       // grant with no check that they own that email at all.
       const rawEmail = url.searchParams.get('email') || '';
-      if (!identityAllowed(req, rawEmail)) return json(res, 403, { error: 'email does not match your verified identity' });
+      if (!identityAllowed(req, rawEmail)) return json(res, 403, { error: 'email does not match your verified identity', code: 'identity_mismatch' });
       const email = rawEmail.toLowerCase();
       const channel = incomingByEmail.get(email);
       if (!channel) return json(res, 200, { incoming: null });
