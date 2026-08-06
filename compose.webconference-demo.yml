@@ -36,12 +36,64 @@ services:
       # (unused) otherwise. Defaults to the operator's own zone so this repo's
       # default demo works with zero extra config.
       - CT_GATE_UPSTREAM_HOST=${CT_GATE_UPSTREAM_HOST:-bunsenbrenner.org}
+      # CADS-webconference-demo#68: the base Caddyfile's /api/* proxy target
+      # -- see webconference-demo-bridge below, added alongside this fix.
+      - WEBCONFERENCE_BRIDGE_ADDR=webconference-demo-bridge:8791
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ${WEBCONFERENCE_CERT_DIR:?set WEBCONFERENCE_CERT_DIR=<dir with fullchain.pem+privkey.pem from the operator>}:/certs:ro
       - webconference_demo_caddy_data:/data
     expose:
       - "443"   # reachable only via the tunnel/agent, not published to the host
+    depends_on:
+      - webconference-demo-bridge
+    networks:
+      - default
+      - plane
+    restart: unless-stopped
+
+  webconference-demo-bridge:
+    # CADS-webconference-demo#68: this service (and the origin's
+    # WEBCONFERENCE_BRIDGE_ADDR + Caddyfile's `/api/*` proxy above/below) was
+    # missing from this base compose entirely -- README's "Self-hosting" path
+    # ran this file and got a frontend where every /api/* 404s (identity
+    # renders client-side via WASM, so the page LOADS, but dialing/presence/
+    # contacts/messenger are all dead). The live site never hit this because
+    # it runs compose.webconference-demo.selfservice.yml, which already has
+    # this service -- mirrored from there verbatim (same env, same purpose:
+    # directory + presence + call-signaling, see bridge/server.js's own
+    # header comment), just sourced from this file's own
+    # WEBCONFERENCE_AGENT_CP_URL (already required below for the agent,
+    # rather than introducing a second control-plane-URL var for the same
+    # value) and CT_AGENT_HOSTNAME hardcoded to match the agent's own
+    # hardcoded value below, the same way this file already keeps them in
+    # sync (not sourced from one shared var, unlike the selfservice compose,
+    # since neither service here parameterizes the hostname at all).
+    build:
+      context: ./bridge
+      additional_contexts:
+        grant-bin: ./video-call-grant/target/release
+    environment:
+      - WEBCONFERENCE_BRIDGE_LISTEN=0.0.0.0:8791
+      - WEBCONFERENCE_ACCESS_REQUESTS_FILE=/srv/data/access-requests.json
+      - CT_AGENT_CP_URL=${WEBCONFERENCE_AGENT_CP_URL:?control-plane URL for onboarding}
+      - CT_AGENT_HOSTNAME=webconference.bunsenbrenner.org
+      - WEBCONFERENCE_TUNNEL_ID=${WEBCONFERENCE_TUNNEL_ID:-}
+      - WEBCONFERENCE_ADMIN_EMAILS=${WEBCONFERENCE_ADMIN_EMAILS:-}
+      # See compose.webconference-demo.selfservice.yml's matching block for
+      # the full CT_CHANNEL_OPERATOR_KEY/CT_OIDC_CLIENT_SECRET/
+      # CT_PORTAL_SESSION_COOKIE Docker-secrets migration path
+      # (CADS-webconference-demo#30) -- same tradeoff, not switched over here
+      # either.
+      - CT_CHANNEL_OPERATOR_KEY=${WEBCONFERENCE_OPERATOR_KEY:?this demo's channel operator private key, 64-hex, from ct-agent channel operator-init}
+      - CT_OIDC_CLIENT_ID=${WEBCONFERENCE_OIDC_CLIENT_ID:-}
+      - CT_OIDC_CLIENT_SECRET=${WEBCONFERENCE_OIDC_CLIENT_SECRET:-}
+      - CT_OIDC_TOKEN=${WEBCONFERENCE_OIDC_TOKEN:-}
+      - CT_PORTAL_SESSION_COOKIE=${WEBCONFERENCE_PORTAL_SESSION_COOKIE:-}
+    volumes:
+      - webconference_demo_access_requests:/srv/data
+    expose:
+      - "8791"
     networks:
       - default
       - plane
@@ -92,3 +144,4 @@ networks:
 volumes:
   webconference_demo_caddy_data:
   webconference_demo_agent_state:
+  webconference_demo_access_requests:

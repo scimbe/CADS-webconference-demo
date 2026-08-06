@@ -140,6 +140,15 @@
 		}
 		encode gzip
 		reverse_proxy /ws/channel {$WEBCONFERENCE_EDGE_WS}
+		# CADS-webconference-demo#68: this base Caddyfile had no /api/* proxy
+		# at all -- every dialing/presence/contacts/messenger call 404'd
+		# (file_server has no such files in /srv). Caddyfile.selfservice
+		# already has this same line (its own #62/#68-equivalent history);
+		# this base file was just missing it, alongside the bridge service
+		# itself (see compose.webconference-demo.yml's webconference-demo-
+		# bridge, added in the same fix). Must stay before root/file_server,
+		# same reasoning as /ws/channel above -- route{} runs written order.
+		reverse_proxy /api/* {$WEBCONFERENCE_BRIDGE_ADDR}
 		root * /srv
 		file_server
 	}
