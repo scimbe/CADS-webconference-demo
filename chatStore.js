@@ -232,6 +232,31 @@ export class ChatStore {
     for (const fn of this.listeners) fn(msg);
   }
 
+  // CADS-webconference-demo#74: each stored row's `conversation`/
+  // `peerEmail`/`from`/`seq`/`kind` (and the file fields) sit in plaintext
+  // NEXT TO the AES-GCM ciphertext, but weren't bound into its tag -- GCM
+  // authenticates only the bytes handed to it, not a record's other
+  // columns. An adversary with IndexedDB write access but NOT the AES key
+  // (a browser extension, forensic disk access -- exactly the adversary
+  // this file's own header already treats as in-scope for confidentiality,
+  // #22) could flip `from`/`seq`/`conversation` on an existing row with a
+  // STILL-VALID tag: silent sender-forgery or cross-conversation message
+  // planting, undetected by history()'s existing corrupted:true check
+  // (which only fires on a ciphertext/tag mismatch). Does NOT help against
+  // the same-origin adversary (they hold the key, so they can just
+  // re-encrypt with a valid tag over anything) -- same limit this file's
+  // #23 comment already states for the BroadcastChannel shape checks;
+  // this closes a DIFFERENT, narrower gap for a different adversary.
+  // NUL-separated (not JSON) so the AAD's shape can't be reinterpreted by
+  // a value containing the delimiter -- none of these fields should ever
+  // legitimately contain one, and if some pathological input did, the
+  // result is just a decrypt failure (fails closed), never a downgrade.
+  _buildAad({ conversation, peerEmail, from, seq, kind, fileName, fileMimeType, fileSize }) {
+    const parts = [conversation, peerEmail, from, String(seq), kind || 'text'];
+    if (kind === 'file') parts.push(fileName ?? '', fileMimeType ?? '', String(fileSize ?? ''));
+    return new TextEncoder().encode(parts.join(' '));
+  }
+
   // CADS-webconference-demo#50: generalized to raw bytes (text was always
   // just UTF-8-encoded bytes under the hood) so file attachments use the
   // exact same AES-GCM encrypt-at-rest path as chat text -- industry
@@ -241,25 +266,43 @@ export class ChatStore {
   // AES-GCM has no meaningful size ceiling for a single-shot browser
   // encrypt/decrypt at the sizes this app's own attachment cap allows
   // (tens of MB) -- no streaming/chunked-encryption scheme needed.
-  async _encryptBytes(bytes) {
+  async _encryptBytes(bytes, aad) {
     const key = await this.keyPromise;
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes);
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, ...(aad ? { additionalData: aad } : {}) }, key, bytes);
     return { iv: Array.from(iv), ciphertext: Array.from(new Uint8Array(ciphertext)) };
   }
 
-  async _decryptBytes(iv, ciphertext) {
+  async _decryptBytes(iv, ciphertext, aad) {
     const key = await this.keyPromise;
-    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(iv) }, key, new Uint8Array(ciphertext));
-    return new Uint8Array(plain);
+    const ivBytes = new Uint8Array(iv);
+    const ctBytes = new Uint8Array(ciphertext);
+    if (aad) {
+      try {
+        return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes, additionalData: aad }, key, ctBytes));
+      } catch (e) {
+        // CADS-webconference-demo#74: a record written before this AAD
+        // binding existed was encrypted with NO additionalData at all --
+        // decrypting it WITH one now always mismatches the tag, not
+        // because of tampering but because the binding didn't exist yet
+        // when it was written. This live deployment has real pre-existing
+        // chat history, so silently treating every one of those rows as
+        // corrupted would be a severe regression, not a security win.
+        // Retry without it as the legitimate old-record case -- a
+        // genuinely tampered record still fails this attempt too and
+        // propagates out to history()'s existing corrupted:true handling.
+        return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, key, ctBytes));
+      }
+    }
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, key, ctBytes));
   }
 
-  async _encrypt(text) {
-    return this._encryptBytes(new TextEncoder().encode(text));
+  async _encrypt(text, aad) {
+    return this._encryptBytes(new TextEncoder().encode(text), aad);
   }
 
-  async _decrypt(iv, ciphertext) {
-    return new TextDecoder().decode(await this._decryptBytes(iv, ciphertext));
+  async _decrypt(iv, ciphertext, aad) {
+    return new TextDecoder().decode(await this._decryptBytes(iv, ciphertext, aad));
   }
 
   // Ticks this identity's Lamport clock for a new outgoing message -- call
@@ -283,11 +326,18 @@ export class ChatStore {
   // three decode identically.
   async _decodeRecord(r) {
     const base = { peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: !!r.pending, kind: r.kind || 'text' };
+    // CADS-webconference-demo#74: rebuilt from the row's OWN plaintext
+    // fields, then handed to decrypt -- if any of them were tampered since
+    // encrypt time, this no longer matches what was bound into the tag and
+    // decrypt throws, which history()'s existing catch already turns into
+    // a corrupted:true placeholder instead of silently trusting the
+    // now-mismatched metadata.
+    const aad = this._buildAad(r);
     if (r.kind === 'file') {
-      const bytes = await this._decryptBytes(r.iv, r.ciphertext);
+      const bytes = await this._decryptBytes(r.iv, r.ciphertext, aad);
       return { ...base, fileName: r.fileName, fileMimeType: r.fileMimeType, fileSize: r.fileSize, blob: new Blob([bytes], { type: r.fileMimeType || 'application/octet-stream' }) };
     }
-    return { ...base, text: await this._decrypt(r.iv, r.ciphertext) };
+    return { ...base, text: await this._decrypt(r.iv, r.ciphertext, aad) };
   }
 
   // Records a message this device sent (seq from nextSeqForSend()) or
@@ -334,7 +384,13 @@ export class ChatStore {
       const duplicate = existing.find((r) => r.from === from);
       if (duplicate) return this._decodeRecord(duplicate);
     }
-    const { iv, ciphertext } = kind === 'file' ? await this._encryptBytes(fileBytes) : await this._encrypt(text);
+    // CADS-webconference-demo#74: built from the CANONICAL (already-
+    // lowercased) values that actually get stored, not the raw params --
+    // _decodeRecord rebuilds this same AAD from the stored row later, and
+    // it has to match byte-for-byte or every future legitimate read of
+    // this record would fail to decrypt too, not just a tampered one.
+    const aad = this._buildAad({ conversation, peerEmail: peerEmail.toLowerCase(), from, seq, kind, fileName, fileMimeType, fileSize });
+    const { iv, ciphertext } = kind === 'file' ? await this._encryptBytes(fileBytes, aad) : await this._encrypt(text, aad);
     const record = {
       conversation,
       peerEmail: peerEmail.toLowerCase(),
