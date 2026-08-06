@@ -74,27 +74,42 @@
 }
 
 :443 {
-	# CADS-webconference-demo#62 -- strip any client-asserted X-Gate-Email
-	# before forward_auth runs; see the comment above this block for why.
-	request_header -X-Gate-Email
-	forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
-		uri /gate/check
-		copy_headers X-Gate-Email
-	}
-	reverse_proxy /ws/channel {$WEBCONFERENCE_EDGE_WS}
-	root * /srv
-	file_server
-	encode gzip
-	header {
-		Strict-Transport-Security "max-age=31536000"
-		X-Content-Type-Options "nosniff"
-		# See Caddyfile.selfservice's matching block for the full rationale
-		# (CADS-webconference-demo#15/#16) -- kept identical here so both
-		# variants harden the same way regardless of which one a given
-		# tunnel's certificate status has it running.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' stun://stun.l.google.com:19302; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
-		X-Frame-Options "DENY"
-		Referrer-Policy "strict-origin-when-cross-origin"
-		Permissions-Policy "camera=(self), microphone=(self), geolocation=(), payment=()"
+	# CADS-webconference-demo#62 (fix regression, live-confirmed): Caddyfile
+	# directives execute in Caddy's own IMPLICIT priority order, NOT textual
+	# order -- forward_auth/reverse_proxy outranks request_header regardless
+	# of which is written first (confirmed against the compiled JSON config:
+	# without route{}, the header-delete handler for a bare request_header
+	# lands AFTER reverse_proxy's own handle_response in the "handle" array).
+	# So request_header -X-Gate-Email written before forward_auth here still
+	# ran AFTER copy_headers set the gate's real verified value, deleting
+	# it -- stripping legitimate identities, not just client-smuggled ones.
+	# Exactly the same class of ordering bug Caddyfile.selfservice's own
+	# route{} comment already documents for forward_auth vs. its own earlier
+	# reverse_proxy probe. route{} forces literal written-order execution,
+	# same fix applied there -- confirmed via the compiled JSON here too:
+	# wrapped in route{}, the header-delete handler now runs BEFORE
+	# reverse_proxy's handle_response.
+	route {
+		request_header -X-Gate-Email
+		forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
+			uri /gate/check
+			copy_headers X-Gate-Email
+		}
+		reverse_proxy /ws/channel {$WEBCONFERENCE_EDGE_WS}
+		root * /srv
+		file_server
+		encode gzip
+		header {
+			Strict-Transport-Security "max-age=31536000"
+			X-Content-Type-Options "nosniff"
+			# See Caddyfile.selfservice's matching block for the full rationale
+			# (CADS-webconference-demo#15/#16) -- kept identical here so both
+			# variants harden the same way regardless of which one a given
+			# tunnel's certificate status has it running.
+			Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' stun://stun.l.google.com:19302; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+			X-Frame-Options "DENY"
+			Referrer-Policy "strict-origin-when-cross-origin"
+			Permissions-Policy "camera=(self), microphone=(self), geolocation=(), payment=()"
+		}
 	}
 }
