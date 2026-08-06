@@ -2240,7 +2240,19 @@ async function runDialer(identity, { verified = false } = {}) {
   // -- the /api/incoming poll fallback (below) keeps covering incoming
   // calls regardless, so giving up here loses only the instant WS push,
   // never the calls themselves.
-  const MAX_INCOMING_SOCKET_ATTEMPTS = 10;
+  // CADS-webconference-demo#65: live-diagnosed (real account, real login,
+  // corroborated independently by an automated harness the same day) a
+  // /api/ws upgrade that gets redirected (302, not 101) specifically in the
+  // window right after a fresh gate login completes, even though regular
+  // /api/* calls succeed the whole time -- a session-propagation race in
+  // the gate's WS-upgrade auth check, confirmed (by reading bridge/server.js's
+  // upgrade handler) to originate before the request ever reaches this
+  // bridge. 10 attempts * up to 30s backoff (~a couple minutes total) wasn't
+  // always enough to outlast it on a slower link. Raised to 20/60s (same cap
+  // pollEvery already uses elsewhere) purely to give the race more time to
+  // resolve on its own -- doesn't change anything about the successful case,
+  // strictly a longer runway before giving up.
+  const MAX_INCOMING_SOCKET_ATTEMPTS = 20;
   let incomingSocketAttempt = 0;
   const presenceLostBanner = document.getElementById('presence-lost-banner');
   function connectIncomingSocket() {
@@ -2275,15 +2287,24 @@ async function runDialer(identity, { verified = false } = {}) {
       if (presenceLostBanner) presenceLostBanner.hidden = false;
       return;
     }
-    const base = Math.min(1000 * 2 ** incomingSocketAttempt, 30000);
+    const base = Math.min(1000 * 2 ** incomingSocketAttempt, 60000);
     const delay = Math.round(base / 2 + Math.random() * (base / 2));
     log(`presence socket closed (code ${code}); reconnecting in ~${Math.round(delay / 1000)}s (attempt ${incomingSocketAttempt})`);
     setTimeout(connectIncomingSocket, delay);
   }
   connectIncomingSocket();
+  // CADS-webconference-demo#65: an in-page retry (just calling
+  // connectIncomingSocket() again) never re-runs the initial gate/session
+  // handshake a fresh top-level navigation does, so it can't help if the
+  // race is specifically in that handshake's propagation -- a full reload
+  // at least gives it a fresh shot at the same window that (usually,
+  // not provably always -- one live report still saw the banner survive a
+  // reload) succeeds. The manual button only fires on an explicit click from
+  // someone already looking at "connection lost", who would reload manually
+  // next anyway -- doing it for them here can only help or be a no-op, never
+  // a surprise mid-task the way an automatic reload without a click would be.
   document.getElementById('presence-reconnect-btn')?.addEventListener('click', () => {
-    incomingSocketAttempt = 0;
-    connectIncomingSocket();
+    location.reload();
   });
 
   // Fallback poll -- unchanged base cadence, stays as the safety net described above.
