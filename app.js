@@ -2729,6 +2729,16 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
         } else if (tag === TAG_BYE) {
           setStatus('peer-hung-up');
           addChatMessage('peer hung up', 'system');
+          // CADS-webconference-demo#70 (review follow-up): clearInterval
+          // alongside ws.close() here, same reasoning as #38 finding 9's
+          // own comment on that close -- without it the backpressure poll
+          // keeps firing every 250ms against a closing socket for the
+          // ~1200ms until returnToDialerAfterHangup's reload tears down the
+          // page. Harmless (caught by the interval's own recorder.state
+          // check once recorder.stop() below eventually runs, and the ws
+          // is already closing regardless), but not the clean immediate
+          // teardown onHangup gets -- matching that shape here too.
+          if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
           byteStream.ws.close(); // CADS-webconference-demo#38 (finding 9) -- see setupControls' onHangup callback's matching comment
           returnToDialerAfterHangup();
           return;
@@ -2737,6 +2747,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
         log(`channel receive loop: bad frame, ending call: ${e.message}`);
         setStatus('peer-hung-up');
         addChatMessage('connection lost (a corrupted or unexpected frame arrived)', 'system');
+        if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval); // CADS-webconference-demo#70 (review follow-up) -- see the TAG_BYE branch's matching comment above
         byteStream.ws.close();
         returnToDialerAfterHangup();
         return;
