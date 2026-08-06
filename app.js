@@ -1333,11 +1333,37 @@ function noteApiResult(ok, body) {
   if (!ok && body && body.code === 'identity_mismatch' && !identityMismatchDetected) {
     identityMismatchDetected = true;
     const mismatchBanner = document.getElementById('identity-mismatch-banner');
-    if (mismatchBanner) mismatchBanner.hidden = false;
     const connBanner = document.getElementById('conn-trouble-banner');
-    if (connBanner) connBanner.hidden = true;
     const presenceBanner = document.getElementById('presence-lost-banner');
+    if (connBanner) connBanner.hidden = true;
     if (presenceBanner) presenceBanner.hidden = true;
+    // CADS-webconference-demo#80: identityMismatchDetected is a plain
+    // module-level `let` -- it resets to false on every page load, so it
+    // can only ever stop a SECOND timer within the SAME page lifetime, not
+    // across a reload. If the mismatch is persistent (the gate session
+    // stays genuinely unstable rather than a one-off drift -- live-reported:
+    // this recurred for the same user even across manual reloads before
+    // 05fe090 existed), the previous unconditional 4s auto-reload had
+    // nothing stopping it from reloading into the SAME mismatch, reloading
+    // again, forever -- turning the fix meant to remove one manual click
+    // into an involuntary reload hammer: unusable tab, real battery/CPU
+    // cost on a backgrounded-but-alive mobile tab. sessionStorage survives
+    // a reload (unlike this module-level flag), so it's the right place for
+    // a marker THAT auto-reload just happened -- checked before scheduling
+    // another one.
+    const RELOAD_LOOP_WINDOW_MS = 60000;
+    const lastReloadAt = Number(sessionStorage.getItem('ct-webconference-last-mismatch-reload') || 0);
+    const reloadedRecently = Date.now() - lastReloadAt < RELOAD_LOOP_WINDOW_MS;
+    if (reloadedRecently) {
+      log('identity mismatch detected again shortly after an auto-reload -- not reloading again automatically (would loop); sign out and back in if this persists');
+      if (mismatchBanner) {
+        const span = mismatchBanner.querySelector('span');
+        if (span) span.textContent = "Your saved login doesn't match your current session, even after reloading. Your login session may be unstable -- try signing out and back in.";
+        mismatchBanner.hidden = false;
+      }
+      return;
+    }
+    if (mismatchBanner) mismatchBanner.hidden = false;
     log('identity mismatch detected (saved identity no longer matches the current gate session) -- reload required, will not self-resolve by retrying; auto-reloading shortly');
     // CADS-webconference-demo (live-reported): unlike the transient-network
     // banners, a mismatch has exactly one fix (reload) with no ambiguity --
@@ -1346,6 +1372,7 @@ function noteApiResult(ok, body) {
     // step, not a safety margin. Auto-reloads after a few seconds (enough
     // to actually read the message first); the button stays for an
     // immediate manual reload too.
+    sessionStorage.setItem('ct-webconference-last-mismatch-reload', String(Date.now()));
     setTimeout(() => location.reload(), 4000);
     return;
   }
