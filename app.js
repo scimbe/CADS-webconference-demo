@@ -2308,8 +2308,21 @@ async function runDialer(identity, { verified = false } = {}) {
   });
 
   // Fallback poll -- unchanged base cadence, stays as the safety net described above.
+  // CADS-webconference-demo#65 (automated-review refinement): a successful
+  // round-trip here proves the SAME bridge the presence WS gave up on is
+  // reachable again -- exactly the signal #presence-lost-banner's manual
+  // Reconnect click is standing in for. Auto re-arm the instant-push socket
+  // on that signal instead of waiting for the user to notice and click;
+  // still bounded by this poll's own 3s cadence (not a blind faster timer),
+  // so it can't retry the bridge any harder than the fallback poll already
+  // does on its own.
   pollEvery(() => api(`/incoming?email=${encodeURIComponent(identity.email)}`).then((r) => {
+    if (r.error) return;
     if (r.incoming) showIncoming(r.incoming);
+    if (presenceLostBanner && !presenceLostBanner.hidden) {
+      incomingSocketAttempt = 0;
+      connectIncomingSocket();
+    }
   }).catch(() => {}), 3000);
 
   refreshContacts();
