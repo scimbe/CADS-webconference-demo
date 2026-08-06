@@ -37,8 +37,30 @@ jobs:
 
       - name: Resolve latest ct-agent commit
         id: latest
+        # CADS-webconference-demo#28: prefer the newest GPG-signed commit on
+        # main over the raw HEAD. ct-agent has no tagged release newer than
+        # v0.3.0 (see this workflow's own header comment), so a signed tag
+        # to pin to stays genuinely upstream-blocked -- but ct-agent's
+        # PR-merge commits ARE signed even though direct pushes to main
+        # aren't (confirmed via the GitHub API's commit.verification field:
+        # mixed signed/unsigned in recent history, not uniformly one or the
+        # other). Landing the pin on a signed commit gives at least
+        # integrity attestation -- this exact commit hasn't been tampered
+        # with in transit/storage -- without waiting for a tag. This does
+        # NOT establish the signing key itself is trusted by anyone in
+        # particular; that deeper provenance question is unchanged. Falls
+        # back to plain HEAD if no signed commit turns up in the recent
+        # history at all, so a gap in ct-agent's signing practice can't
+        # silently stop bumps from happening entirely.
         run: |
-          sha="$(gh api repos/scimbe/ct-agent/commits/main --jq '.sha')"
+          signed_sha="$(gh api 'repos/scimbe/ct-agent/commits?sha=main&per_page=30' --jq 'first(.[] | select(.commit.verification.verified==true)) | .sha')"
+          if [ -n "$signed_sha" ]; then
+            sha="$signed_sha"
+            echo "using latest signed commit: $sha"
+          else
+            sha="$(gh api repos/scimbe/ct-agent/commits/main --jq '.sha')"
+            echo "no signed commit found in the last 30 -- falling back to HEAD: $sha"
+          fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
