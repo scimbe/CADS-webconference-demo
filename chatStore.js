@@ -37,6 +37,17 @@
 const DB_NAME = 'ct-webconference-chat';
 const DB_VERSION = 1;
 const STORE = 'messages';
+// CADS-webconference-demo#77: bounds resident IndexedDB footprint (and
+// therefore history()'s in-memory Promise.all working set) PER
+// CONVERSATION -- the shared per-origin quota is what a flood actually
+// exhausts (bricking every other conversation too, not just the flooded
+// one), so capping each conversation independently is what stops a single
+// peer from claiming an unbounded share of it. 2000 messages * the
+// per-message ~64KB frame ceiling (readFramed's 2-byte length prefix caps
+// a single chat frame at 65535 bytes, see app.js) is a worst case of
+// ~128MB for one fully-flooded conversation -- generous for legitimate use
+// (thousands of real messages), bounded against a flood.
+const MAX_MESSAGES_PER_CONVERSATION = 2000;
 
 // Deliberately NOT sorted. IndexedDB (DB_NAME below) is one shared,
 // origin-wide database -- it's how a browser that has EVER held more than
@@ -247,14 +258,40 @@ export class ChatStore {
   // re-encrypt with a valid tag over anything) -- same limit this file's
   // #23 comment already states for the BroadcastChannel shape checks;
   // this closes a DIFFERENT, narrower gap for a different adversary.
-  // NUL-separated (not JSON) so the AAD's shape can't be reinterpreted by
+  // Space-separated (not JSON) so the AAD's shape can't be reinterpreted by
   // a value containing the delimiter -- none of these fields should ever
   // legitimately contain one, and if some pathological input did, the
   // result is just a decrypt failure (fails closed), never a downgrade.
   _buildAad({ conversation, peerEmail, from, seq, kind, fileName, fileMimeType, fileSize }) {
     const parts = [conversation, peerEmail, from, String(seq), kind || 'text'];
     if (kind === 'file') parts.push(fileName ?? '', fileMimeType ?? '', String(fileSize ?? ''));
-    return new TextEncoder().encode(parts.join(' '));
+    return new TextEncoder().encode(parts.join(' '));
+  }
+  // CADS-webconference-demo#77-adjacent fix: the ORIGINAL #74 commit
+  // (1c8bd11) intended a space separator (this method's own comment already
+  // said "space-separated") but an encoding slip put a raw NUL byte (0x00)
+  // in the shipped join() call instead of an actual space character --
+  // functionally identical for AES-GCM (any fixed separator works), but a
+  // real byte-for-byte difference from what _buildAad now produces, AND a
+  // genuinely corrupted source file (confirmed via `file chatStore.js`
+  // reporting "data" instead of text, and grep silently matching nothing in
+  // the whole file once it hit the NUL byte). This live deployment ran with
+  // that NUL-separator version for real between 1c8bd11 and this fix, so
+  // any message recorded in that window has a NUL-separated AAD baked into
+  // its tag -- decrypting those with the space-separated AAD would mismatch
+  // and wrongly surface as corrupted, the exact regression #74's own no-AAD
+  // fallback exists to avoid, just one AAD-shape generation later.
+  // _decryptBytes tries this as a second candidate before falling all the
+  // way back to no AAD. String.fromCharCode(0), not a literal/escaped
+  // character in this source file -- deliberate, so this exact bug (a raw
+  // byte landing in the file instead of the intended separator) can't
+  // recur here.
+  _buildLegacyNulAad(record) {
+    const { conversation, peerEmail, from, seq, kind, fileName, fileMimeType, fileSize } = record;
+    const parts = [conversation, peerEmail, from, String(seq), kind || 'text'];
+    if (kind === 'file') parts.push(fileName ?? '', fileMimeType ?? '', String(fileSize ?? ''));
+    const nul = String.fromCharCode(0);
+    return new TextEncoder().encode(parts.join(nul));
   }
 
   // CADS-webconference-demo#50: generalized to raw bytes (text was always
@@ -273,25 +310,37 @@ export class ChatStore {
     return { iv: Array.from(iv), ciphertext: Array.from(new Uint8Array(ciphertext)) };
   }
 
-  async _decryptBytes(iv, ciphertext, aad) {
+  // CADS-webconference-demo#77-adjacent fix: `record` is now an optional
+  // full stored-row object (not just the aad bytes) -- when given, this
+  // tries the CURRENT space-separated AAD first, then the legacy
+  // NUL-separated AAD (see _buildLegacyNulAad's comment) as a second
+  // candidate, before finally falling back to no AAD at all (#74's original
+  // pre-AAD-binding compat path). Covers all three generations of records
+  // this app has ever written: pre-#74 (no AAD), the accidentally-shipped
+  // NUL-separator window, and the corrected space-separator version.
+  async _decryptBytes(iv, ciphertext, record) {
     const key = await this.keyPromise;
     const ivBytes = new Uint8Array(iv);
     const ctBytes = new Uint8Array(ciphertext);
-    if (aad) {
+    if (record) {
       try {
-        return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes, additionalData: aad }, key, ctBytes));
+        return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes, additionalData: this._buildAad(record) }, key, ctBytes));
       } catch (e) {
-        // CADS-webconference-demo#74: a record written before this AAD
-        // binding existed was encrypted with NO additionalData at all --
-        // decrypting it WITH one now always mismatches the tag, not
-        // because of tampering but because the binding didn't exist yet
-        // when it was written. This live deployment has real pre-existing
-        // chat history, so silently treating every one of those rows as
-        // corrupted would be a severe regression, not a security win.
-        // Retry without it as the legitimate old-record case -- a
-        // genuinely tampered record still fails this attempt too and
-        // propagates out to history()'s existing corrupted:true handling.
-        return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, key, ctBytes));
+        try {
+          return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes, additionalData: this._buildLegacyNulAad(record) }, key, ctBytes));
+        } catch (e2) {
+          // CADS-webconference-demo#74: a record written before AAD binding
+          // existed was encrypted with NO additionalData at all -- decrypting
+          // it WITH one now always mismatches the tag, not because of
+          // tampering but because the binding didn't exist yet when it was
+          // written. This live deployment has real pre-existing chat
+          // history, so silently treating every one of those rows as
+          // corrupted would be a severe regression, not a security win.
+          // Retry without it as the legitimate old-record case -- a
+          // genuinely tampered record still fails this attempt too and
+          // propagates out to history()'s existing corrupted:true handling.
+          return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, key, ctBytes));
+        }
       }
     }
     return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, key, ctBytes));
@@ -301,8 +350,8 @@ export class ChatStore {
     return this._encryptBytes(new TextEncoder().encode(text), aad);
   }
 
-  async _decrypt(iv, ciphertext, aad) {
-    return new TextDecoder().decode(await this._decryptBytes(iv, ciphertext, aad));
+  async _decrypt(iv, ciphertext, record) {
+    return new TextDecoder().decode(await this._decryptBytes(iv, ciphertext, record));
   }
 
   // Ticks this identity's Lamport clock for a new outgoing message -- call
@@ -326,18 +375,17 @@ export class ChatStore {
   // three decode identically.
   async _decodeRecord(r) {
     const base = { peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: !!r.pending, kind: r.kind || 'text' };
-    // CADS-webconference-demo#74: rebuilt from the row's OWN plaintext
-    // fields, then handed to decrypt -- if any of them were tampered since
-    // encrypt time, this no longer matches what was bound into the tag and
-    // decrypt throws, which history()'s existing catch already turns into
-    // a corrupted:true placeholder instead of silently trusting the
-    // now-mismatched metadata.
-    const aad = this._buildAad(r);
+    // CADS-webconference-demo#74: the row itself is handed to _decryptBytes,
+    // which rebuilds and tries the AAD from its own plaintext fields -- if
+    // any of them were tampered since encrypt time, none of the AAD
+    // candidates match what was bound into the tag and decrypt throws,
+    // which history()'s existing catch already turns into a corrupted:true
+    // placeholder instead of silently trusting the now-mismatched metadata.
     if (r.kind === 'file') {
-      const bytes = await this._decryptBytes(r.iv, r.ciphertext, aad);
+      const bytes = await this._decryptBytes(r.iv, r.ciphertext, r);
       return { ...base, fileName: r.fileName, fileMimeType: r.fileMimeType, fileSize: r.fileSize, blob: new Blob([bytes], { type: r.fileMimeType || 'application/octet-stream' }) };
     }
-    return { ...base, text: await this._decrypt(r.iv, r.ciphertext, aad) };
+    return { ...base, text: await this._decrypt(r.iv, r.ciphertext, r) };
   }
 
   // Records a message this device sent (seq from nextSeqForSend()) or
@@ -356,6 +404,16 @@ export class ChatStore {
   // encrypts fileBytes (a Uint8Array -- the raw attachment) and stores
   // fileName/fileMimeType/fileSize alongside it, using the exact same
   // AES-GCM-at-rest path text already used (see _encryptBytes's comment).
+  //
+  // CADS-webconference-demo#77: per-conversation cap with FIFO pruning --
+  // an in-call (or background-chat) peer with no rate limit could otherwise
+  // flood this SHARED per-origin IndexedDB store unbounded (every
+  // identity's every conversation shares the same quota), eventually
+  // hitting QuotaExceededError for writes in ANY conversation, not just the
+  // flooded one -- one peer bricking every other contact's chat history.
+  // Enforced here (not just capped in history()'s read path) so the DB
+  // itself never grows past the cap regardless of how a caller later reads
+  // it.
   async record({ peerEmail, from, text, seq, received = false, pending = false, kind = 'text', fileName, fileMimeType, fileSize, fileBytes }) {
     if (received) this.clock.observe(seq);
     const conversation = conversationKey(this.identity.email, peerEmail);
@@ -389,7 +447,8 @@ export class ChatStore {
     // _decodeRecord rebuilds this same AAD from the stored row later, and
     // it has to match byte-for-byte or every future legitimate read of
     // this record would fail to decrypt too, not just a tampered one.
-    const aad = this._buildAad({ conversation, peerEmail: peerEmail.toLowerCase(), from, seq, kind, fileName, fileMimeType, fileSize });
+    const aadRecord = { conversation, peerEmail: peerEmail.toLowerCase(), from, seq, kind, fileName, fileMimeType, fileSize };
+    const aad = this._buildAad(aadRecord);
     const { iv, ciphertext } = kind === 'file' ? await this._encryptBytes(fileBytes, aad) : await this._encrypt(text, aad);
     const record = {
       conversation,
@@ -409,6 +468,16 @@ export class ChatStore {
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
+    // CADS-webconference-demo#77: prune the oldest records past
+    // MAX_MESSAGES_PER_CONVERSATION, oldest-first, right after a successful
+    // write -- keeps this conversation's own row count (and therefore its
+    // share of the shared per-origin quota) bounded regardless of how many
+    // messages a peer sends. Never prunes a pending (not-yet-delivered)
+    // outgoing message -- losing an unsent draft silently would be worse
+    // than the flood this guards against; a real flood is peer-authored
+    // (from:'peer', received:true) or a runaway local sender hitting its
+    // own cap, neither of which this exemption weakens in practice.
+    await this._pruneConversation(db, conversation);
     const decoded = kind === 'file'
       ? { peerEmail: record.peerEmail, seq, from, ts: record.ts, pending, kind, fileName, fileMimeType, fileSize, blob: new Blob([fileBytes], { type: fileMimeType || 'application/octet-stream' }) }
       : { peerEmail: record.peerEmail, seq, from, text, ts: record.ts, pending, kind };
@@ -417,6 +486,44 @@ export class ChatStore {
     // file case versus text.
     if (!pending) this.channel.postMessage(decoded); // other tabs don't need to see a not-yet-sent draft
     return decoded;
+  }
+
+  // CADS-webconference-demo#77: FIFO-prunes one conversation down to
+  // MAX_MESSAGES_PER_CONVERSATION, oldest (lowest seq) first, skipping any
+  // row still marked pending (see record()'s own comment on why). Runs
+  // inline after every write rather than on a timer/idle callback -- the
+  // cost is one indexed cursor scan bounded by MAX_MESSAGES_PER_CONVERSATION
+  // + a handful of deletes, not a full-table scan, so it stays cheap enough
+  // to not need decoupling from the write path.
+  async _pruneConversation(db, conversation) {
+    const count = await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readonly');
+      const idx = tx.objectStore(STORE).index('byConversation');
+      const range = IDBKeyRange.bound([conversation, -Infinity], [conversation, Infinity]);
+      const req = idx.count(range);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    const overflow = count - MAX_MESSAGES_PER_CONVERSATION;
+    if (overflow <= 0) return;
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      const idx = tx.objectStore(STORE).index('byConversation');
+      const range = IDBKeyRange.bound([conversation, -Infinity], [conversation, Infinity]);
+      let deleted = 0;
+      idx.openCursor(range).onsuccess = (ev) => {
+        const cursor = ev.target.result;
+        if (!cursor || deleted >= overflow) return resolve();
+        if (cursor.value.pending) {
+          cursor.continue(); // never prune an undelivered outgoing draft -- see record()'s comment
+          return;
+        }
+        cursor.delete();
+        deleted++;
+        cursor.continue();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
   }
 
   async _recordsForConversation(peerEmail) {
@@ -475,11 +582,19 @@ export class ChatStore {
         // and send over the wire, not the Blob _decodeRecord wraps them in
         // for display -- decrypted directly here instead of going through
         // that helper.
+        // CADS-webconference-demo#77-adjacent fix: neither branch here
+        // passed the row (and therefore no AAD) to the decrypt calls below
+        // -- since #74, every record() write binds a real AAD into the GCM
+        // tag, so decrypting without one always failed for any pending
+        // message recorded after that fix landed, silently losing the
+        // ability to resend it (caught by the catch below, which leaves it
+        // stuck pending forever instead of surfacing why). Passing `r` now,
+        // same as _decodeRecord already does.
         if (r.kind === 'file') {
-          const fileBytes = await this._decryptBytes(r.iv, r.ciphertext);
+          const fileBytes = await this._decryptBytes(r.iv, r.ciphertext, r);
           out.push({ peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: true, kind: 'file', fileName: r.fileName, fileMimeType: r.fileMimeType, fileSize: r.fileSize, fileBytes });
         } else {
-          out.push({ peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: true, kind: 'text', text: await this._decrypt(r.iv, r.ciphertext) });
+          out.push({ peerEmail: r.peerEmail, seq: r.seq, from: r.from, ts: r.ts, pending: true, kind: 'text', text: await this._decrypt(r.iv, r.ciphertext, r) });
         }
       } catch {
         // Undecryptable pending row -- can't resend content we can't read.
