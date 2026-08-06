@@ -1231,17 +1231,40 @@ function setCallNote(kind, text) {
 // bridge's 502s were parsed as if they were real JSON responses -- every
 // background poll (heartbeat/incoming/contacts/access-requests) kept
 // hammering it at full cadence with no visible sign anything was wrong.
-// This doesn't change poll cadence itself (a real backoff/coordinator
-// across all six independent pollers is its own architectural piece, #38
-// finding 3, deliberately left for a separate pass) -- it makes the outage
-// observable to the user instead of silent, and gives every caller a
-// reliable `.error`/`._status` to check instead of guessing from a body
-// shape that may or may not be present.
+// This also feeds pollEvery below (#38 finding 3) -- the same counter
+// that surfaces the outage to the user is what backs the pollers off.
 let apiConsecutiveFailures = 0;
 function noteApiResult(ok) {
   apiConsecutiveFailures = ok ? 0 : apiConsecutiveFailures + 1;
   const banner = document.getElementById('conn-trouble-banner');
   if (banner) banner.hidden = apiConsecutiveFailures < 3;
+}
+
+// CADS-webconference-demo#38 (finding 3): the six independent background
+// polls (heartbeat/incoming/contacts/access-requests/contact-requests/
+// background-delivery sweep) all used to fire at full fixed cadence
+// regardless of whether the bridge was reachable -- during a sustained
+// outage that's ~0.9 req/s of guaranteed-failing requests until the bridge
+// recovers or the tab closes. Rather than a full poller-coordinator object,
+// this reuses the outage signal finding 1 already maintains: once 3+
+// consecutive api() failures are showing the "connection trouble" banner,
+// each poll's own next tick backs off (capped at 60s) instead of a real
+// coordinator with per-poller state -- deliberately the smaller of the two
+// shapes, since the outage is already visible to the user via the banner;
+// this only reduces wasted request volume during it. setTimeout recursion
+// rather than setInterval also means a slow/hung fn() can't overlap itself
+// (setInterval's own latent risk) -- fn is always fire-and-forget here
+// (each caller's own .catch(()=>{})), so that shift in effective cadence
+// is negligible. Auto-resets to base cadence the moment apiConsecutiveFailures
+// next reaches 0 (the next successful call), no manual un-backoff needed.
+function pollEvery(fn, baseMs) {
+  const tick = () => {
+    fn();
+    const down = apiConsecutiveFailures >= 3;
+    const next = down ? Math.min(baseMs * 4, 60000) : baseMs;
+    setTimeout(tick, next);
+  };
+  setTimeout(tick, baseMs);
 }
 
 // Never throws -- a network blip, a dropped connection, or a non-JSON error
@@ -1997,7 +2020,7 @@ async function runDialer(identity, { verified = false } = {}) {
     accessRequestsDetails.hidden = !resp.isAdmin;
     if (resp.isAdmin) {
       refreshAccessRequests();
-      setInterval(refreshAccessRequests, 15000);
+      pollEvery(refreshAccessRequests, 15000);
     }
   });
   // Only meaningful for a real gate-verified session (X-Gate-Email) -- a
@@ -2005,7 +2028,7 @@ async function runDialer(identity, { verified = false } = {}) {
   logoutLink.hidden = !verified;
 
   await api('/register', { body: { email: identity.email, holderPub: identity.holderPub, noisePub: identity.noisePub } });
-  setInterval(() => api('/heartbeat', { body: { email: identity.email } }), 15000);
+  pollEvery(() => api('/heartbeat', { body: { email: identity.email } }), 15000);
   ensureNotificationPermission(); // CADS-webconference-demo#55
 
   dialForm.addEventListener('submit', async (ev) => {
@@ -2210,19 +2233,19 @@ async function runDialer(identity, { verified = false } = {}) {
     connectIncomingSocket();
   });
 
-  // Fallback poll -- unchanged cadence, stays as the safety net described above.
-  setInterval(() => api(`/incoming?email=${encodeURIComponent(identity.email)}`).then((r) => {
+  // Fallback poll -- unchanged base cadence, stays as the safety net described above.
+  pollEvery(() => api(`/incoming?email=${encodeURIComponent(identity.email)}`).then((r) => {
     if (r.incoming) showIncoming(r.incoming);
   }).catch(() => {}), 3000);
 
   refreshContacts();
-  setInterval(refreshContacts, 5000);
+  pollEvery(refreshContacts, 5000);
 
   // Catches the case the compose-time trigger can't: a message queued
   // while the peer was offline, delivered once they come back -- without
   // this, "compose any time, it goes out once you're both connected" would
   // only ever be true if you happened to compose AFTER they reconnected.
-  setInterval(() => {
+  pollEvery(() => {
     for (const email of myContacts.all()) tryBackgroundDeliver(identity, email);
   }, 10000);
 
@@ -2257,7 +2280,7 @@ async function runDialer(identity, { verified = false } = {}) {
     }).catch(() => {});
   }
   pollContactRequests();
-  setInterval(pollContactRequests, 4000);
+  pollEvery(pollContactRequests, 4000);
 
   btnDecline.addEventListener('click', () => {
     const declined = currentIncoming;
