@@ -741,21 +741,47 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
           incomingFile = null;
           continue;
         }
-        incomingFile = { seq: header.seq, name: header.name, mimeType: header.mimeType, size: declaredSize, chunks: [], received: 0 };
+        // CADS-webconference-demo#75: a single pre-sized buffer, written at
+        // an advancing offset, instead of an array of per-chunk Uint8Arrays
+        // concatenated at the end. The byte cap above (declaredSize <=
+        // MAX_FILE_BYTES) bounds cumulative BYTES but not CHUNK COUNT -- a
+        // peer sending an under-cap file as millions of 1-byte chunks paid
+        // no penalty from that check at all: each chunk is its own
+        // Uint8Array/ArrayBuffer (V8 per-object overhead runs to hundreds
+        // of bytes even for a 1-byte view), so `chunks` could balloon to
+        // multiple GB well before `received` ever approached the byte cap,
+        // and concatBytes(...chunks) then spread millions of arguments onto
+        // one call, which V8 either hangs on or throws "Maximum call stack
+        // size exceeded" for. A fixed buffer makes both impossible
+        // regardless of how the peer chunks the transfer: resident memory
+        // is capped at declaredSize (one allocation, not N), and there's no
+        // spread left to blow up.
+        incomingFile = { seq: header.seq, name: header.name, mimeType: header.mimeType, size: declaredSize, buf: new Uint8Array(declaredSize), received: 0 };
         deadline = Math.max(deadline, Date.now() + fileTransferWindowMs(declaredSize));
         continue;
       }
       if (tag === TAG_FILE_CHUNK) {
         if (!incomingFile) continue; // chunk with no preceding (or an already-abandoned) init -- nothing to append to
-        incomingFile.received += payload.length;
-        if (incomingFile.received > MAX_FILE_BYTES) {
-          log(`incoming file from ${peerEmail} exceeded the size cap mid-transfer -- abandoning it`);
+        // CADS-webconference-demo#75: a chunk that would overshoot the
+        // buffer sized to the DECLARED size is abandoned outright, not
+        // silently truncated -- a sender that can't stick to its own
+        // declared size is either lying or buggy, and truncating a chunk
+        // instead of failing loudly would deliver a corrupted file with no
+        // indication anything was wrong. This also closes the pre-existing
+        // wrinkle where the final chunk could overshoot `size` and the
+        // whole oversized chunk still got concatenated in. No separate
+        // MAX_FILE_BYTES check needed here anymore -- TAG_FILE_INIT above
+        // already rejects any declaredSize over that cap, so `size` (and
+        // therefore this buffer) can never itself exceed MAX_FILE_BYTES.
+        if (incomingFile.received + payload.length > incomingFile.size) {
+          log(`incoming file from ${peerEmail} sent more data than its declared size -- abandoning it`);
           incomingFile = null;
           continue;
         }
-        incomingFile.chunks.push(payload);
+        incomingFile.buf.set(payload, incomingFile.received);
+        incomingFile.received += payload.length;
         if (incomingFile.received < incomingFile.size) continue; // more chunks still coming
-        const fileBytes = concatBytes(...incomingFile.chunks);
+        const fileBytes = incomingFile.buf.subarray(0, incomingFile.received);
         const { seq, name, mimeType } = incomingFile;
         incomingFile = null;
         if (chatStore && peerEmail) {
