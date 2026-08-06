@@ -338,8 +338,17 @@ async function writeFramed(stream, bytes) {
 // CADS-webconference-demo#69: bounds an arbitrary promise to a deadline
 // without cancelling the underlying work (join/handshake in-flight network
 // calls have no cancellation hook here) -- just stops waiting on it and lets
-// the caller treat a too-slow attempt the same as a failed one.
+// the caller treat a too-slow attempt the same as a failed one. The original
+// `promise` keeps running after losing the race (e.g. a channel reconnect
+// attempt stuck in WsByteStream's own 60s STALL_TIMEOUT_MS, well past this
+// function's shorter deadline) and, with nothing else awaiting it, its
+// eventual settlement would otherwise surface as a genuinely unhandled
+// rejection long after the caller has already moved on and torn the call
+// down. The no-op .catch() here doesn't change WHEN it settles or cancel
+// anything -- it only ensures something is listening, so a late rejection
+// stays silent instead of logging as an unhandled promise rejection.
 function withTimeout(promise, ms, message) {
+  promise.catch(() => {});
   return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))]);
 }
 
@@ -2624,7 +2633,19 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   }
 
   function sendTagged(tag, payloadBytes) {
-    writeFramed(byteStream, noiseTransport.encrypt(concatBytes(new Uint8Array([tag]), payloadBytes)));
+    // CADS-webconference-demo#69 (review follow-up): writeFramed's
+    // returned promise was never awaited or caught here -- a failed send
+    // (ws.send throwing on an already-dead socket, which the ~20s
+    // reconnect grace window now makes a real, not just theoretical,
+    // possibility) surfaced as a genuinely unhandled promise rejection,
+    // not caught by ondataavailable's own nearby try/catch (that catch
+    // only ever covered synchronous failures before this call, since
+    // sendTagged itself was already fire-and-forget). Catching it here,
+    // at the source, fixes that for every tag (chat/bye/media-init/media-
+    // chunk alike), not just the media-chunk call site.
+    writeFramed(byteStream, noiseTransport.encrypt(concatBytes(new Uint8Array([tag]), payloadBytes))).catch((e) => {
+      log(`failed to send (tag ${tag}): ${e.message || e}`);
+    });
   }
   function sendText(tag, text) {
     sendTagged(tag, new TextEncoder().encode(text));
