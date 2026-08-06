@@ -73,6 +73,23 @@
 	# came back instead of the expected 302 once both directives were
 	# declared at the top level).
 	route {
+		# CADS-webconference-demo#62: copy_headers below only OVERWRITES
+		# X-Gate-Email when /gate/check's response actually sets it -- it
+		# never strips. If a client supplies its own X-Gate-Email (e.g. when
+		# the gate is off, or on any /gate/check edge case that admits
+		# without setting it), that value would otherwise survive untouched
+		# through to the bridge, which trusts it absolutely (it has no way
+		# to tell "the gate set this" from "the client claimed this" --
+		# live-reproduced against a local bridge, client-supplied
+		# X-Gate-Email: admin@example.org reflected verbatim by
+		# /api/whoami). Stripped here, as the first thing in this route,
+		# rather than inside either reverse_proxy's own handle_response --
+		# request_header set inside a handle_response block doesn't persist
+		# past that handler's own scope (see the comment on the second
+		# reverse_proxy below), but a plain request_header at route{} level
+		# does, so it stays stripped through both the gate-check probe and
+		# the final copy_headers set.
+		request_header -X-Gate-Email
 		reverse_proxy https://bunsenbrenner.org {
 			method GET
 			rewrite /gate/check

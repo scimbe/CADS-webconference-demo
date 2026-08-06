@@ -41,6 +41,19 @@
 # the gate is off (nothing to report), so app-side code must treat a missing header
 # as "no verified identity available," not an error.
 #
+# CADS-webconference-demo#62: copy_headers only OVERWRITES X-Gate-Email when
+# /gate/check's response actually sets it -- it never strips. When the gate
+# is off (or /gate/check ever admits without setting it), a client-supplied
+# X-Gate-Email survives untouched and reaches the bridge, which trusts it
+# absolutely (it has no way to tell "the gate set this" from "the client
+# claimed this"). The fix (request_header -X-Gate-Email, inside the :443
+# block below, running before forward_auth in Caddy's directive order) strips
+# any client-asserted value first -- copy_headers then re-sets it only from
+# the gate's own verified response, never leaving a smuggled value in place.
+# Live-reproduced against a local bridge (client-supplied
+# X-Gate-Email: admin@example.org reflected verbatim by /api/whoami) before
+# this fix.
+#
 # No handle_errors block: /gate/check issues the login redirect itself (a 302
 # straight to /gate/start) when the gate blocks a visit -- forward_auth copies
 # that response to the client verbatim. A handle_errors block here never
@@ -61,6 +74,9 @@
 }
 
 :443 {
+	# CADS-webconference-demo#62 -- strip any client-asserted X-Gate-Email
+	# before forward_auth runs; see the comment above this block for why.
+	request_header -X-Gate-Email
 	forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
 		uri /gate/check
 		copy_headers X-Gate-Email
