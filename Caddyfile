@@ -95,10 +95,24 @@
 			uri /gate/check
 			copy_headers X-Gate-Email
 		}
-		reverse_proxy /ws/channel {$WEBCONFERENCE_EDGE_WS}
-		root * /srv
-		file_server
-		encode gzip
+		# CADS-webconference-demo#62 (second regression, live-confirmed):
+		# route{} forces WRITTEN order, not Caddy's default implicit
+		# priority order -- header{} and encode are RESPONSE-modifying
+		# directives that only apply to a response if they're still "on
+		# the stack" when a later responder (file_server, reverse_proxy)
+		# actually writes one. Outside route{}, Caddy's default order runs
+		# header(9)/encode(20) before file_server(36) regardless of text
+		# position, so their original placement after file_server was
+		# harmless. Once route{} was added (needed for the X-Gate-Email
+		# strip above), that safety net was gone: file_server/reverse_proxy
+		# responded and ended the chain before encode/header, written
+		# after them, ever ran -- silently dropping ALL of #15/#16's
+		# security headers and gzip compression for every static response
+		# this Caddyfile serves. Confirmed via a real caddy:2 container:
+		# encode/header placed after file_server -> no CSP/X-Frame-Options/
+		# gzip on a real GET; moved here, before every responder -> both
+		# present. Must stay before reverse_proxy/root/file_server for as
+		# long as this block is wrapped in route{}.
 		header {
 			Strict-Transport-Security "max-age=31536000"
 			X-Content-Type-Options "nosniff"
@@ -111,5 +125,9 @@
 			Referrer-Policy "strict-origin-when-cross-origin"
 			Permissions-Policy "camera=(self), microphone=(self), geolocation=(), payment=()"
 		}
+		encode gzip
+		reverse_proxy /ws/channel {$WEBCONFERENCE_EDGE_WS}
+		root * /srv
+		file_server
 	}
 }
