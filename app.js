@@ -2336,12 +2336,32 @@ async function runDialer(identity, { verified = false } = {}) {
       autoAcceptChatDelivery(incoming, identity);
       return;
     }
-    // CADS-webconference-demo#39 (finding 3): a second incoming call while
-    // one is already showing used to just be dropped here -- no /decline,
-    // so that second caller kept ringing (from their own side) for the
-    // full 60s bridge CALL_TTL with no indication anything had happened on
-    // this end at all. Declining it explicitly gives them the same prompt
-    // "not available" feedback a real busy line would.
+    // The exact call already showing gets redelivered here constantly: the
+    // /api/incoming fallback poll (3s cadence, "kept running regardless" as
+    // this WS push's backstop) keeps returning the same still-ringing
+    // channel every tick until it's accepted/declined/expired, since
+    // incomingByEmail on the bridge doesn't clear until one of those
+    // happens. Without this check, that redelivery fell straight into the
+    // "busy, decline it" branch below and auto-declined the very call the
+    // user was looking at -- usually within 3s of it arriving, well before
+    // a human has time to click Accept. Live-reported: caller sees
+    // "declined" even though the callee never touched Decline and later
+    // did click Accept -- the poll's spurious decline had already landed
+    // and (per the bridge's own tryRegister) only got silently overwritten
+    // back to accepted_and_registered *after* the caller's own
+    // pollCallStatus had already exited on the earlier 'declined' and given
+    // up polling. Not a multi-tab issue -- reproducible single-tab, every
+    // time Accept isn't clicked within the poll interval.
+    if (currentIncoming && currentIncoming.channel === incoming.channel) {
+      return;
+    }
+    // CADS-webconference-demo#39 (finding 3): a second, genuinely different
+    // incoming call while one is already showing used to just be dropped
+    // here -- no /decline, so that second caller kept ringing (from their
+    // own side) for the full 60s bridge CALL_TTL with no indication
+    // anything had happened on this end at all. Declining it explicitly
+    // gives them the same prompt "not available" feedback a real busy line
+    // would.
     if (currentIncoming) {
       api('/decline', { body: { channel: incoming.channel } }).catch(() => {});
       return;
