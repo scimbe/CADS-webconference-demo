@@ -2355,6 +2355,26 @@ async function runDialer(identity, { verified = false } = {}) {
     if (currentIncoming && currentIncoming.channel === incoming.channel) {
       return;
     }
+    // Live-reported: after several unanswered rings, EVERY later call to the
+    // same recipient started getting auto-declined immediately, forever --
+    // not a multi-tab issue, single browser. Root cause: the busy-branch
+    // below trusts `currentIncoming` to accurately mean "a call is still
+    // genuinely showing," but the only thing that ever clears it (besides
+    // Accept/Decline) is the 45s setTimeout in currentIncomingTimer below --
+    // and setTimeout in a backgrounded/throttled tab (browsers routinely
+    // clamp background timers, sometimes indefinitely) can simply never
+    // fire. Once that happens, currentIncoming is permanently stuck
+    // pointing at a long-dead call, and every subsequent real incoming call
+    // -- to that recipient, in that one tab -- silently hits the busy
+    // branch and gets declined, with no way to recover short of reloading
+    // the tab. Self-heal instead of trusting the timer alone: if the
+    // currently-shown call is already older than its own timeout would
+    // have allowed, it's stale by definition (its own timer should have
+    // already fired) -- clear it and treat this delivery as a fresh call,
+    // not a busy-decline.
+    if (currentIncoming && Date.now() - currentIncoming.receivedAt > INCOMING_CARD_TIMEOUT_MS) {
+      clearIncoming();
+    }
     // CADS-webconference-demo#39 (finding 3): a second, genuinely different
     // incoming call while one is already showing used to just be dropped
     // here -- no /decline, so that second caller kept ringing (from their
@@ -2366,7 +2386,7 @@ async function runDialer(identity, { verified = false } = {}) {
       api('/decline', { body: { channel: incoming.channel } }).catch(() => {});
       return;
     }
-    currentIncoming = incoming;
+    currentIncoming = { ...incoming, receivedAt: Date.now() };
     incomingFrom.textContent = incoming.fromEmail;
     incomingCard.hidden = false;
     // CADS-webconference-demo#55/#56: a real incoming call is exactly the
