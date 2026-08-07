@@ -1034,6 +1034,12 @@ const server = http.createServer(async (req, res) => {
       const { channel } = await readBody(req);
       const call = pendingCalls.get(channel);
       if (!call) return json(res, 404, { error: 'no such pending call' });
+      // #69-follow: same clobber-guard as /api/decline below -- see that
+      // comment for the full race. A stale cancel arriving after the call
+      // already registered must not silently revert a genuine connection.
+      if (call.status?.state === 'accepted_and_registered') {
+        return json(res, 200, { ok: true, ignored: true, reason: 'call already accepted' });
+      }
       call.status = { state: 'cancelled' };
       if (incomingByEmail.get(call.calleeEmail) === channel) incomingByEmail.delete(call.calleeEmail);
       wsPush(call.calleeEmail, { type: 'cancelled', channel });
@@ -1049,6 +1055,24 @@ const server = http.createServer(async (req, res) => {
       const { channel } = await readBody(req);
       const call = pendingCalls.get(channel);
       if (!call) return json(res, 404, { error: 'no such pending call' });
+      // #69-follow: call.status is a single value keyed only by channel, but
+      // a callee can have more than one tab/window open under the same
+      // identity, each independently running its own 45s ring-timeout /
+      // busy-guard auto-decline (app.js INCOMING_CARD_TIMEOUT_MS). If one
+      // tab genuinely accepts (tryRegister above sets
+      // 'accepted_and_registered' once both attestations land) and a
+      // *different*, backgrounded tab's stray decline arrives afterward,
+      // an unconditional overwrite here would revert the status back to
+      // 'declined' -- the caller's pollCallStatus (app.js) would then see
+      // "declined" for a call that was genuinely answered a moment earlier.
+      // Reproduced live: caller reported seeing "declined" while the callee
+      // had multiple tabs open, one of which had accepted. Once a call has
+      // resolved to accepted_and_registered it's terminal from this
+      // endpoint's perspective: ignore the stale decline instead of
+      // silently reverting a successful call.
+      if (call.status?.state === 'accepted_and_registered') {
+        return json(res, 200, { ok: true, ignored: true, reason: 'call already accepted' });
+      }
       call.status = { state: 'declined' };
       if (incomingByEmail.get(call.calleeEmail) === channel) incomingByEmail.delete(call.calleeEmail);
       return json(res, 200, { ok: true });
