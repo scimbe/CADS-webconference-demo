@@ -3214,6 +3214,16 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
 }
 
 async function run() {
+  // CADS-webconference-demo#87: without this, this origin's IndexedDB
+  // (chatStore.js's encrypted chat history) sits in the browser's
+  // "best-effort" storage bucket -- eligible for eviction under storage
+  // pressure for any origin not visited recently, which independently
+  // explains losing chat history even in the SAME browser after a long
+  // gap. Best-effort and silently ignored on failure/unsupported browsers
+  // (the browser may still deny it, e.g. without a user gesture on first
+  // visit in some engines) -- this only ever improves retention odds, never
+  // required for correctness.
+  try { await navigator.storage?.persist?.(); } catch (_) {}
   const params = new URLSearchParams(location.search);
   // CADS-webconference-demo#14: the ?ws= value used to be trusted verbatim
   // from the URL -- a crafted link could point this at an attacker's own
