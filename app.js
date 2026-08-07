@@ -1329,10 +1329,156 @@ function loadOrCreateIdentity(email, { requireExisting = false } = {}) {
     holderPriv: holder.private_hex,
     noisePub: noise.public_hex,
     noisePriv: noise.private_hex,
+    // CADS-webconference-demo#87: bully-style tie-break input for device
+    // pairing -- when two browsers have independently minted DIFFERENT
+    // keys under the same email (today's status quo whenever no local
+    // identity exists yet), the older key wins and the newer one is
+    // discarded in favor of it. Self-reported and not attested -- fine
+    // here because pairing is a same-person, same-account action, not an
+    // adversarial one; see identityCreatedAt()'s own comment for how a
+    // pre-existing identity from before this field existed is treated.
+    createdAt: Date.now(),
   };
   localStorage.setItem(key, JSON.stringify(identity));
   return identity;
 }
+
+// A real identity that predates this field (createdAt was added in #87)
+// has no createdAt at all -- treat that as "older than anything," never 0
+// (0 would tie-break AGAINST a genuinely ancient real identity if some
+// other identity's createdAt were also missing/0). Number.NEGATIVE_INFINITY
+// guarantees an identity that existed before this feature shipped always
+// wins a pairing tie-break against a freshly-generated one, which is the
+// only direction that can't silently discard someone's real, pre-existing
+// account.
+function identityCreatedAt(identity) {
+  return typeof identity.createdAt === 'number' ? identity.createdAt : Number.NEGATIVE_INFINITY;
+}
+
+// ============ Device pairing (#87) ============
+// Honest scoping note (also in the #87 completion comment): the account
+// owner asked for this to go over the existing ct_channel (ws_channel/
+// Noise_IK) transport -- that would need a new grant type from
+// `ct-video-call-grant`, a separately-compiled binary this repo doesn't
+// build or control, so it's out of reach here. This uses the browser's
+// native WebCrypto (ECDH P-256 + AES-GCM) instead, relayed through
+// /api/pair/* -- the SAME security property (the bridge only ever sees
+// public keys and a ciphertext it cannot decrypt, holding neither side's
+// private key) over a different transport. Still live, still ephemeral,
+// still requires both devices online within the pairing window.
+const PAIRING_CODE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789'; // matches the bridge's PAIRING_CODE_RE
+function generatePairingCode() {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  let code = '';
+  for (let i = 0; i < 8; i++) code += PAIRING_CODE_ALPHABET[bytes[i] % PAIRING_CODE_ALPHABET.length];
+  return code;
+}
+async function pairingKeyPair() {
+  return crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']);
+}
+async function pairingSharedKey(myPrivateKey, theirPubJwk, usage) {
+  const theirPublicKey = await crypto.subtle.importKey('jwk', theirPubJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  return crypto.subtle.deriveKey({ name: 'ECDH', public: theirPublicKey }, myPrivateKey, { name: 'AES-GCM', length: 256 }, false, [usage]);
+}
+async function pairingEncrypt(sharedKey, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, sharedKey, new TextEncoder().encode(JSON.stringify(obj)));
+  return { iv: Array.from(iv), ciphertext: Array.from(new Uint8Array(ciphertext)) };
+}
+async function pairingDecrypt(sharedKey, iv, ciphertext) {
+  const bytes = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(iv) }, sharedKey, new Uint8Array(ciphertext));
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+// NEW device side: generates an ephemeral keypair, publishes it under a
+// fresh code, shows the code to the user, and polls until an
+// already-paired device delivers the real identity encrypted to it (or
+// the 5-minute window lapses). Applies the Bully-style tie-break
+// (#87: oldest createdAt wins) against any identity this browser may
+// already hold for the same email, so pairing can never silently discard
+// a genuinely older, real local identity in favor of a newer one.
+async function pairAsNewDevice(email) {
+  const keyPair = await pairingKeyPair();
+  const pubJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+  const code = generatePairingCode();
+  const offerResp = await api('/pair/offer', { body: { email, code, tempPubKeyJwk: pubJwk } });
+  if (offerResp.error) throw new Error(offerResp.error);
+  alert(
+    `Pairing code: ${code}\n\nOn your OTHER (already set up) device: open the menu -> ` +
+      `"Pair a new device" and enter this code. This continues automatically once paired ` +
+      `-- times out in 5 minutes.`
+  );
+  const deadline = Date.now() + 5 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const poll = await api(`/pair/poll?code=${encodeURIComponent(code)}`);
+    if (poll.ready) {
+      const sharedKey = await pairingSharedKey(keyPair.privateKey, poll.oldDevicePubKeyJwk, 'decrypt');
+      const receivedIdentity = await pairingDecrypt(sharedKey, poll.iv, poll.ciphertext);
+      const key = storageKeyFor(email);
+      const existingRaw = localStorage.getItem(key);
+      if (existingRaw) {
+        const existing = JSON.parse(existingRaw);
+        // This browser already independently held a DIFFERENT identity for
+        // this email (e.g. used before pairing existed) -- the older key
+        // wins; a tie also keeps the existing one (arbitrary but
+        // deterministic, and never discards what was already here).
+        if (identityCreatedAt(existing) <= identityCreatedAt(receivedIdentity)) return existing;
+      }
+      localStorage.setItem(key, JSON.stringify(receivedIdentity));
+      return receivedIdentity;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  throw new Error('pairing timed out -- the other device never delivered within 5 minutes');
+}
+
+// Offers pairing ONLY when this browser has no local identity for this
+// email yet -- an existing local identity always just loads normally
+// (unchanged behavior), so this never interrupts the common case of
+// reopening the app on a device that's already set up.
+async function loadOrPairIdentity(email) {
+  if (localStorage.getItem(storageKeyFor(email))) return loadOrCreateIdentity(email);
+  const wantsPairing = confirm(
+    'No account found on this device yet. Pair with an already-set-up device instead of ' +
+      'starting a brand-new, empty account here? (Cancel to start fresh on this device.)'
+  );
+  if (wantsPairing) {
+    try {
+      return await pairAsNewDevice(email);
+    } catch (e) {
+      alert(`Pairing failed: ${e.message || e}. Starting a new, empty account on this device instead.`);
+    }
+  }
+  return loadOrCreateIdentity(email);
+}
+
+// ALREADY-PAIRED device side: looks up a code the user read off the new
+// device, encrypts the CURRENT real identity to that device's ephemeral
+// public key, and delivers it. myIdentity is the same global runDialer
+// already sets for background delivery's own use.
+document.getElementById('pair-device-btn')?.addEventListener('click', async () => {
+  const code = (prompt('Enter the pairing code shown on the new device:') || '').trim().toUpperCase();
+  if (!code) return;
+  try {
+    const lookup = await api(`/pair/lookup?code=${encodeURIComponent(code)}`);
+    if (lookup.error) {
+      alert(`Pairing failed: ${lookup.error}`);
+      return;
+    }
+    const keyPair = await pairingKeyPair();
+    const myPubJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+    const sharedKey = await pairingSharedKey(keyPair.privateKey, lookup.tempPubKeyJwk, 'encrypt');
+    const { iv, ciphertext } = await pairingEncrypt(sharedKey, myIdentity);
+    const resp = await api('/pair/deliver', { body: { code, oldDevicePubKeyJwk: myPubJwk, iv, ciphertext } });
+    if (resp.error) {
+      alert(`Pairing failed: ${resp.error}`);
+      return;
+    }
+    alert('Paired. The other device should finish connecting within a few seconds.');
+  } catch (e) {
+    alert(`Pairing failed: ${e.message || e}`);
+  }
+});
 
 function setCallNote(kind, text) {
   callNote.className = kind ? `call-note ${kind}` : '';
@@ -1538,28 +1684,72 @@ function startCallFromIdentity(identity, { role, channel, grant, ws, transport, 
 // panel in the menu), since conflating "I don't want to see them" with
 // "they may never log in again" would be a much bigger, easy-to-regret
 // action to hide behind a small ✕.
+// CADS-webconference-demo#87: entries are {present, ts} pairs, not a plain
+// array -- a plain set union can't represent DELETION, so a stale remote
+// sync state that still has an email A removed would resurrect it on merge.
+// A tombstone (present:false, ts:<removal time>) lets remove() win over an
+// older add() the same way a newer add() wins over an older remove() --
+// last-write-wins per email, symmetric in both directions. Public API
+// (all/has/add/remove) is unchanged so existing call sites don't need to
+// change; merge() is new, used only by the sync loop.
 function localSetFor(kind, email) {
   const key = `ct-webconference-${kind}:${email.toLowerCase()}`;
+  function load() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(key) || '{"entries":{}}');
+      if (Array.isArray(raw)) {
+        // Migrate the pre-#87 plain-array format transparently: every
+        // existing email becomes present, stamped "now" -- there's no real
+        // historical timestamp for legacy entries, and "now" is the safe
+        // default (it can only ever look too-recently-added, never
+        // wrongly lose to an older remote tombstone it has no way to know
+        // about).
+        const entries = {};
+        for (const e of raw) entries[e.toLowerCase()] = { present: true, ts: Date.now() };
+        return { entries };
+      }
+      return raw && raw.entries ? raw : { entries: {} };
+    } catch (_) {
+      return { entries: {} };
+    }
+  }
+  function save(state) {
+    localStorage.setItem(key, JSON.stringify(state));
+  }
   return {
     all() {
-      try {
-        return JSON.parse(localStorage.getItem(key) || '[]');
-      } catch (_) {
-        return [];
-      }
+      const { entries } = load();
+      return Object.keys(entries).filter((e) => entries[e].present);
     },
     has(e) {
-      return this.all().includes(e.toLowerCase());
+      const { entries } = load();
+      return !!entries[e.toLowerCase()]?.present;
     },
     add(e) {
-      const s = new Set(this.all());
-      s.add(e.toLowerCase());
-      localStorage.setItem(key, JSON.stringify([...s]));
+      const state = load();
+      state.entries[e.toLowerCase()] = { present: true, ts: Date.now() };
+      save(state);
     },
     remove(e) {
-      const s = new Set(this.all());
-      s.delete(e.toLowerCase());
-      localStorage.setItem(key, JSON.stringify([...s]));
+      const state = load();
+      state.entries[e.toLowerCase()] = { present: false, ts: Date.now() };
+      save(state);
+    },
+    entriesRaw() {
+      return load().entries;
+    },
+    // Last-write-wins merge against a remote {email: {present, ts}} map,
+    // used by the sync loop -- whichever side (local or remote) has the
+    // newer ts for a given email wins; a tie keeps the local value.
+    merge(remoteEntries) {
+      const state = load();
+      for (const [email, remote] of Object.entries(remoteEntries || {})) {
+        const local = state.entries[email];
+        if (!local || remote.ts > local.ts) {
+          state.entries[email] = remote;
+        }
+      }
+      save(state);
     },
   };
 }
@@ -1660,6 +1850,102 @@ async function doRefreshContacts() {
     convStatus.textContent = online ? 'online' : 'offline';
     convStatus.dataset.online = online ? '1' : '0';
   }
+}
+
+// ============ Cross-device sync (#87/#88) ============
+// Delta push/pull against this bridge's /api/sync/{push,pull} -- NOT
+// peer-to-peer, and NOT how a brand-new device gets the identity's keys in
+// the first place (see pairing below for that): this loop only ever runs
+// once THIS device already holds the real holderPriv/noisePriv, letting
+// multiple already-paired devices reconcile chat history + contacts/
+// blocklist without needing to be online at the same time. Scoped to
+// conversations in myContacts.all() -- a conversation with someone who was
+// never added as a contact isn't covered by this pass (rare in practice;
+// flagged, not silently pretended to be complete). nameMapFor's per-
+// contact display-name labels are also out of scope for this pass -- see
+// the bridge's own syncStore comment for why.
+function syncCursorKeyFor(email) {
+  return `ct-webconference-sync-cursor:${email.toLowerCase()}`;
+}
+function loadSyncCursor(email) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(syncCursorKeyFor(email)) || '{}');
+    return { pushedSeq: parsed.pushedSeq || {}, pulledRevision: parsed.pulledRevision || 0 };
+  } catch (_) {
+    return { pushedSeq: {}, pulledRevision: 0 };
+  }
+}
+function saveSyncCursor(email, cursor) {
+  localStorage.setItem(syncCursorKeyFor(email), JSON.stringify(cursor));
+}
+
+// CADS-webconference-demo#38 (finding 4)'s own pattern, reused here: an
+// overlapping call (the pollEvery tick firing again before a slow sync
+// finished) joins the SAME in-flight promise instead of racing a second
+// concurrent push/pull cycle against the first.
+let syncInFlight = null;
+async function syncNow() {
+  if (syncInFlight) return syncInFlight;
+  syncInFlight = doSyncNow();
+  try {
+    await syncInFlight;
+  } finally {
+    syncInFlight = null;
+  }
+}
+async function doSyncNow() {
+  if (!myEmail || !dialerChatStore || !myContacts || !blockedEmails) return;
+  const cursor = loadSyncCursor(myEmail);
+  let changedContacts = false;
+
+  // Push: new local rows per conversation this device knows about, plus
+  // the current contacts/blocked tombstone state (small, always sent in
+  // full -- see the bridge's own mergeEntries comment).
+  for (const peerEmail of myContacts.all()) {
+    const sinceSeq = cursor.pushedSeq[peerEmail] || 0;
+    const rows = await dialerChatStore.rowsSince(peerEmail, sinceSeq);
+    if (!rows.length) continue;
+    const messages = rows.map((r) => ({
+      conversation: r.conversation,
+      seq: r.seq,
+      from: r.from,
+      ts: r.ts,
+      kind: r.kind,
+      iv: r.iv,
+      ciphertext: r.ciphertext,
+      ...(r.kind === 'file' ? { fileName: r.fileName, fileMimeType: r.fileMimeType, fileSize: r.fileSize } : {}),
+    }));
+    const resp = await api('/sync/push', { body: { email: myEmail, messages } });
+    if (!resp.error) cursor.pushedSeq[peerEmail] = Math.max(sinceSeq, ...rows.map((r) => r.seq));
+  }
+  await api('/sync/push', {
+    body: { email: myEmail, contacts: { entries: myContacts.entriesRaw() }, blocked: { entries: blockedEmails.entriesRaw() } },
+  }).catch(() => {});
+
+  // Pull: page through everything past our last-seen revision. Bounded to
+  // 50 pages/tick (50 * the bridge's own 200-row page = 10,000 rows) --
+  // generous for a real backlog, not unbounded; the next tick just picks
+  // up where this one left off via the persisted cursor.
+  for (let guard = 0; guard < 50; guard++) {
+    const resp = await api(`/sync/pull?email=${encodeURIComponent(myEmail)}&since=${cursor.pulledRevision}`);
+    if (resp.error) break;
+    for (const row of resp.messages || []) {
+      const prefix = `${myEmail.toLowerCase()}->`;
+      if (!row.conversation.startsWith(prefix)) continue; // defense in depth -- should never happen, this identity's own pull can't return another identity's rows
+      const peerEmail = row.conversation.slice(prefix.length);
+      await dialerChatStore.mergeEncryptedRow(peerEmail, row).catch(() => {});
+    }
+    if (resp.contacts?.entries) {
+      myContacts.merge(resp.contacts.entries);
+      changedContacts = true;
+    }
+    if (resp.blocked?.entries) blockedEmails.merge(resp.blocked.entries);
+    if (!resp.messages || resp.messages.length === 0 || resp.nextSince === cursor.pulledRevision) break;
+    cursor.pulledRevision = resp.nextSince;
+  }
+
+  saveSyncCursor(myEmail, cursor);
+  if (changedContacts) await refreshContacts();
 }
 
 function formatMsgTime(ts) {
@@ -2560,6 +2846,14 @@ async function runDialer(identity, { verified = false } = {}) {
   refreshContacts();
   pollEvery(refreshContacts, 5000);
 
+  // CADS-webconference-demo#87/#88: cross-device delta sync -- see
+  // syncNow's own header comment. 20s cadence: heavier than a presence
+  // poll (pushes/pulls real content, not just an online flag), lighter
+  // than something a user would notice lagging for a background
+  // reconciliation between their own devices.
+  syncNow().catch(() => {});
+  pollEvery(() => syncNow().catch(() => {}), 20000);
+
   // Catches the case the compose-time trigger can't: a message queued
   // while the peer was offline, delivered once they come back -- without
   // this, "compose any time, it goes out once you're both connected" would
@@ -2677,7 +2971,7 @@ async function runIdentityScreen() {
   }
   const verifiedEmail = whoamiResp.email;
   if (verifiedEmail) {
-    const identity = loadOrCreateIdentity(verifiedEmail);
+    const identity = await loadOrPairIdentity(verifiedEmail);
     await runDialer(identity, { verified: true });
     return;
   }
@@ -2715,7 +3009,7 @@ async function runIdentityScreen() {
       idEmailInput.reportValidity();
       return;
     }
-    const identity = loadOrCreateIdentity(email);
+    const identity = await loadOrPairIdentity(email);
     await runDialer(identity);
   });
 }

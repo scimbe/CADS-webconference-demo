@@ -523,6 +523,19 @@
          identity's keys (and its local chat history, which becomes
          permanently undecryptable once the keys are gone) without also
          signing out of the account entirely. -->
+    <!-- CADS-webconference-demo#87: live-pairs a NEW device onto this same
+         identity, and (separately) reconciles chat history/contacts
+         between already-paired devices in the background -- see #87 for
+         the full design. Both devices need to be online within a few
+         minutes of each other for the pairing step; the code exchange
+         itself never leaves this browser's own encryption -- the bridge
+         relays it opaquely, same as it relays any other end-to-end
+         encrypted content. -->
+    <p style="margin:.8rem 0 .3rem;font-size:.72rem;color:var(--muted)">Pair a new device to this
+      same identity (so it gets your contacts and chat history too, instead of starting empty) --
+      open this app on the new device, choose "pair from another device" there, then enter the
+      code it shows you here.</p>
+    <button type="button" class="logout" id="pair-device-btn" style="background:none;border:none;font:inherit;cursor:pointer;text-align:left;padding:0;color:var(--accent2)">Pair a new device</button>
     <p style="margin:.8rem 0 .3rem;font-size:.72rem;color:var(--muted)">Forgetting removes this
       identity's keys from this browser -- its chat history becomes permanently unreadable here.
       You stay signed in and can create or switch to a different identity.</p>

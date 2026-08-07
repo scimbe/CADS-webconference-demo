@@ -47,6 +47,12 @@ services:
       # doesn't silently drop them; needs the volume below since /srv itself
       # is the image's own COPY'd code, not writable storage worth keeping.
       - WEBCONFERENCE_ACCESS_REQUESTS_FILE=/srv/data/access-requests.json
+      # CADS-webconference-demo#87/#88: cross-device sync state (encrypted
+      # chat-message rows + contacts/blocked tombstone entries this bridge
+      # never decrypts) -- same durability reasoning and the same already-
+      # mounted volume as WEBCONFERENCE_ACCESS_REQUESTS_FILE above, no new
+      # volume needed.
+      - WEBCONFERENCE_SYNC_STORE_FILE=/srv/data/sync-store.json
       - CT_AGENT_CP_URL=${CT_AGENT_CP_URL:?control-plane URL}
       # Same var + same value as webconference-demo-agent's CT_AGENT_HOSTNAME
       # below, both sourced from this one top-level ${CT_AGENT_HOSTNAME} --

@@ -190,6 +190,108 @@ function persistAccessRequests() {
     console.log(`could not persist access requests to ${ACCESS_REQUESTS_FILE}: ${e.message}`);
   }
 }
+
+// CADS-webconference-demo#87/#88: cross-device sync store. email (lowercased)
+// -> { nextRevision, messages: [...], contacts: {entries}, blocked: {entries} }.
+//
+// This bridge NEVER decrypts or inspects message content -- `messages` rows
+// are exactly what chatStore.js already stores locally (conversation, seq,
+// from, ts, pending, kind, iv, ciphertext, and the file fields for a file
+// row), forwarded here opaquely for another of the SAME identity's devices
+// to pull and decrypt with the key only that identity holds (never this
+// bridge). `contacts`/`blocked` are the tombstone-aware {present, ts} entry
+// maps app.js's localSetFor already builds -- merged here with the exact
+// same last-write-wins-by-ts rule as the client's own merge(), so the
+// server converges to the same state any two directly-syncing clients
+// would reach. `messages` uses one MONOTONIC REVISION COUNTER per identity
+// (not a per-conversation seq) so a client only needs to remember ONE
+// "last seen revision" number to page through every conversation's deltas
+// in one pull loop, instead of tracking a cursor per conversation.
+//
+// Deliberately does NOT cover nameMapFor's per-contact display-name labels
+// (out of scope for this pass -- lower-stakes personal labels, not access-
+// or security-relevant like contacts/blocklist; flagged in the completion
+// comment, not silently dropped).
+const syncStore = new Map();
+const SYNC_STORE_FILE = process.env.WEBCONFERENCE_SYNC_STORE_FILE || './sync-store.json';
+// CADS-webconference-demo#77's own precedent: unbounded per-identity growth
+// here is the exact same shared-storage-exhaustion shape that issue fixed
+// client-side -- bounding it server-side too, FIFO-pruned oldest-revision-
+// first once exceeded, same reasoning.
+const MAX_SYNC_MESSAGES_PER_IDENTITY = 20_000;
+try {
+  const raw = fs.readFileSync(SYNC_STORE_FILE, 'utf8');
+  for (const [email, state] of Object.entries(JSON.parse(raw))) {
+    syncStore.set(email, state);
+  }
+  console.log(`loaded sync state for ${syncStore.size} identit(y/ies) from ${SYNC_STORE_FILE}`);
+} catch (e) {
+  if (e.code !== 'ENOENT') console.log(`could not load ${SYNC_STORE_FILE}: ${e.message} -- starting with no sync state`);
+}
+function persistSyncStore() {
+  const tmp = `${SYNC_STORE_FILE}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(syncStore)));
+    fs.renameSync(tmp, SYNC_STORE_FILE);
+  } catch (e) {
+    console.log(`could not persist sync store to ${SYNC_STORE_FILE}: ${e.message}`);
+  }
+}
+function getSyncState(email) {
+  let state = syncStore.get(email);
+  if (!state) {
+    state = { nextRevision: 1, messages: [], contacts: { entries: {} }, blocked: { entries: {} } };
+    syncStore.set(email, state);
+  }
+  return state;
+}
+// Last-write-wins merge, identical rule to app.js's localSetFor.merge() --
+// the server has to converge on the SAME result the client would reach
+// merging the same two states, or a client that trusts the server's
+// response and a client that merged two peers directly could permanently
+// disagree.
+function mergeEntries(local, remote) {
+  for (const [email, r] of Object.entries(remote || {})) {
+    const l = local[email];
+    if (!l || r.ts > l.ts) local[email] = r;
+  }
+}
+
+// CADS-webconference-demo#87: live device-pairing relay. Honest scoping
+// note (see the completion comment on #87 for the full disclosure): the
+// account owner asked for this to go over the existing ct_channel
+// (ws_channel/Noise_IK) transport -- that would need a new grant type from
+// `ct-video-call-grant`, a separately-compiled binary this repo doesn't
+// build or control, so it's out of reach for this pass. This relay
+// achieves the SAME security property with standard WebCrypto (ECDH +
+// AES-GCM) instead: this bridge only ever sees each side's ECDH PUBLIC key
+// and an AES-GCM ciphertext it has no way to decrypt (it never holds
+// either device's ECDH private key) -- functionally equivalent to relaying
+// opaque bytes over a channel it can't read, just over plain HTTP instead
+// of the WS channel transport. Still live, still ephemeral (single-use,
+// short TTL, in-memory only -- same durability tier as pendingCalls/
+// contactRequests above), still requires both devices online within the
+// TTL window, same as the ws_channel version would have.
+//
+// code (the short pairing code shown on the new device, typed on the
+// existing one) -> { email, tempPubKeyJwk, offeredAt, result }. `result`,
+// once the existing device delivers it, is
+// { oldDevicePubKeyJwk, iv, ciphertext } -- new device's poll consumes and
+// deletes the whole entry (single-use).
+const pairingOffers = new Map();
+const PAIRING_TTL_MS = 5 * 60 * 1000;
+const PAIRING_CODE_RE = /^[A-Z2-9]{8}$/; // Crockford-ish alphabet (no 0/O/1/I confusion), 8 chars -- ~37 bits, brute-force bounded further by the rate limiter below
+function prunePairingOffers() {
+  const cutoff = Date.now() - PAIRING_TTL_MS;
+  for (const [code, offer] of pairingOffers) {
+    if (offer.offeredAt < cutoff) pairingOffers.delete(code);
+  }
+}
+// Same fixed-window-per-IP shape as accessRequestRateLimited/callRateLimited
+// above -- bounds both a brute-force guess sweep across the code space and
+// plain memory growth from offer spam, without needing per-code state.
+const pairingRateLimited = makeRateLimiter(20, 5 * 60 * 1000);
+
 // CADS-webconference-demo#41 (finding 2): this is the one endpoint the
 // gate exemption in Caddyfile.selfservice deliberately leaves reachable
 // with NO authentication at all -- by design (it's the one way a rejected
@@ -1102,6 +1204,131 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { incoming: null });
       }
       return json(res, 200, { incoming: { channel: call.channel, fromEmail: call.callerEmail, grant: call.grantForCallee, ws: WS_URL, transport: call.transport, kind: call.kind } });
+    }
+
+    // CADS-webconference-demo#87/#88: accepts a batch of already-encrypted
+    // chatStore rows (appended, deduped by conversation+seq+from -- same
+    // dedupe key ChatStore.record()'s own received:true path already
+    // uses) and/or a contacts/blocked tombstone-entries delta (merged via
+    // mergeEntries, same rule as the client's own merge()). Any subset of
+    // {messages, contacts, blocked} may be present -- callers push what
+    // changed, not the whole state, keeping each call well under the
+    // existing MAX_BODY_BYTES cap (this endpoint intentionally does NOT
+    // get its own larger body limit -- see readBody's own #12 comment on
+    // why 64KB exists at all; a device with a large backlog just calls
+    // this multiple times).
+    if (req.method === 'POST' && url.pathname === '/api/sync/push') {
+      const { email, messages, contacts, blocked } = await readBody(req);
+      if (!email) return json(res, 400, { error: 'email required' });
+      if (!identityAllowed(req, email)) return json(res, 403, { error: 'email does not match your verified identity', code: 'identity_mismatch' });
+      const state = getSyncState(email.toLowerCase());
+      if (Array.isArray(messages)) {
+        for (const row of messages) {
+          if (!row || typeof row.conversation !== 'string' || typeof row.seq !== 'number' || (row.from !== 'me' && row.from !== 'peer')) continue;
+          const dup = state.messages.some((m) => m.conversation === row.conversation && m.seq === row.seq && m.from === row.from);
+          if (dup) continue;
+          state.messages.push({ ...row, rev: state.nextRevision++ });
+        }
+        const overflow = state.messages.length - MAX_SYNC_MESSAGES_PER_IDENTITY;
+        if (overflow > 0) state.messages.splice(0, overflow); // oldest-revision-first, same FIFO shape as #77's local cap
+      }
+      if (contacts && typeof contacts.entries === 'object') mergeEntries(state.contacts.entries, contacts.entries);
+      if (blocked && typeof blocked.entries === 'object') mergeEntries(state.blocked.entries, blocked.entries);
+      persistSyncStore();
+      return json(res, 200, { ok: true, revision: state.nextRevision - 1 });
+    }
+
+    // Pull everything this identity's sync state has past `since` (a
+    // revision number the caller remembers from its last pull/push
+    // response; 0 on a device's very first sync). One counter across every
+    // conversation -- see the syncStore comment for why -- so a single
+    // `since` value pages through all of them together; `contacts`/
+    // `blocked` are returned in full each time (their entries maps stay
+    // small, no pagination needed) for the caller to merge() locally.
+    if (req.method === 'GET' && url.pathname === '/api/sync/pull') {
+      const email = (url.searchParams.get('email') || '').toLowerCase();
+      if (!email) return json(res, 400, { error: 'email required' });
+      if (!identityAllowed(req, email)) return json(res, 403, { error: 'email does not match your verified identity', code: 'identity_mismatch' });
+      const since = Number(url.searchParams.get('since') || 0);
+      const state = getSyncState(email);
+      const SYNC_PULL_PAGE = 200; // keeps the response well under MAX_BODY_BYTES-scale concerns; caller pages via the returned nextSince
+      const rows = state.messages.filter((m) => m.rev > (Number.isFinite(since) ? since : 0)).slice(0, SYNC_PULL_PAGE);
+      const nextSince = rows.length ? rows[rows.length - 1].rev : since;
+      return json(res, 200, { messages: rows, nextSince, contacts: state.contacts, blocked: state.blocked });
+    }
+
+    // New device: publishes its ephemeral ECDH public key under a short
+    // code it displays to the user. Gate-verified when a session exists
+    // (identityAllowed), but ALSO reachable ungated -- this app supports a
+    // free-text/no-login identity mode (see identityAllowed's own comment)
+    // where there's no session to verify against at all, and the pairing
+    // CODE is the only proof of "same person, both devices" available in
+    // that mode. Overwrites any existing offer for the same code (a retry
+    // after a network blip shouldn't need a fresh code).
+    if (req.method === 'POST' && url.pathname === '/api/pair/offer') {
+      if (pairingRateLimited(clientIp(req))) return json(res, 429, { error: 'too many pairing attempts, try again later' });
+      prunePairingOffers();
+      const { email, code, tempPubKeyJwk } = await readBody(req);
+      if (!email || !EMAIL_RE.test(email.trim())) return json(res, 400, { error: 'a valid email is required' });
+      if (!code || !PAIRING_CODE_RE.test(code)) return json(res, 400, { error: 'invalid pairing code' });
+      if (!tempPubKeyJwk || typeof tempPubKeyJwk !== 'object') return json(res, 400, { error: 'tempPubKeyJwk required' });
+      if (!identityAllowed(req, email)) return json(res, 403, { error: 'email does not match your verified identity', code: 'identity_mismatch' });
+      pairingOffers.set(code, { email: email.toLowerCase(), tempPubKeyJwk, offeredAt: Date.now(), result: null });
+      return json(res, 200, { ok: true });
+    }
+
+    // Existing/already-paired device: user typed in the code shown on the
+    // new device. Fetches just enough to encrypt to it -- never the offer
+    // holder's email is NOT what authorizes this (the code itself is the
+    // only secret exchanged out-of-band); this only leaks the temp pubkey
+    // for a still-pending, not-yet-delivered offer, which is public key
+    // material by definition.
+    if (req.method === 'GET' && url.pathname === '/api/pair/lookup') {
+      prunePairingOffers();
+      const code = (url.searchParams.get('code') || '').toUpperCase();
+      const offer = pairingOffers.get(code);
+      if (!offer || offer.result) return json(res, 404, { error: 'no such pending pairing code' });
+      return json(res, 200, { tempPubKeyJwk: offer.tempPubKeyJwk });
+    }
+
+    // Existing/already-paired device: delivers the real identity, ECDH-
+    // encrypted to the new device's temp public key from /api/pair/lookup.
+    // This bridge stores oldDevicePubKeyJwk/iv/ciphertext opaquely -- it
+    // has neither ECDH private key, so it can't decrypt this any more than
+    // a relay hop on the ws_channel transport the account owner originally
+    // asked for could have. Single delivery per code (result set once,
+    // /api/pair/poll below consumes and deletes it) -- a second delivery
+    // attempt for an already-fulfilled code is rejected, not overwritten.
+    if (req.method === 'POST' && url.pathname === '/api/pair/deliver') {
+      if (pairingRateLimited(clientIp(req))) return json(res, 429, { error: 'too many pairing attempts, try again later' });
+      prunePairingOffers();
+      const { code: rawCode, oldDevicePubKeyJwk, iv, ciphertext } = await readBody(req);
+      const code = (rawCode || '').toUpperCase();
+      const offer = pairingOffers.get(code);
+      if (!offer) return json(res, 404, { error: 'no such pending pairing code' });
+      if (offer.result) return json(res, 409, { error: 'this pairing code was already used' });
+      // When gated, the delivering device's OWN verified email must match
+      // the offer's claimed email -- stops a gate-verified caller from
+      // delivering (encrypted, so not a confidentiality issue, but still a
+      // pointless-at-best action) into a pairing session for a different
+      // account than their own.
+      if (!identityAllowed(req, offer.email)) return json(res, 403, { error: 'email does not match your verified identity', code: 'identity_mismatch' });
+      if (!oldDevicePubKeyJwk || !iv || !ciphertext) return json(res, 400, { error: 'oldDevicePubKeyJwk, iv, ciphertext required' });
+      offer.result = { oldDevicePubKeyJwk, iv, ciphertext, deliveredAt: Date.now() };
+      return json(res, 200, { ok: true });
+    }
+
+    // New device: polls until the existing device has delivered. Consumes
+    // (deletes) the offer once returned -- single-use, so a stolen/guessed
+    // code can't be replayed after the legitimate new device already
+    // claimed it.
+    if (req.method === 'GET' && url.pathname === '/api/pair/poll') {
+      prunePairingOffers();
+      const code = (url.searchParams.get('code') || '').toUpperCase();
+      const offer = pairingOffers.get(code);
+      if (!offer || !offer.result) return json(res, 200, { ready: false });
+      pairingOffers.delete(code);
+      return json(res, 200, { ready: true, ...offer.result });
     }
 
     json(res, 404, { error: 'not found' });

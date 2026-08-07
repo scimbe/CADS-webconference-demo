@@ -631,4 +631,68 @@ export class ChatStore {
       tx.onerror = () => reject(tx.error);
     });
   }
+
+  // CADS-webconference-demo#87/#88: raw (still-encrypted) rows for a
+  // conversation past a given seq, for the cross-device sync push. Pending
+  // (not-yet-delivered) drafts are excluded -- a second device must never
+  // attempt to re-deliver an outgoing message the originating device
+  // hasn't actually sent yet; once it's genuinely sent, markDelivered()
+  // flips pending false and the next push picks it up normally.
+  async rowsSince(peerEmail, sinceSeq) {
+    const records = await this._recordsForConversation(peerEmail);
+    return records.filter((r) => r.seq > (sinceSeq || 0) && !r.pending);
+  }
+
+  // CADS-webconference-demo#87/#88: writes a row that arrived ALREADY
+  // ENCRYPTED from another of this SAME identity's own devices (the sync
+  // pull path) -- never re-encrypts, since the ciphertext is already valid
+  // under this identity's own key (only this identity's own paired
+  // devices ever hold it). Reuses the exact dedupe-by-(conversation,seq,
+  // from) check record()'s own `received` path already does, so a row
+  // synced twice (a retried pull, an overlapping sync tick) is a no-op,
+  // and the same prune + BroadcastChannel notify record() already does --
+  // a synced message shows up live in any other open tab exactly like one
+  // received over a live channel would. Returns null if it was already
+  // present (nothing new to show).
+  async mergeEncryptedRow(peerEmail, row) {
+    const conversation = conversationKey(this.identity.email, peerEmail);
+    const db = await this._getDb();
+    const existing = await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readonly');
+      const idx = tx.objectStore(STORE).index('byConversation');
+      const req = idx.getAll(IDBKeyRange.only([conversation, row.seq]));
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    if (existing.some((r) => r.from === row.from)) return null;
+    const record = {
+      conversation,
+      peerEmail: peerEmail.toLowerCase(),
+      seq: row.seq,
+      from: row.from,
+      ts: row.ts,
+      pending: false,
+      kind: row.kind || 'text',
+      iv: row.iv,
+      ciphertext: row.ciphertext,
+      ...(row.kind === 'file' ? { fileName: row.fileName, fileMimeType: row.fileMimeType, fileSize: row.fileSize } : {}),
+    };
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).add(record);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    await this._pruneConversation(db, conversation);
+    this.clock.observe(row.seq);
+    let decoded;
+    try {
+      decoded = await this._decodeRecord(record);
+    } catch {
+      decoded = { peerEmail: record.peerEmail, seq: record.seq, from: record.from, ts: record.ts, pending: false, kind: record.kind, text: '', corrupted: true };
+    }
+    this.channel.postMessage(decoded);
+    this._notify(decoded);
+    return decoded;
+  }
 }
