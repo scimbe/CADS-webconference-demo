@@ -3037,6 +3037,27 @@ const TAG_BYE = 4;
 // end exactly like TAG_MEDIA_CHUNK already is.
 const TAG_FILE_INIT = 5;
 const TAG_FILE_CHUNK = 6;
+// CADS-webconference-demo (live-reported): attemptChannelFallback below
+// decides to switch to the direct-channel transport based purely on THIS
+// side's own pc.connectionState -- with no way for the peer to find out.
+// On an asymmetric ICE failure (only one side's path actually breaks,
+// common on a flaky mobile link -- the other side's connectionState can
+// stay 'connected' the whole time) that left the two sides speaking two
+// totally incompatible wire formats over the same shared Noise channel:
+// the webrtc side kept sending wasm.decodeSignalMessage-encoded SDP/ICE/bye
+// frames, while the fallen-back side was reading raw TAG_* bytes. A real
+// SignalMessage's first byte is never expected to equal a live TAG_*
+// value, so those frames were just silently swallowed by the fallen-back
+// side's tag dispatch (no matching `if`, no error) instead of erroring --
+// meaning a peer that had already fallen back never saw remote video AND
+// never even saw the other side's eventual 'bye' (only noticed the peer
+// was gone once the socket itself closed, well after the ICE_RESTART_GRACE_MS
+// + CHANNEL_RECONNECT_GRACE_MS timeouts had to run their course). This one
+// raw byte -- checked before wasm.decodeSignalMessage is even called, so it
+// never needs to understand this tag -- is sent by whichever side decides
+// to fall back, BEFORE it tears down its own pc, so the peer switches into
+// channel mode in lockstep instead of being left behind on the old protocol.
+const TAG_FALLBACK = 7;
 // 25MB: a well-known, widely-recognized web-app attachment ceiling (the
 // same order of magnitude as Gmail's own long-standing attachment limit) --
 // generous for a real file/image/document, small enough that a chunked
@@ -3734,7 +3755,13 @@ async function run() {
   // after the fallback itself is already running ends the call for real via
   // endCallDueToPeerLoss, same as before this fix existed.
   let channelFallbackAttempted = false;
-  function attemptChannelFallback(reason) {
+  // peerInitiated=true means this side is reacting to the OTHER side's own
+  // TAG_FALLBACK notification (see that constant's comment) -- skip sending
+  // our own notification back in that case, both to avoid a pointless echo
+  // and because sendSignal below assumes pc/the webrtc signaling path is
+  // still the thing in charge of this channel, which is no longer true once
+  // the peer has already announced its own switch.
+  function attemptChannelFallback(reason, peerInitiated = false) {
     if (channelFallbackAttempted) {
       endCallDueToPeerLoss(`${reason} (channel fallback already attempted this call)`);
       return;
@@ -3749,6 +3776,17 @@ async function run() {
     log(`${reason} -- WebRTC never established a working connection, falling back to the direct-channel transport`);
     addChatMessage('WebRTC connection failed -- falling back to a direct relay…', 'system');
     setStatus('connecting-media');
+    // Tell the peer BEFORE tearing down pc, so it switches into channel
+    // mode in lockstep instead of being left speaking the old wasm signal
+    // protocol into a channel we're about to start reading raw TAG_* bytes
+    // from (see TAG_FALLBACK's own comment for the failure this prevents).
+    if (!peerInitiated) {
+      try {
+        sendSignal(new Uint8Array([TAG_FALLBACK]));
+      } catch (e) {
+        log(`failed to notify peer of channel fallback: ${e.message || e}`);
+      }
+    }
     pc.close();
     activeWebrtcPc = null;
     // Release the pc-bound camera/mic tracks -- runChannelMediaCall acquires
@@ -3970,6 +4008,14 @@ async function run() {
       // channel can't be trusted to keep making sense.
       try {
         const plain = noiseTransport.decrypt(cipher);
+        // Checked before wasm.decodeSignalMessage even runs -- see
+        // TAG_FALLBACK's own comment. A real SDP/ICE/bye SignalMessage is
+        // never a single byte, so this can't collide with a genuine one.
+        if (plain.length === 1 && plain[0] === TAG_FALLBACK) {
+          if (disconnectedGraceTimer) { clearTimeout(disconnectedGraceTimer); disconnectedGraceTimer = null; }
+          attemptChannelFallback('peer switched to the direct-channel transport', true);
+          return;
+        }
         const msg = wasm.decodeSignalMessage(plain);
         if (msg.kind === 'offer') {
           await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
