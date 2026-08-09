@@ -15,3 +15,7 @@ COPY chatStore.js /srv/chatStore.js
 COPY request-access.html /srv/request-access.html
 COPY request-access.js /srv/request-access.js
 COPY pkg /srv/pkg
+# Vendored (not built) -- see vendor/face-api/README.md for provenance/license/
+# pin. Optional video-filter feature, lazy-loaded by app.js only when a user
+# enables it.
+COPY vendor /srv/vendor

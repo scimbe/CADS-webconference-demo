@@ -653,6 +653,11 @@
           <button class="ctl" id="btn-mic" type="button" aria-label="Mute"><span class="ctl-icon">🎤</span><span class="ctl-label">Mute</span></button>
           <button class="ctl" id="btn-cam" type="button" aria-label="Camera off"><span class="ctl-icon">📷</span><span class="ctl-label">Camera off</span></button>
           <button class="ctl" id="btn-switch-camera" type="button" aria-label="Switch camera" hidden><span class="ctl-icon">🔄</span><span class="ctl-label">Switch camera</span></button>
+          <!-- Live-requested video filters, especially for kids -- see the
+               matching app.js comment for the design (face-api.js tiny models,
+               vendored under /vendor/face-api, lazy-loaded only on first click).
+               Off by default; each click cycles off -> bunny -> sparkle -> off. -->
+          <button class="ctl" id="btn-video-filters" type="button" aria-label="Video filters: off"><span class="ctl-icon">🎭</span><span class="ctl-label">Filters</span></button>
           <button class="ctl hangup" id="btn-hangup" type="button" aria-label="Hang up"><span class="ctl-icon">📞</span><span class="ctl-label">Hang up</span></button>
         </div>
 
