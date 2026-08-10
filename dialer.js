@@ -78,49 +78,65 @@ async function runDialer(identity, { verified = false } = {}) {
     ev.preventDefault();
     const toEmail = dialEmailInput.value.trim();
     if (!toEmail) return;
-    setCallNote('info', `Calling ${toEmail}…`);
-    const transport = transportChannelCheckbox.checked ? 'channel' : 'webrtc';
-    const resp = await api('/call', { body: { fromEmail: identity.email, toEmail, transport } });
-    if (resp.status === 'offline') {
-      setCallNote('warn', `${toEmail} isn't online right now.`);
-      return;
+    // Robustness audit finding (proactive review, not yet live-reproduced):
+    // nothing stopped a rapid double-submit (double-click, or Enter then a
+    // click landing before the first attempt's own network round-trip
+    // returns) from firing this whole async handler twice concurrently --
+    // two independent /api/call attempts to the same recipient, each with
+    // its own channel, potentially ringing them twice. Disabling the submit
+    // button for the duration of one attempt (re-enabled in every exit
+    // path via finally, including the success path -- harmless there since
+    // startCallFromIdentity navigates away regardless) closes that window
+    // the same way a normal "submitting..." button-disable pattern would.
+    const submitBtn = dialForm.querySelector('button[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      setCallNote('info', `Calling ${toEmail}…`);
+      const transport = transportChannelCheckbox.checked ? 'channel' : 'webrtc';
+      const resp = await api('/call', { body: { fromEmail: identity.email, toEmail, transport } });
+      if (resp.status === 'offline') {
+        setCallNote('warn', `${toEmail} isn't online right now.`);
+        return;
+      }
+      if (resp.error) {
+        setCallNote('warn', resp.error);
+        return;
+      }
+      const attestation = computeAttestation(resp.channel, identity.holderPriv, identity.holderPub, identity.noisePub);
+      const attestResp = await api('/attest', {
+        body: { channel: resp.channel, role: 'caller', holderPub: identity.holderPub, noisePub: identity.noisePub, attestation },
+      });
+      if (attestResp.error) {
+        setCallNote('warn', `Couldn't reach ${toEmail}: ${attestResp.error}`);
+        return;
+      }
+      if (attestResp.status?.state === 'accepted_and_registered') {
+        startCallFromIdentity(identity, { role: 'caller', channel: resp.channel, grant: resp.grant, ws: resp.ws, transport: resp.transport, peerEmail: toEmail });
+        return;
+      }
+      setCallNote('info', `Ringing ${toEmail}… waiting for them to accept.`);
+      setOutgoingChannel(resp.channel);
+      btnCancelCall.hidden = false;
+      await pollCallStatus(resp.channel, {
+        timeoutMs: 60000, // a real ringing phase -- give the callee time to actually notice and answer
+        shouldAbort: () => outgoingChannel !== resp.channel,
+        onDone: (ok, status) => {
+          btnCancelCall.hidden = true;
+          setOutgoingChannel(null);
+          if (ok) {
+            startCallFromIdentity(identity, { role: 'caller', channel: resp.channel, grant: resp.grant, ws: resp.ws, transport: resp.transport, peerEmail: toEmail });
+          } else if (status.state === 'pending_core_credential') {
+            setCallNote('warn', `Couldn't complete channel registration: ${status.detail || 'unknown reason'}`);
+          } else if (status.state === 'declined') {
+            setCallNote('warn', `${toEmail} declined the call.`);
+          } else {
+            setCallNote('warn', `${toEmail} didn't answer.`);
+          }
+        },
+      });
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
     }
-    if (resp.error) {
-      setCallNote('warn', resp.error);
-      return;
-    }
-    const attestation = computeAttestation(resp.channel, identity.holderPriv, identity.holderPub, identity.noisePub);
-    const attestResp = await api('/attest', {
-      body: { channel: resp.channel, role: 'caller', holderPub: identity.holderPub, noisePub: identity.noisePub, attestation },
-    });
-    if (attestResp.error) {
-      setCallNote('warn', `Couldn't reach ${toEmail}: ${attestResp.error}`);
-      return;
-    }
-    if (attestResp.status?.state === 'accepted_and_registered') {
-      startCallFromIdentity(identity, { role: 'caller', channel: resp.channel, grant: resp.grant, ws: resp.ws, transport: resp.transport, peerEmail: toEmail });
-      return;
-    }
-    setCallNote('info', `Ringing ${toEmail}… waiting for them to accept.`);
-    setOutgoingChannel(resp.channel);
-    btnCancelCall.hidden = false;
-    await pollCallStatus(resp.channel, {
-      timeoutMs: 60000, // a real ringing phase -- give the callee time to actually notice and answer
-      shouldAbort: () => outgoingChannel !== resp.channel,
-      onDone: (ok, status) => {
-        btnCancelCall.hidden = true;
-        setOutgoingChannel(null);
-        if (ok) {
-          startCallFromIdentity(identity, { role: 'caller', channel: resp.channel, grant: resp.grant, ws: resp.ws, transport: resp.transport, peerEmail: toEmail });
-        } else if (status.state === 'pending_core_credential') {
-          setCallNote('warn', `Couldn't complete channel registration: ${status.detail || 'unknown reason'}`);
-        } else if (status.state === 'declined') {
-          setCallNote('warn', `${toEmail} declined the call.`);
-        } else {
-          setCallNote('warn', `${toEmail} didn't answer.`);
-        }
-      },
-    });
   });
 
   btnCancelCall.addEventListener('click', () => {
