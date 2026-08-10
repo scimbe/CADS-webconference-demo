@@ -26,32 +26,23 @@ import {
   MAX_FILE_BYTES,
 } from './call-protocol.js';
 import {
-  setupScreen, callScreen, statusEl, iceEl, logEl, statusPill,
-  statusText, localVideo, remoteVideo, localEmpty, remoteEmpty, btnMic, btnCam, btnHangup,
-  chatLog, routeYou, routeSignal, routePeer,
-  connectingBanner, connectingBannerText,
+  setupScreen, callScreen, btnMic, btnCam, btnHangup,
+  routeYou, routeSignal,
   idEntry, idVerifyError, idVerifyErrorDetail, idVerifyRetry,
-  dialForm, callNote, logoutLink, contactsList, contactsEmpty,
+  dialForm, logoutLink, contactsList,
   accessRemoveForm, accessRemoveEmail, accessNote, accessRemoveConsoleLink,
-  accessRequestsBadge, accessRequestsList, accessRequestsEmpty,
   videoGrid, localTile, btnSwitchCamera, btnVideoFilters, msgMenuToggle,
-  msgMenu, msgSearchForm, msgSearchInput, msgConvPlaceholder, msgConversation, msgBackBtn,
+  msgMenu, msgSearchForm, msgSearchInput, msgBackBtn,
   msgCallBtn, msgBlockBtn, msgComposeForm, msgComposeInput, msgAttachBtn, msgAttachInput,
-  convAvatar, convName, convRenameBtn, convStatus, convMessages, onlyContactsToggle,
-  blockedList, blockedEmpty, tabChats, tabRequests, requestsBadge, requestsList, requestsEmpty,
+  convName, convRenameBtn, onlyContactsToggle,
+  tabChats, tabRequests, requestsList,
   sanitizeErrorMessage, isValidEmail,
-  playMessageSound, log, setStatus, setIceState, showConnecting,
-  hideConnecting, addChatMessage, setCtlLabel, showSetupScreen, showCallScreen,
+  log, setStatus, showConnecting,
+  hideConnecting, setCtlLabel, showSetupScreen, showCallScreen,
 } from './ui-dom.js';
 import {
-  hexToBytes,
-  bytesToHex,
-  concatBytes,
-  memberNoiseAttestBytes,
   forgetIdentityKeys,
-  storageKeyFor,
   loadOrCreateIdentity,
-  identityCreatedAt,
 } from './identity.js';
 import {
   pairingKeyPair,
@@ -59,21 +50,17 @@ import {
   pairingEncrypt,
 } from './pairing.js';
 import {
-  WsByteStream,
   writeFramed,
   readFramed,
-  readChallengeOrRefusal,
   joinChannel,
 } from './call-transport-shared.js';
 import { keycloakAdminConsoleLink } from './access-requests.js';
 import {
-  formatMsgTime,
   renderBlockedList,
   currentConversationEmail,
   openConversation,
   formatFileSize,
   appendConvMessage,
-  markConvMessageDelivered,
   closeConversation,
 } from './messenger-ui.js';
 import {
@@ -87,7 +74,6 @@ import { runChannelMediaCall } from './call-channel.js';
 import { runWebrtcMediaCall } from './call-webrtc.js';
 import {
   setCallNote,
-  noteApiResult,
   api,
   startCallFromIdentity,
   myContacts,
@@ -97,9 +83,6 @@ import {
   myEmail,
   myIdentity,
   refreshContacts,
-  doRefreshContacts,
-  renderContacts,
-  apiConsecutiveFailures,
   setOnlyAcceptFromContacts,
 } from './contacts.js';
 
