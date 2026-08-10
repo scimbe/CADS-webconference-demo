@@ -52,6 +52,18 @@ import {
   playIncomingCallSound, playMessageSound, log, setStatus, setIceState, showConnecting,
   hideConnecting, addChatMessage, setCtlLabel, showSetupScreen, showCallScreen,
 } from './ui-dom.js';
+import {
+  hexToBytes,
+  bytesToHex,
+  concatBytes,
+  memberNoiseAttestBytes,
+  computeAttestation,
+  forgetIdentityKeys,
+  storageKeyFor,
+  loadOrCreateIdentity,
+  identityCreatedAt,
+  ensureWasmInit,
+} from './identity.js';
 
 // A byte-stream reader over a browser WebSocket's inbound binary messages --
 // concatenates every inbound message into one buffer and serves however many
@@ -738,11 +750,6 @@ async function flushOutbox(chatStore, peerEmail, send, ackWaiter, onDelivered, s
 // receiver" asymmetry once the channel is up, only caller-vs-callee for
 // the Noise handshake's own initiator/responder roles.
 
-let wasmInitPromise = null;
-function ensureWasmInit() {
-  return wasmInitPromise || (wasmInitPromise = init('./pkg/ct_agent_wasm_bg.wasm'));
-}
-
 // How long a background session keeps listening for a reply after sending
 // its own outbox -- bounded so an idle WS doesn't linger forever holding a
 // channel open. Generous enough to comfortably cover the peer's own
@@ -1212,46 +1219,6 @@ function returnToDialerAfterHangup(delayMs = 1200) {
 // attestation (matching ct_common::channel::member_noise_attest_bytes byte
 // for byte), and talks to the bridge only in public keys / signatures.
 
-// CADS-webconference-demo#40 (finding 2): used to silently truncate an
-// odd-length input (new Uint8Array(hex.length / 2) floors) and never
-// validated the characters -- parseInt('zz', 16) is NaN, silently baked
-// into the output as byte 0. A malformed hex string produced a different,
-// but still valid-looking, byte sequence instead of an error pointing at
-// the actual problem.
-function hexToBytes(hex) {
-  if (typeof hex !== 'string' || hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
-    throw new Error(`hexToBytes: not a valid even-length hex string (got ${JSON.stringify(hex)})`);
-  }
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
-  return out;
-}
-function bytesToHex(bytes) {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-function concatBytes(...arrs) {
-  const total = arrs.reduce((n, a) => n + a.length, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const a of arrs) {
-    out.set(a, off);
-    off += a.length;
-  }
-  return out;
-}
-// Preimage::new(domain).fixed(channel).fixed(holder).fixed(noise_pubkey) --
-// u32-LE(domain.len()) || domain || channel(32) || holder(32) || noise_pubkey(32).
-function memberNoiseAttestBytes(channelHex, holderHex, noisePubHex) {
-  const domain = new TextEncoder().encode('ct-a2a-noise-attest-v1');
-  const lenPrefix = new Uint8Array(4);
-  new DataView(lenPrefix.buffer).setUint32(0, domain.length, true);
-  return concatBytes(lenPrefix, domain, hexToBytes(channelHex), hexToBytes(holderHex), hexToBytes(noisePubHex));
-}
-function computeAttestation(channelHex, holderPrivHex, holderPubHex, noisePubHex) {
-  const preimage = memberNoiseAttestBytes(channelHex, holderPubHex, noisePubHex);
-  return bytesToHex(wasm.holderSign(holderPrivHex, preimage));
-}
-
 // A real account switch needs BOTH halves cleared -- confirmed live (2026-08-03):
 // /gate/logout alone clears ct_gate_session, but the gate's own check silently
 // re-mints a fresh one from the still-active Keycloak SSO session with no
@@ -1271,21 +1238,6 @@ function computeAttestation(channelHex, holderPrivHex, holderPubHex, noisePubHex
 // whoever else's identity happened to be sitting in this browser -- their
 // encrypted IndexedDB history survives, but its keying material
 // (holderPriv) doesn't, so it becomes permanently undecryptable.
-// CADS-webconference-demo#42: factored out of the logout handler so the
-// same "purge this identity's keys" action is available on its own (Forget
-// this identity, and hangup's forget prompt) without also ending the
-// Keycloak/gate session the way logout does.
-function forgetIdentityKeys(email) {
-  if (email) {
-    const suffix = `:${email.toLowerCase()}`;
-    for (const key of Object.keys(localStorage)) {
-      if (key.startsWith('ct-webconference-') && key.endsWith(suffix)) localStorage.removeItem(key);
-    }
-  } else {
-    localStorage.clear(); // no identity was ever established this session -- nothing identity-scoped to preserve
-  }
-}
-
 logoutLink.addEventListener('click', async (ev) => {
   ev.preventDefault();
   // A third piece, found by testing the full flow end-to-end: even once
@@ -1323,59 +1275,6 @@ document.getElementById('forget-identity-btn')?.addEventListener('click', () => 
 // registered), cleared once it resolves either way. Lets the Cancel button
 // (added alongside /api/cancel) abort pollCallStatus's wait from the outside.
 let outgoingChannel = null;
-
-function storageKeyFor(email) {
-  return `ct-webconference-identity:${email.toLowerCase()}`;
-}
-
-// CADS-webconference-demo#42: run()'s #13-era key recovery (myEmail ->
-// localStorage) needs to tell "no identity here yet" apart from "found the
-// existing one" -- silently minting a FRESH identity in that case (this
-// function's normal, correct behavior for the real registration/login path)
-// would hand run() keys that don't match what the grant/attestation was
-// actually issued for, producing an opaque join failure instead of an
-// honest "this browser/profile doesn't have it" error. requireExisting is
-// only ever passed true from that one call site.
-function loadOrCreateIdentity(email, { requireExisting = false } = {}) {
-  const key = storageKeyFor(email);
-  const existing = localStorage.getItem(key);
-  if (existing) return JSON.parse(existing);
-  if (requireExisting) {
-    throw new Error(`no local identity found for ${email} -- this call link only works in the same browser profile that placed or accepted it`);
-  }
-  const holder = wasm.generate_holder_identity();
-  const noise = wasm.generate_noise_identity();
-  const identity = {
-    email,
-    holderPub: holder.public_hex,
-    holderPriv: holder.private_hex,
-    noisePub: noise.public_hex,
-    noisePriv: noise.private_hex,
-    // CADS-webconference-demo#87: bully-style tie-break input for device
-    // pairing -- when two browsers have independently minted DIFFERENT
-    // keys under the same email (today's status quo whenever no local
-    // identity exists yet), the older key wins and the newer one is
-    // discarded in favor of it. Self-reported and not attested -- fine
-    // here because pairing is a same-person, same-account action, not an
-    // adversarial one; see identityCreatedAt()'s own comment for how a
-    // pre-existing identity from before this field existed is treated.
-    createdAt: Date.now(),
-  };
-  localStorage.setItem(key, JSON.stringify(identity));
-  return identity;
-}
-
-// A real identity that predates this field (createdAt was added in #87)
-// has no createdAt at all -- treat that as "older than anything," never 0
-// (0 would tie-break AGAINST a genuinely ancient real identity if some
-// other identity's createdAt were also missing/0). Number.NEGATIVE_INFINITY
-// guarantees an identity that existed before this feature shipped always
-// wins a pairing tie-break against a freshly-generated one, which is the
-// only direction that can't silently discard someone's real, pre-existing
-// account.
-function identityCreatedAt(identity) {
-  return typeof identity.createdAt === 'number' ? identity.createdAt : Number.NEGATIVE_INFINITY;
-}
 
 // ============ Device pairing (#87) ============
 // Honest scoping note (also in the #87 completion comment): the account
