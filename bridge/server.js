@@ -245,6 +245,33 @@ function getSyncState(email) {
   }
   return state;
 }
+
+// CADS-webconference-demo#87: a single message row's ciphertext (JSON-
+// array-encoded, ~3.5-4x the raw bytes -- see sync.js's own comment) can
+// exceed MAX_BODY_BYTES on its own for a real file/image attachment, even
+// after batching multiple SMALL rows together (#87's first fix). The
+// client now splits an oversized row's ciphertext into fixed-size chunks
+// (sync.js's SYNC_CIPHERTEXT_CHUNK_BYTES) sent as separate /sync/push
+// calls; this reassembles them here, in memory only -- deliberately NOT
+// part of `syncStore`/persistSyncStore, since a partial (possibly
+// abandoned) upload is exactly the kind of transient state that has no
+// business surviving a restart or bloating the on-disk store.
+// Key: `${email}:${conversation}:${seq}:${from}` -- flat rather than
+// nested per-email, since that's the only granularity anything here
+// actually needs.
+const pendingChunkedMessages = new Map();
+// Same FIFO-eviction reasoning as MAX_SYNC_MESSAGES_PER_IDENTITY above --
+// an identity that starts (chunkIndex 0) many large uploads and never
+// finishes any of them (abandoned tab, crashed device) would otherwise
+// leak one in-memory buffer per abandoned upload forever. A fresh
+// chunkIndex 0 for the same key always resets/reclaims its own slot (a
+// legitimate retry-from-scratch), so this only bounds truly distinct,
+// still-incomplete uploads.
+const MAX_PENDING_CHUNKED_UPLOADS_PER_IDENTITY = 20;
+function pendingChunkKeysFor(email) {
+  const prefix = `${email}:`;
+  return [...pendingChunkedMessages.keys()].filter((k) => k.startsWith(prefix));
+}
 // Last-write-wins merge, identical rule to app.js's localSetFor.merge() --
 // the server has to converge on the SAME result the client would reach
 // merging the same two states, or a client that trusts the server's
@@ -1221,12 +1248,45 @@ const server = http.createServer(async (req, res) => {
       const { email, messages, contacts, blocked } = await readBody(req);
       if (!email) return json(res, 400, { error: 'email required' });
       if (!identityAllowed(req, email)) return json(res, 403, { error: 'email does not match your verified identity', code: 'identity_mismatch' });
-      const state = getSyncState(email.toLowerCase());
+      const emailKey = email.toLowerCase();
+      const state = getSyncState(emailKey);
       if (Array.isArray(messages)) {
         for (const row of messages) {
           if (!row || typeof row.conversation !== 'string' || typeof row.seq !== 'number' || (row.from !== 'me' && row.from !== 'peer')) continue;
           const dup = state.messages.some((m) => m.conversation === row.conversation && m.seq === row.seq && m.from === row.from);
           if (dup) continue;
+          // CADS-webconference-demo#87: a chunked row carries chunkIndex/
+          // chunkCount + this chunk's own ciphertextChunk slice instead of
+          // a complete ciphertext -- reassembled across however many
+          // /sync/push calls it takes before landing in state.messages
+          // exactly like a normal (small, single-request) row does.
+          if (typeof row.chunkIndex === 'number' && typeof row.chunkCount === 'number' && row.chunkCount > 0) {
+            const chunkKey = `${emailKey}:${row.conversation}:${row.seq}:${row.from}`;
+            let pending = pendingChunkedMessages.get(chunkKey);
+            if (row.chunkIndex === 0) {
+              // Fresh start (or a retry-from-scratch after an earlier
+              // attempt failed partway) -- always (re)initializes, never
+              // appends onto a stale prior attempt's parts.
+              const keys = pendingChunkKeysFor(emailKey);
+              if (!pending && keys.length >= MAX_PENDING_CHUNKED_UPLOADS_PER_IDENTITY) {
+                pendingChunkedMessages.delete(keys[0]); // oldest-first, same FIFO shape as MAX_SYNC_MESSAGES_PER_IDENTITY above
+              }
+              pending = {
+                parts: new Array(row.chunkCount),
+                received: 0,
+                meta: { conversation: row.conversation, seq: row.seq, from: row.from, ts: row.ts, kind: row.kind, iv: row.iv, fileName: row.fileName, fileMimeType: row.fileMimeType, fileSize: row.fileSize },
+              };
+              pendingChunkedMessages.set(chunkKey, pending);
+            }
+            if (!pending || row.chunkCount !== pending.parts.length || row.chunkIndex >= pending.parts.length) continue; // no chunk 0 seen yet, or an inconsistent resend -- drop, client will retry from scratch
+            if (pending.parts[row.chunkIndex] === undefined) pending.received++;
+            pending.parts[row.chunkIndex] = Array.isArray(row.ciphertextChunk) ? row.ciphertextChunk : [];
+            if (pending.received < pending.parts.length) continue; // still waiting on more chunks
+            const ciphertext = pending.parts.flat();
+            pendingChunkedMessages.delete(chunkKey);
+            state.messages.push({ ...pending.meta, ciphertext, rev: state.nextRevision++ });
+            continue;
+          }
           state.messages.push({ ...row, rev: state.nextRevision++ });
         }
         const overflow = state.messages.length - MAX_SYNC_MESSAGES_PER_IDENTITY;

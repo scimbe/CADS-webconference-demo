@@ -77,6 +77,44 @@ async function doSyncNow() {
   // its own push, with the cursor advanced per successful batch so a
   // later failure doesn't lose progress already made on earlier ones.
   const SYNC_PUSH_BATCH_BUDGET_BYTES = 32768; // half of MAX_BODY_BYTES -- headroom for the email field + JSON structure + this being a length-based estimate, not an exact byte count
+  // CADS-webconference-demo#87 follow-up (live-reported): batching (above)
+  // only helps when the PROBLEM is many small rows bundled together --
+  // a single row whose own ciphertext already exceeds the batch budget
+  // (a real file/image attachment; JSON-array encoding runs ~3.5-4x the
+  // raw bytes) still 413'd on its own no matter how it was batched.
+  // pushChunkedRow splits that one row's ciphertext into fixed-size
+  // chunks, each sent as ITS OWN /sync/push call (mirrors the existing
+  // direct-channel transport's own FILE_CHUNK_BYTES chunking, call-
+  // protocol.js) -- the bridge reassembles them (see its own
+  // pendingChunkedMessages comment) before the row ever lands in synced
+  // state. 6144 raw bytes -> ~22KB of JSON-array-encoded chunk content
+  // (worst case ~3.57 chars/byte), comfortably under the batch budget
+  // with room for the envelope fields alongside it.
+  const SYNC_CIPHERTEXT_CHUNK_BYTES = 6144;
+  async function pushChunkedRow(r) {
+    const chunkCount = Math.max(1, Math.ceil(r.ciphertext.length / SYNC_CIPHERTEXT_CHUNK_BYTES));
+    for (let i = 0; i < chunkCount; i++) {
+      const chunk = {
+        conversation: r.conversation,
+        seq: r.seq,
+        from: r.from,
+        ts: r.ts,
+        kind: r.kind,
+        iv: r.iv,
+        chunkIndex: i,
+        chunkCount,
+        ciphertextChunk: r.ciphertext.slice(i * SYNC_CIPHERTEXT_CHUNK_BYTES, (i + 1) * SYNC_CIPHERTEXT_CHUNK_BYTES),
+        ...(r.kind === 'file' ? { fileName: r.fileName, fileMimeType: r.fileMimeType, fileSize: r.fileSize } : {}),
+      };
+      const resp = await api('/sync/push', { body: { email: myEmail, messages: [chunk] } });
+      // A failure partway through (network blip, server restart) leaves an
+      // incomplete buffer server-side -- harmless: the very next attempt
+      // starts again at chunkIndex 0, which the bridge treats as a clean
+      // reset for this row's key, not an append onto the stale partial.
+      if (resp.error) return false;
+    }
+    return true;
+  }
   for (const peerEmail of myContacts.all()) {
     const sinceSeq = cursor.pushedSeq[peerEmail] || 0;
     const rows = await dialerChatStore.rowsSince(peerEmail, sinceSeq);
@@ -93,6 +131,7 @@ async function doSyncNow() {
       batchBytes = 0;
       return true;
     };
+    let stopped = false;
     for (const r of rows) {
       const msg = {
         conversation: r.conversation,
@@ -105,13 +144,19 @@ async function doSyncNow() {
         ...(r.kind === 'file' ? { fileName: r.fileName, fileMimeType: r.fileMimeType, fileSize: r.fileSize } : {}),
       };
       const msgBytes = JSON.stringify(msg).length;
+      if (msgBytes > SYNC_PUSH_BATCH_BUDGET_BYTES) {
+        if (!(await flushBatch())) { stopped = true; break; }
+        if (!(await pushChunkedRow(r))) { stopped = true; break; }
+        pushedThrough = Math.max(pushedThrough, r.seq);
+        continue;
+      }
       if (batch.length && batchBytes + msgBytes > SYNC_PUSH_BATCH_BUDGET_BYTES) {
-        if (!(await flushBatch())) break;
+        if (!(await flushBatch())) { stopped = true; break; }
       }
       batch.push(msg);
       batchBytes += msgBytes;
     }
-    await flushBatch();
+    if (!stopped) await flushBatch();
     cursor.pushedSeq[peerEmail] = pushedThrough;
   }
   await api('/sync/push', {
