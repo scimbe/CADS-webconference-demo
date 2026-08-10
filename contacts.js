@@ -12,15 +12,14 @@
 // myNames/api/refreshContacts (here) -- same safe live-binding/hoisted-
 // function reasoning as every other circular import in this consolidation
 // (see pairing.js's header comment for the full explanation). dialerChatStore
-// stays in app.js for now (moves in the later chat-glue.js cycle), so it's
-// still imported from there, not from here.
+// comes from chat-glue.js, its permanent home as of that consolidation cycle.
 
 import {
   callNote, contactsList, contactsEmpty, requestsList, requestsEmpty, requestsBadge,
   dialForm, convStatus, log,
 } from './ui-dom.js';
 import { formatMsgTime, openConversation, closeConversation, currentConversationEmail } from './messenger-ui.js';
-import { dialerChatStore } from './app.js';
+import { dialerChatStore } from './chat-glue.js';
 
 function setCallNote(kind, text) {
   callNote.className = kind ? `call-note ${kind}` : '';

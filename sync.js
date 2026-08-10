@@ -14,15 +14,15 @@
 // Split out of app.js as part of the client-code consolidation
 // (CADS-webconference-demo#91); every function/const here is a verbatim
 // move, comments included, with no behavior change. myEmail/myContacts/
-// blockedEmails/api/refreshContacts now come from contacts.js (their
-// permanent home as of that consolidation cycle) -- dialerChatStore is
-// still imported from app.js, since it hasn't moved yet (chat-glue.js, a
-// later cycle) -- see contacts.js's own header comment for why these
-// particular cross-module reads are safe (live bindings/hoisted functions
-// only ever touched at runtime, well after every module has evaluated).
+// blockedEmails/api/refreshContacts come from contacts.js, dialerChatStore
+// from chat-glue.js (each module's permanent home as of its own
+// consolidation cycle) -- see contacts.js's own header comment for why
+// these particular cross-module reads are safe (live bindings/hoisted
+// functions only ever touched at runtime, well after every module has
+// evaluated).
 
 import { myEmail, myContacts, blockedEmails, api, refreshContacts } from './contacts.js';
-import { dialerChatStore } from './app.js';
+import { dialerChatStore } from './chat-glue.js';
 
 function syncCursorKeyFor(email) {
   return `ct-webconference-sync-cursor:${email.toLowerCase()}`;

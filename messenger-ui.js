@@ -8,15 +8,15 @@
 //
 // Circular with contacts.js, on purpose -- see that module's own header
 // comment for the full reasoning (same safe live-binding/hoisted-function
-// pattern as everywhere else in this consolidation). dialerChatStore still
-// comes from app.js (hasn't moved yet -- chat-glue.js, a later cycle).
+// pattern as everywhere else in this consolidation). dialerChatStore comes
+// from chat-glue.js, its permanent home as of that consolidation cycle.
 
 import {
   blockedList, blockedEmpty, dialEmailInput, msgConvPlaceholder, msgConversation,
   messengerShell, convAvatar, convName, convStatus, convMessages,
 } from './ui-dom.js';
 import { blockedEmails, myContacts, myNames, api, refreshContacts } from './contacts.js';
-import { dialerChatStore } from './app.js';
+import { dialerChatStore } from './chat-glue.js';
 
 function formatMsgTime(ts) {
   const d = new Date(ts);

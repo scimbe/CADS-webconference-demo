@@ -20,6 +20,7 @@ COPY sync.js /srv/sync.js
 COPY access-requests.js /srv/access-requests.js
 COPY messenger-ui.js /srv/messenger-ui.js
 COPY contacts.js /srv/contacts.js
+COPY chat-glue.js /srv/chat-glue.js
 COPY chatStore.js /srv/chatStore.js
 COPY request-access.html /srv/request-access.html
 COPY request-access.js /srv/request-access.js
