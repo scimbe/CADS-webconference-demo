@@ -5,6 +5,11 @@
 // reasoning as that page's own header comment.
 const form = document.getElementById('request-form');
 const note = document.getElementById('note');
+// Live-reported: the landing page's gate-required panel now links here with
+// ?email=... pre-filled (the person already typed it once, no reason to ask
+// again) -- same #api/access-requests POST below, just skips retyping.
+const prefillEmail = new URLSearchParams(location.search).get('email');
+if (prefillEmail) document.getElementById('request-email').value = prefillEmail;
 form.addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const email = document.getElementById('request-email').value.trim();

@@ -21,7 +21,7 @@ import {
   btnAccept, btnDecline, btnCancelCall, transportChannelCheckbox, onlyContactsToggle,
   log, notifyIfHidden, playIncomingCallSound, isValidEmail, ensureNotificationPermission,
   showSetupScreen, idEntry, idForm, idEmailInput, idVerifyError, idVerifyErrorDetail, idVerifyRetry,
-  idGateRequired, idGateLoginBtn,
+  idGateRequired, idGateLoginBtn, idGateRegisterForm, idGateRegisterEmail,
 } from './ui-dom.js';
 import { computeAttestation } from './identity.js';
 import { loadOrPairIdentity } from './pairing.js';
@@ -577,6 +577,16 @@ async function runIdentityScreen() {
     idGateRequired.hidden = false;
     idGateLoginBtn.onclick = () => {
       location.href = `https://bunsenbrenner.org/gate/start?host=${encodeURIComponent(location.host)}&return=${encodeURIComponent(location.pathname)}`;
+    };
+    // Live-reported: "Log in" alone has no path for someone who's never
+    // signed up -- reuses the already-gate-exempt request-access.html flow
+    // (#36) instead of inventing a new one, pre-filling the e-mail they
+    // just typed so they don't have to retype it there.
+    idGateRegisterForm.onsubmit = (ev) => {
+      ev.preventDefault();
+      const email = idGateRegisterEmail.value.trim();
+      if (!email) return;
+      location.href = `/request-access.html?email=${encodeURIComponent(email)}`;
     };
     return;
   }

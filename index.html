@@ -429,6 +429,19 @@
         <div id="id-gate-required" hidden style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:1rem;margin-bottom:1rem">
           <p style="margin:0 0 .9rem;font-size:.9rem">This tunnel requires signing in first -- the free-text e-mail entry below only works on tunnels without login enforcement.</p>
           <button type="button" id="id-gate-login-btn">Log in →</button>
+          <!-- CADS-webconference-demo (live-reported): the gate-required panel
+               only offered "Log in", nothing for someone who's never signed up
+               at all -- Keycloak's own login screen has no visible next step
+               for that either (a separate repo, not editable here, same
+               #36 constraint). Reuses the already-gate-exempt
+               request-access.html flow (#36) instead of inventing a new one --
+               that page's own /api/access-requests POST already works
+               unauthenticated. -->
+          <p style="margin:1rem 0 .5rem;font-size:.85rem;color:var(--muted)">Don't have an account yet?</p>
+          <form class="id-form" id="id-gate-register-form">
+            <input id="id-gate-register-email" type="email" placeholder="you@example.com" required autocomplete="email" />
+            <button type="submit">Register →</button>
+          </form>
         </div>
         <div id="id-entry">
           <h2>Enter your e-mail</h2>
