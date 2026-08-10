@@ -17,6 +17,7 @@ COPY identity.js /srv/identity.js
 COPY pairing.js /srv/pairing.js
 COPY call-transport-shared.js /srv/call-transport-shared.js
 COPY sync.js /srv/sync.js
+COPY access-requests.js /srv/access-requests.js
 COPY chatStore.js /srv/chatStore.js
 COPY request-access.html /srv/request-access.html
 COPY request-access.js /srv/request-access.js

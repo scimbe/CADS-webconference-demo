@@ -80,6 +80,7 @@ import {
   sendTaggedFrame,
 } from './call-transport-shared.js';
 import { syncNow } from './sync.js';
+import { keycloakAdminConsoleLink, refreshAccessRequests } from './access-requests.js';
 
 // CADS-webconference-demo (user feedback): this used to be acquired as soon
 // as the dialer/messenger screen came up (preloadLocalMedia, called from
@@ -1447,10 +1448,6 @@ let myIdentity = null; // set once in runDialer -- full identity object (needed 
 // imports are live, so a reader always sees the current value app.js last
 // assigned, not a stale snapshot from import time.
 export { myContacts, myNames, blockedEmails, onlyAcceptFromContacts, myEmail, myIdentity };
-const KEYCLOAK_ADMIN_CONSOLE_BASE = 'https://auth.bunsenbrenner.org/admin/master/console/#/ct-demo/users';
-function keycloakAdminConsoleLink(email) {
-  return `${KEYCLOAK_ADMIN_CONSOLE_BASE}?search=${encodeURIComponent(email)}`;
-}
 // Non-contact incoming attempts held for review instead of ringing
 // immediately (only populated when onlyAcceptFromContacts is on) -- see
 // showIncoming's gating logic. In-memory only: a real "missed request"
@@ -1647,58 +1644,6 @@ function renderRequests() {
     actions.append(acceptBtn, declineBtn);
     li.append(avatar, body, actions);
     requestsList.appendChild(li);
-  }
-}
-
-// CADS-webconference-demo#36: admin-only panel listing everyone who hit
-// /request-access.html because the login allow-list rejected them.
-// Approve grants login (same control-plane call /allowlist/add uses) and
-// clears the request; Decline just clears it. Both server-side calls are
-// admin-gated independently of this UI (see the bridge's own comment).
-async function refreshAccessRequests() {
-  const resp = await api('/access-requests');
-  renderAccessRequests(resp.error ? [] : resp.requests || []);
-}
-
-function renderAccessRequests(requests) {
-  accessRequestsList.querySelectorAll('li:not(#access-requests-empty)').forEach((li) => li.remove());
-  accessRequestsEmpty.hidden = requests.length > 0;
-  accessRequestsBadge.hidden = requests.length === 0;
-  accessRequestsBadge.textContent = String(requests.length);
-  for (const { email } of requests) {
-    const li = document.createElement('li');
-    li.style.cursor = 'default';
-    const nameEl = document.createElement('div');
-    nameEl.className = 'msg-row-body';
-    nameEl.textContent = email;
-    const actions = document.createElement('div');
-    actions.className = 'msg-request-actions';
-    const approveBtn = document.createElement('button');
-    approveBtn.type = 'button';
-    approveBtn.className = 'accept';
-    approveBtn.textContent = 'Admit';
-    approveBtn.addEventListener('click', async () => {
-      approveBtn.disabled = true;
-      // CADS-webconference-demo#41 (finding 1): no callerEmail to send --
-      // the bridge derives the admin check from X-Gate-Email itself now,
-      // same as /api/is-admin (#46). Never actually a real admin proof to
-      // begin with; sending it was misleading.
-      const resp = await api('/access-requests/approve', { body: { email } });
-      if (resp.error) { approveBtn.disabled = false; log(`couldn't admit ${email}: ${resp.error}`); return; }
-      refreshAccessRequests();
-    });
-    const declineBtn = document.createElement('button');
-    declineBtn.type = 'button';
-    declineBtn.className = 'decline';
-    declineBtn.textContent = 'Dismiss';
-    declineBtn.addEventListener('click', async () => {
-      declineBtn.disabled = true;
-      await api('/access-requests/decline', { body: { email } });
-      refreshAccessRequests();
-    });
-    actions.append(approveBtn, declineBtn);
-    li.append(nameEl, actions);
-    accessRequestsList.appendChild(li);
   }
 }
 
