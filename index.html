@@ -125,15 +125,21 @@
     exactly as before. */
  .ctl-menu-wrap{position:relative;display:flex}
  .filter-menu{position:absolute;bottom:calc(100% + .6rem);left:50%;transform:translateX(-50%);z-index:6;
-  background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.35);
-  padding:.4rem;min-width:10rem;display:flex;flex-direction:column;gap:.15rem}
- .filter-menu-note{font-size:.74rem;color:var(--muted);padding:.4rem .6rem .55rem;max-width:13rem}
- .filter-menu-item{font-family:inherit;font-size:.85rem;text-align:left;background:transparent;border:none;
-  color:var(--text);padding:.5rem .7rem;border-radius:7px;cursor:pointer;white-space:nowrap}
- .filter-menu-item:hover{background:var(--panel2)}
- .filter-menu-item[aria-checked="true"]{background:rgba(95,184,171,.14);color:var(--accent2);font-weight:600}
+  background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:0 8px 28px rgba(0,0,0,.35);
+  padding:.55rem;display:flex;flex-direction:column;gap:.4rem;align-items:stretch}
+ .filter-menu-note{font-size:.72rem;color:var(--muted);max-width:12rem}
+ .filter-menu-items{display:flex;flex-direction:row;gap:.5rem}
+ /* Live-requested: each filter as its own round "bubble" showing just the
+    pictogram (🚫/🐰/✨) instead of a text list row -- the descriptive label
+    moves to aria-label/title (still announced to assistive tech / shown as
+    a native tooltip on hover), same click/aria-checked wiring as before. */
+ .filter-menu-item{font-family:inherit;font-size:1.3rem;line-height:1;display:flex;align-items:center;
+  justify-content:center;width:2.7rem;height:2.7rem;flex-shrink:0;background:var(--panel2);
+  border:2px solid transparent;border-radius:50%;color:var(--text);cursor:pointer}
+ .filter-menu-item:hover{background:var(--line-soft)}
+ .filter-menu-item[aria-checked="true"]{border-color:var(--accent2);background:rgba(95,184,171,.14)}
  .filter-menu-item:disabled{opacity:.45;cursor:not-allowed}
- .filter-menu-item:disabled:hover{background:transparent}
+ .filter-menu-item:disabled:hover{background:var(--panel2)}
 
  /* ---- mobile call view: full-screen remote + small tappable self PiP, ----
     ---- floating overlay controls, WhatsApp-style. Only kicks in once      ----
@@ -710,9 +716,11 @@
             <button class="ctl" id="btn-video-filters" type="button" aria-label="Video filters: off" aria-haspopup="true" aria-expanded="false"><span class="ctl-icon">🎭</span><span class="ctl-label">Filters</span></button>
             <div class="filter-menu" id="filter-menu" hidden role="menu" aria-label="Video filter">
               <div class="filter-menu-note" id="filter-menu-note" hidden>Not available on the direct-channel connection -- switching filters here would freeze the video.</div>
-              <button type="button" class="filter-menu-item" data-style="" role="menuitemradio">None</button>
-              <button type="button" class="filter-menu-item" data-style="bunny" role="menuitemradio">🐰 Bunny ears</button>
-              <button type="button" class="filter-menu-item" data-style="sparkle" role="menuitemradio">✨ Sparkle</button>
+              <div class="filter-menu-items">
+                <button type="button" class="filter-menu-item" data-style="" role="menuitemradio" aria-label="No filter" title="No filter">🚫</button>
+                <button type="button" class="filter-menu-item" data-style="bunny" role="menuitemradio" aria-label="Bunny ears filter" title="Bunny ears">🐰</button>
+                <button type="button" class="filter-menu-item" data-style="sparkle" role="menuitemradio" aria-label="Sparkle filter" title="Sparkle">✨</button>
+              </div>
             </div>
           </div>
           <button class="ctl hangup" id="btn-hangup" type="button" aria-label="Hang up"><span class="ctl-icon">📞</span><span class="ctl-label">Hang up</span></button>
