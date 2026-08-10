@@ -644,11 +644,21 @@ run().catch((e) => {
     idVerifyErrorDetail.textContent = `couldn't start: ${safeMessage}`;
     idVerifyError.hidden = false;
     idVerifyRetry.addEventListener('click', () => location.reload());
+  } else {
+    // Live-reported ("system frozen" after a mobile connection drop mid-
+    // handshake): a failure here (joinChannel/handshake throwing before
+    // real peer connectivity was ever reached) used to just hide the
+    // "Connecting to X…" spinner and rely on the small #status-text pill
+    // at the top of the call screen -- easy to miss entirely on mobile's
+    // full-screen call view, leaving "waiting for peer…" sitting on
+    // screen with no visible next step. setStatus/log above already show
+    // the real error; this now ALSO funnels through the same single
+    // termination choke point a normal Hang Up uses
+    // (returnToDialerAfterHangup), so the page actually recovers back to
+    // a working dialer instead of sitting stuck -- the status-pill error
+    // text stays visible for the same ~1.2s delay every other hangup
+    // already gives before the reload fires.
+    returnToDialerAfterHangup();
   }
-  // Otherwise a failure here (joinChannel/handshake throwing before real
-  // peer connectivity was ever reached) leaves the "Connecting to X…"
-  // spinner banner sitting on screen forever with nothing telling the user
-  // it actually failed -- the exact kind of misleading state this banner
-  // was added to prevent, not reproduce.
   hideConnecting();
 });
