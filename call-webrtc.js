@@ -26,11 +26,48 @@
 // same dance in call-channel.js's establishChannelSession and chat-glue.js's
 // connectBackgroundChannel, exactly as before this consolidation.
 //
-// activeWebrtcPc's declaration moves here (was app.js's own module-level
-// state) -- confirmed via a whole-file reassignment grep that every actual
-// `activeWebrtcPc = ...` write happens inside this code, none in app.js's
-// remaining bootstrap. camera.js/video-filters.js's existing read-only
-// stopgap imports repoint from './app.js' to here in this same commit.
+// CADS-webconference-demo#91 (cycle 17): the raw activeWebrtcPc handle
+// (CADS-webconference-demo#38, finding 7's own module-private-variable
+// fix, so switchCamera never needed a page-global `window.__ctVideoCallDemo.pc`)
+// is retired in favor of call-session.js's session interface --
+// createWebrtcCallSession(pc, media, notifyPeerFallback) wraps `pc` behind
+// replaceOutgoingVideoTrack/requestFallbackToChannel/onFallback/getStream,
+// registered via setActiveSession at the exact point `activeWebrtcPc = pc;`
+// used to sit, and cleared via setActiveSession(null) at every one of this
+// function's own termination paths (mirroring every former
+// `activeWebrtcPc = null;` site 1:1) -- confirmed via a whole-file grep
+// that activeWebrtcPc had zero internal readers here, only writes, so this
+// is a mechanical 1:1 replacement, not a new design. camera.js/
+// video-filters.js now read the session back via getActiveSession instead
+// of importing activeWebrtcPc directly.
+//
+// attemptChannelFallback's own inline peer-notify block
+// (`if (!peerInitiated) { try { sendSignal(...) } catch {...} }`) is
+// replaced by session.requestFallbackToChannel(reason, peerInitiated) --
+// the notifyPeerFallback callback passed at session construction below
+// contains the exact same try/catch/log body, so the one observable
+// difference (this session interface's own catch is silent, by design --
+// see call-session.js's header comment) never actually applies: this
+// callback catches and logs internally, so the interface's own outer catch
+// never has anything to swallow. Every OTHER attemptChannelFallback side
+// effect (channelFallbackAttempted latch, sessionEnded, logging, UI
+// updates, pc.close(), session clearing, capturedMedia cleanup,
+// transport-badge/chat-transport-note text, the runChannelMediaCall call
+// itself) is untouched, in the same order, byte-for-byte -- re-read
+// line-by-line against the pre-cycle version to confirm nothing was
+// dropped or reordered.
+//
+// Constructed right after `const media = await getLocalMedia();` below
+// (not at the original `activeWebrtcPc = pc;` point, much later in this
+// function) so a session reference exists before attemptChannelFallback
+// could theoretically ever run -- pc's event handlers (oniceconnectionstatechange
+// etc.) are attached even earlier than that, so `session` is still guarded
+// with `session?.` at its one call site as defense in depth against that
+// narrow (in practice unreachable -- real ICE state transitions can't
+// resolve within the handful of synchronous statements between handler
+// attachment and this construction point) window, never a hard dependency
+// on the timing being exactly right.
+//
 // setupControls/returnToDialerAfterHangup/setActiveCallBye stay imported
 // back from app.js as a stopgap (same pattern call-channel.js's cycle 15
 // already established) -- they're shared plumbing between both transports,
@@ -50,22 +87,8 @@ import {
 import { setupChatChannel } from './chat-glue.js';
 import { getLocalMedia } from './camera.js';
 import { runChannelMediaCall } from './call-channel.js';
+import { createWebrtcCallSession, setActiveSession } from './call-session.js';
 import { setupControls, returnToDialerAfterHangup, setActiveCallBye } from './app.js';
-
-// CADS-webconference-demo#38 (finding 7): switchCamera needs the active
-// RTCPeerConnection but is declared outside run()'s closure (it's shared by
-// both transports' hangup/control wiring) -- this used to be reached via
-// `window.__ctVideoCallDemo.pc`, a live handle any script on the page
-// (extension, or an XSS if one ever landed despite the CSP) could use to
-// drive the call, decrypt/encrypt arbitrary Noise frames, or inject
-// signaling. A module-private variable gives switchCamera the same access
-// without handing it to the whole page. Only ever set/cleared from this
-// module's own webrtc call setup.
-// CADS-webconference-demo#91: exported (read-only, live binding) so
-// camera.js's switchCamera and video-filters.js's compositor functions can
-// reach it -- this is now activeWebrtcPc's permanent home.
-let activeWebrtcPc = null;
-export { activeWebrtcPc };
 
 async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex) {
   setStatus('connecting-webrtc');
@@ -90,13 +113,18 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
   // actually reflects whether the peer is still there.
   let sessionEnded = false;
   let capturedMedia = null; // set once getLocalMedia() below resolves; used by attemptChannelFallback to release the pc-bound tracks before runChannelMediaCall grabs its own
+  // CADS-webconference-demo#91 (cycle 17): this call's own call-session.js
+  // session -- constructed once media is available (see below), read by
+  // attemptChannelFallback below. `session?.` at that one call site guards
+  // the narrow window before construction -- see this file's header comment.
+  let session = null;
   function endCallDueToPeerLoss(reason) {
     if (sessionEnded) return;
     sessionEnded = true;
     setStatus('peer-hung-up');
     addChatMessage(`peer connection lost (${reason})`, 'system');
     pc.close();
-    activeWebrtcPc = null;
+    setActiveSession(null);
     // CADS-webconference-demo#38 (finding 9): the Noise/ws_channel signaling
     // socket is a separate connection from the RTCPeerConnection itself --
     // closing pc alone left it open until returnToDialerAfterHangup's
@@ -193,15 +221,14 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     // mode in lockstep instead of being left speaking the old wasm signal
     // protocol into a channel we're about to start reading raw TAG_* bytes
     // from (see TAG_FALLBACK's own comment for the failure this prevents).
-    if (!peerInitiated) {
-      try {
-        sendSignal(new Uint8Array([TAG_FALLBACK]));
-      } catch (e) {
-        log(`failed to notify peer of channel fallback: ${e.message || e}`);
-      }
-    }
+    // CADS-webconference-demo#91 (cycle 17): delegates the peer-notify to
+    // call-session.js's requestFallbackToChannel -- see this file's header
+    // comment for why the notifyPeerFallback callback (passed at session
+    // construction below) preserves this exact try/catch/log body, and why
+    // `session?.` is defense in depth, not an expected real path.
+    session?.requestFallbackToChannel(reason, peerInitiated);
     pc.close();
-    activeWebrtcPc = null;
+    setActiveSession(null);
     // Release the pc-bound camera/mic tracks -- runChannelMediaCall acquires
     // its own via a fresh getLocalMedia() call, and holding both open at
     // once would leave a dangling capture session for no reason.
@@ -276,6 +303,20 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
 
   const media = await getLocalMedia();
   capturedMedia = media; // CADS-webconference-demo#67 -- so attemptChannelFallback (defined above, but only ever called once ICE has actually failed, i.e. after this line has run) can release these tracks
+  // CADS-webconference-demo#91 (cycle 17): registers this call's session so
+  // camera.js/video-filters.js can reach replaceOutgoingVideoTrack without
+  // a raw pc handle -- see this file's header comment for why this exact
+  // point (not the original, much-later `activeWebrtcPc = pc;` timing) was
+  // chosen, and why that's a strictly narrower-or-equal race window, not a
+  // wider one.
+  session = createWebrtcCallSession(pc, media, () => {
+    try {
+      sendSignal(new Uint8Array([TAG_FALLBACK]));
+    } catch (e) {
+      log(`failed to notify peer of channel fallback: ${e.message || e}`);
+    }
+  });
+  setActiveSession(session);
 
   // Heartbeat: a third, dedicated real WebRTC data channel -- deliberately
   // separate from 'chat' so heartbeat traffic never touches the visible chat
@@ -392,7 +433,7 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     // a redundant "peer connection lost" on top of our own local hang-up.
     sendSignal(wasm.encodeSignalBye()); // already in scope here -- no need to bounce through the (now-removed) window global
     pc.close();
-    activeWebrtcPc = null;
+    setActiveSession(null);
     stream.ws.close(); // CADS-webconference-demo#38 (finding 9) -- see endCallDueToPeerLoss's matching comment
   };
   // #38 finding 6 -- same close logic runs on an explicit Hang Up click or a
@@ -444,7 +485,7 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
           setStatus('peer-hung-up');
           addChatMessage('peer hung up', 'system');
           pc.close();
-          activeWebrtcPc = null;
+          setActiveSession(null);
           stream.ws.close(); // CADS-webconference-demo#38 (finding 9) -- see endCallDueToPeerLoss's matching comment
           returnToDialerAfterHangup();
           return;
@@ -455,7 +496,7 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
         setStatus('peer-hung-up');
         addChatMessage('connection lost (a corrupted or unexpected signaling frame arrived)', 'system');
         pc.close();
-        activeWebrtcPc = null;
+        setActiveSession(null);
         stream.ws.close();
         returnToDialerAfterHangup();
         return;
@@ -470,7 +511,6 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
   }
 
   setStatus('signaling-active');
-  activeWebrtcPc = pc; // CADS-webconference-demo#38 (finding 7) -- see activeWebrtcPc's own declaration comment
 }
 
 export {

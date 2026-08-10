@@ -4,14 +4,16 @@
 // stream/noiseTransport again -- part of the client-code consolidation
 // (CADS-webconference-demo#91).
 //
-// NOT YET WIRED IN. Nothing imports this file today -- camera.js and
-// video-filters.js still reach `activeWebrtcPc` via the circular-import
-// stopgap back to app.js established in cycles 12/13. This is written now,
-// reviewable in isolation, with zero behavior-change risk; the actual
-// rewire (repointing camera.js/video-filters.js/call-webrtc.js/
-// call-channel.js at this interface and retiring the activeWebrtcPc
-// stopgap) is its own later, carefully-isolated cycle (see the
-// consolidation plan's cycle 17).
+// WIRED IN as of cycle 17: call-webrtc.js's runWebrtcMediaCall and
+// call-channel.js's runChannelMediaCall each construct their own session
+// (createWebrtcCallSession / createChannelCallSession below) and register
+// it via setActiveSession; camera.js and video-filters.js read it back via
+// getActiveSession instead of importing activeWebrtcPc directly. See
+// getActiveSession/setActiveSession's own comment for why this single
+// shared pointer -- not a value passed through `media` -- is the threading
+// mechanism: it's the direct generalization of activeWebrtcPc's existing
+// "one shared slot, set/cleared at each transport's own lifecycle points"
+// shape to a second transport, not a new pattern.
 //
 // Two factories, one per transport, both returning the same 4-method shape.
 // noiseTransport is deliberately never exposed on this interface -- it
@@ -142,7 +144,27 @@ function createChannelCallSession(media) {
   };
 }
 
+// The single shared "which session is live right now" pointer -- the same
+// role activeWebrtcPc played before this cycle, generalized to cover
+// either transport instead of just webrtc. Each transport module sets this
+// once its own session is genuinely ready (mirroring activeWebrtcPc's own
+// timing: call-webrtc.js registers right where `activeWebrtcPc = pc;` used
+// to sit) and clears it (setActiveSession(null)) at every one of its own
+// termination paths (mirroring every `activeWebrtcPc = null;` site).
+// camera.js/video-filters.js only ever read it, never write it -- same
+// read-only-from-the-consumer-side discipline as every other circular
+// import in this consolidation.
+let activeSession = null;
+function setActiveSession(session) {
+  activeSession = session;
+}
+function getActiveSession() {
+  return activeSession;
+}
+
 export {
   createWebrtcCallSession,
   createChannelCallSession,
+  setActiveSession,
+  getActiveSession,
 };

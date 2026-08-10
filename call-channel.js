@@ -30,11 +30,28 @@
 // circular-import stopgap camera.js/video-filters.js already use, for
 // setupControls/returnToDialerAfterHangup (shared plumbing still owned by
 // app.js -- see its own header comment there) and activeCallBye (shared
-// mutable state between this transport and the still-inline webrtc one;
-// setActiveCallBye is a real setter, not a read-only stopgap, since this
-// module genuinely reassigns it, not just reads it -- see the cycle 9
-// lesson on why that needs a setter rather than a plain import). To be
-// repointed once call-webrtc.js exists.
+// mutable state between this transport and the webrtc one; setActiveCallBye
+// is a real setter, not a read-only stopgap, since this module genuinely
+// reassigns it, not just reads it -- see the cycle 9 lesson on why that
+// needs a setter rather than a plain import). To be repointed if
+// setupControls/returnToDialerAfterHangup/activeCallBye ever move out of
+// app.js.
+//
+// CADS-webconference-demo#91 (cycle 17): constructs its own
+// createChannelCallSession(media) and registers it via setActiveSession,
+// same as call-webrtc.js's own session for its transport -- camera.js/
+// video-filters.js read whichever is currently active via getActiveSession
+// without needing to know which transport is live. This session's
+// replaceOutgoingVideoTrack/requestFallbackToChannel are both true no-ops
+// (see call-session.js's own header comment) -- this transport never had a
+// peer-visible track swap or a further fallback target, so registering it
+// changes nothing observable; it exists so a mid-channel-call camera
+// switch resolves to a real (no-op) session instead of finding none at
+// all. Constructed right after `const media = await getLocalMedia();`
+// below, matching call-webrtc.js's own timing choice; cleared via
+// setActiveSession(null) at every one of this function's own termination
+// paths (reconnect-exhausted, reconnect-failed, TAG_BYE, bad frame,
+// onHangup).
 
 import * as wasm from './pkg/ct_agent_wasm.js';
 import {
@@ -47,6 +64,7 @@ import {
 } from './ui-dom.js';
 import { createAckWaiter, flushOutbox } from './chat-glue.js';
 import { getLocalMedia } from './camera.js';
+import { createChannelCallSession, setActiveSession } from './call-session.js';
 import { setupControls, returnToDialerAfterHangup, setActiveCallBye } from './app.js';
 
 async function establishChannelSession(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller) {
@@ -251,6 +269,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           setStatus('peer-hung-up');
           addChatMessage('peer connection lost', 'system');
           if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
+          setActiveSession(null);
           returnToDialerAfterHangup();
           return;
         }
@@ -285,6 +304,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           setStatus('peer-hung-up');
           addChatMessage('peer connection lost', 'system');
           if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
+          setActiveSession(null);
           returnToDialerAfterHangup();
           return;
         }
@@ -364,6 +384,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           // teardown onHangup gets -- matching that shape here too.
           if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
           byteStream.ws.close(); // CADS-webconference-demo#38 (finding 9) -- see setupControls' onHangup callback's matching comment
+          setActiveSession(null);
           returnToDialerAfterHangup();
           return;
         }
@@ -373,6 +394,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
         addChatMessage('connection lost (a corrupted or unexpected frame arrived)', 'system');
         if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval); // CADS-webconference-demo#70 (review follow-up) -- see the TAG_BYE branch's matching comment above
         byteStream.ws.close();
+        setActiveSession(null);
         returnToDialerAfterHangup();
         return;
       }
@@ -380,6 +402,10 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   })();
 
   const media = await getLocalMedia();
+  // CADS-webconference-demo#91 (cycle 17): see this file's header comment --
+  // a true no-op session, registered so camera.js/video-filters.js resolve
+  // to a real (inert) session during a channel call instead of finding none.
+  setActiveSession(createChannelCallSession(media));
   let recorder = null;
   let activeMediaBackpressureInterval = null; // CADS-webconference-demo#70 -- cleared in onHangup below
   if (media.kind === 'media') {
@@ -471,6 +497,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
     // the recorder otherwise -- same leaked-timer shape #38 already fixed
     // for the signaling WS below.
     if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
+    setActiveSession(null);
     // CADS-webconference-demo#38 (finding 9): neither hangup path closed the
     // underlying signaling WS -- it lingered open until
     // returnToDialerAfterHangup's ~1200ms-delayed reload tore down the whole

@@ -4,12 +4,11 @@
 // client-code consolidation (CADS-webconference-demo#91); every function/
 // const here is a verbatim move, comments included, with no behavior change.
 //
-// CADS-webconference-demo#91: same activeWebrtcPc read-only import
+// CADS-webconference-demo#91 (cycle 17): same getActiveSession() call
 // camera.js's switchCamera uses -- see camera.js's own header comment.
-// call-webrtc.js is its permanent home as of that consolidation cycle.
 
 import { btnVideoFilters, log, addChatMessage, setCtlLabel } from './ui-dom.js';
-import { activeWebrtcPc } from './call-webrtc.js';
+import { getActiveSession } from './call-session.js';
 
 // Live-requested: video filters, especially for kids. Vendored (not CDN --
 // this app's CSP is script-src 'self', see vendor/face-api/README.md) tiny
@@ -184,10 +183,8 @@ function startVideoFilterCompositor(media) {
   const filteredTrack = canvas.captureStream(30).getVideoTracks()[0];
   media.stream.removeTrack(rawTrack);
   media.stream.addTrack(filteredTrack);
-  if (activeWebrtcPc) {
-    const sender = activeWebrtcPc.getSenders().find((s) => s.track && s.track.kind === 'video');
-    if (sender) sender.replaceTrack(filteredTrack).catch((e) => log(`filter track swap failed: ${e.message || e}`));
-  }
+  const session = getActiveSession();
+  if (session) session.replaceOutgoingVideoTrack(filteredTrack).catch((e) => log(`filter track swap failed: ${e.message || e}`));
 }
 
 function disableVideoFilterAndRestoreCamera(media) {
@@ -203,10 +200,8 @@ function disableVideoFilterAndRestoreCamera(media) {
     filteredTrack.stop();
   }
   if (state.rawTrack.readyState !== 'ended') media.stream.addTrack(state.rawTrack);
-  if (activeWebrtcPc) {
-    const sender = activeWebrtcPc.getSenders().find((s) => s.track && s.track.kind === 'video');
-    if (sender) sender.replaceTrack(state.rawTrack).catch((e) => log(`filter track restore failed: ${e.message || e}`));
-  }
+  const session = getActiveSession();
+  if (session) session.replaceOutgoingVideoTrack(state.rawTrack).catch((e) => log(`filter track restore failed: ${e.message || e}`));
   videoFilterState = null;
 }
 

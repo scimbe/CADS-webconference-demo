@@ -3,14 +3,16 @@
 // function/const here is a verbatim move, comments included, with no
 // behavior change.
 //
-// CADS-webconference-demo#91: switchCamera reaches into activeWebrtcPc,
-// owned by call-webrtc.js (its permanent home as of that consolidation
-// cycle). Read-only here (camera.js never reassigns it, only
-// call-webrtc.js's own webrtc call setup does), same safe live-binding
-// import pattern as every other circular import in this consolidation.
+// CADS-webconference-demo#91 (cycle 17): switchCamera reaches the current
+// call's session via call-session.js's getActiveSession() -- registered by
+// whichever transport is live (call-webrtc.js / call-channel.js), cleared
+// between calls -- instead of importing a transport-specific raw handle
+// (the former activeWebrtcPc stopgap). replaceOutgoingVideoTrack is a true
+// no-op on a channel session, matching this function's existing behavior
+// exactly (channel calls never had a peer-visible track swap).
 
 import { btnSwitchCamera, log } from './ui-dom.js';
-import { activeWebrtcPc } from './call-webrtc.js';
+import { getActiveSession } from './call-session.js';
 
 // CADS-webconference-demo (user feedback): this used to be acquired as soon
 // as the dialer/messenger screen came up (preloadLocalMedia, called from
@@ -70,10 +72,8 @@ async function switchCamera(media) {
     }
     media.stream.addTrack(newTrack);
     currentFacingMode = nextFacingMode;
-    if (activeWebrtcPc) {
-      const sender = activeWebrtcPc.getSenders().find((s) => s.track && s.track.kind === 'video');
-      if (sender) await sender.replaceTrack(newTrack);
-    }
+    const session = getActiveSession();
+    if (session) await session.replaceOutgoingVideoTrack(newTrack);
   } catch (e) {
     log(`camera switch failed: ${e.message || e}`);
   }
