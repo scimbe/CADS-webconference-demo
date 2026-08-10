@@ -24,6 +24,7 @@ COPY chat-glue.js /srv/chat-glue.js
 COPY dialer.js /srv/dialer.js
 COPY camera.js /srv/camera.js
 COPY video-filters.js /srv/video-filters.js
+COPY call-session.js /srv/call-session.js
 COPY chatStore.js /srv/chatStore.js
 COPY request-access.html /srv/request-access.html
 COPY request-access.js /srv/request-access.js
