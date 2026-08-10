@@ -448,8 +448,32 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
   // Background loop: every subsequent signaling message (from here on the
   // Noise session is established, so everything is encrypted) is decrypted,
   // decoded, and dispatched to the peer connection.
+  //
+  // Robustness audit finding (not yet live-reproduced -- found by static
+  // read, same as #89's own original TAG_FALLBACK fix): a LOCALLY-triggered
+  // fallback (attemptIceRestart's own grace-period timeout, or
+  // pc.onconnectionstatechange's 'failed' handling calling
+  // attemptChannelFallback directly) happens OUTSIDE this loop's own control
+  // flow -- unlike the PEER-initiated path just below (TAG_FALLBACK
+  // detected -> attemptChannelFallback(..., true) -> return, which already
+  // stops this exact loop), nothing told this loop to stop looping. It kept
+  // calling readFramed(stream) on the SAME underlying WsByteStream that
+  // runChannelMediaCall's own new receive loop is now ALSO reading from
+  // (attemptChannelFallback deliberately keeps `stream` open for the
+  // channel transport to reuse -- it never closes it) -- two concurrent
+  // readers racing on one buffer, each capable of destructively consuming
+  // bytes the other one needed (WsByteStream.readExact mutates
+  // this.chunks/this.totalLen with no reader-identity check at all).
+  // Checking sessionEnded (set synchronously, before any await, at the top
+  // of attemptChannelFallback -- same flag setupHeartbeatChannel's own
+  // watchdog already checks for the identical reason) at the top of every
+  // iteration stops this loop from issuing any FURTHER readFramed calls
+  // once a fallback has begun, from either trigger path -- narrows the
+  // race to at most the one readFramed call already in flight when the
+  // fallback fires, not an unbounded ongoing contention.
   (async () => {
     while (true) {
+      if (sessionEnded) return;
       let cipher;
       try {
         cipher = await readFramed(stream);
