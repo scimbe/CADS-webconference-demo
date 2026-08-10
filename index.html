@@ -683,6 +683,27 @@
         <span class="spinner" aria-hidden="true"></span>
         <span id="connecting-banner-text">Connecting…</span>
       </div>
+      <!-- CADS-webconference-demo#96 (live-reported): a real, complete
+           network outage (browser offline, e.g. airplane mode / interface
+           down) mid-call produced no visible error/disconnect UI at all --
+           the existing ICE-restart-fallback (#67) and channel heartbeat
+           (#69) machinery only reacts to signaling/media state changes,
+           which a fully-offline browser never generates (nothing to time
+           out on if no packets are even attempted). window.onoffline/
+           ononline (see setupControls) is a fast, cheap, ADDITIONAL signal
+           for exactly this one case -- reusing .connecting-banner's
+           styling/positioning, own id so it can't collide with
+           #connecting-banner's own show/hide state machine. Deliberately
+           narrow: this does NOT replace #67/#69's existing recovery for
+           every other disconnect cause (peer crash, NAT rebind failure,
+           server issue) -- those still rely on the same timeout/heartbeat
+           detection as before, on purpose (see #96's own discussion: a
+           tightened timeout there would trade false-positive risk for
+           speed on cases this banner doesn't cover). -->
+      <div class="connecting-banner" id="offline-banner" hidden>
+        <span class="spinner" aria-hidden="true"></span>
+        <span>You're offline -- waiting for your network to come back…</span>
+      </div>
     </div>
 
     <div class="call-grid">

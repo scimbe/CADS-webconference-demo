@@ -31,6 +31,7 @@ const routeWebrtc = document.getElementById('route-webrtc');
 const routePeer = document.getElementById('route-peer');
 const connectingBanner = document.getElementById('connecting-banner');
 const connectingBannerText = document.getElementById('connecting-banner-text');
+const offlineBanner = document.getElementById('offline-banner');
 
 const idEntry = document.getElementById('id-entry');
 const idForm = document.getElementById('id-form');
@@ -278,7 +279,7 @@ export {
   setupScreen, callScreen, siteHero, landingMain, statusEl, iceEl, logEl, statusPill,
   statusText, localVideo, remoteVideo, localEmpty, remoteEmpty, btnMic, btnCam, btnHangup,
   chatLog, chatForm, chatInput, chatSend, routeYou, routeSignal, routeWebrtc, routePeer,
-  connectingBanner, connectingBannerText,
+  connectingBanner, connectingBannerText, offlineBanner,
   idEntry, idForm, idEmailInput, idVerifyError, idVerifyErrorDetail, idVerifyRetry,
   idGateRequired, idGateLoginBtn, idGateRegisterForm, idGateRegisterEmail, myEmailEl,
   dialForm, dialEmailInput, callNote, incomingCard, incomingFrom, btnAccept, btnDecline,

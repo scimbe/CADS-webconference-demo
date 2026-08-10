@@ -31,7 +31,7 @@ import {
   idEntry, idVerifyError, idVerifyErrorDetail, idVerifyRetry,
   dialForm, logoutLink, contactsList,
   accessRemoveForm, accessRemoveEmail, accessNote, accessRemoveConsoleLink,
-  videoGrid, localTile, btnSwitchCamera, btnVideoFilters, filterMenu, msgMenuToggle,
+  videoGrid, localTile, btnSwitchCamera, btnVideoFilters, filterMenu, offlineBanner, msgMenuToggle,
   msgMenu, msgSearchForm, msgSearchInput, msgBackBtn,
   msgCallBtn, msgBlockBtn, msgComposeForm, msgComposeInput, msgAttachBtn, msgAttachInput,
   convName, convRenameBtn, onlyContactsToggle,
@@ -206,6 +206,22 @@ function setupControls(media, onHangup) {
     closeFilterMenu();
     returnToDialerAfterHangup();
   };
+  // CADS-webconference-demo#96 (live-reported): fast, additional signal for
+  // a total local network outage -- see offline-banner's own comment in
+  // index.html for why this doesn't replace #67/#69's existing
+  // signaling/heartbeat-based recovery for every other disconnect cause.
+  // window.onoffline/ononline, not addEventListener -- same "setupControls
+  // may run twice" reasoning as every other handler above (a second
+  // assignment here safely replaces the first instead of stacking).
+  window.onoffline = () => {
+    offlineBanner.hidden = false;
+  };
+  window.ononline = () => {
+    offlineBanner.hidden = true;
+  };
+  // Covers the edge case of already being offline the moment a call
+  // starts -- the events above only fire on a state CHANGE from here on.
+  offlineBanner.hidden = navigator.onLine;
 }
 
 // Neither a local hang-up nor a received 'bye' used to navigate anywhere --
