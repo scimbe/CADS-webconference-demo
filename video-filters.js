@@ -1,21 +1,23 @@
 // Video filters: face-api.js lazy-loading, the canvas compositor that draws
 // detected-face-anchored stickers onto a replacement video track, and the
-// cycle-through-styles control wiring. Split out of app.js as part of the
-// client-code consolidation (CADS-webconference-demo#91); every function/
-// const here is a verbatim move, comments included, with no behavior change.
+// filter-picker menu wiring. Split out of app.js as part of the client-code
+// consolidation (CADS-webconference-demo#91); the compositor functions are
+// a verbatim move from that cycle. The selection UI itself was reworked in
+// CADS-webconference-demo#95 (live-requested): a context menu listing every
+// style directly (including "None"), replacing the original click-to-cycle
+// button -- see toggleFilterMenu/selectFilterStyle below.
 //
 // CADS-webconference-demo#91 (cycle 17): same getActiveSession() call
 // camera.js's switchCamera uses -- see camera.js's own header comment.
 
-import { btnVideoFilters, log, addChatMessage, setCtlLabel } from './ui-dom.js';
+import { btnVideoFilters, filterMenu, filterMenuNote, filterMenuItems, log, addChatMessage, setCtlLabel } from './ui-dom.js';
 import { getActiveSession } from './call-session.js';
 
 // Live-requested: video filters, especially for kids. Vendored (not CDN --
 // this app's CSP is script-src 'self', see vendor/face-api/README.md) tiny
 // face-api.js models, lazy-loaded only the first time a user actually
-// clicks the filter button -- never part of the normal page/call weight.
-// Clicking cycles off -> bunny -> sparkle -> off; the OFF state is the
-// default, matching every other opt-in control in this call screen.
+// picks a style from the menu -- never part of the normal page/call weight.
+// Off is the default, matching every other opt-in control in this call screen.
 //
 // Same "only the local preview is guaranteed, the channel-fallback peer
 // isn't" caveat switchCamera's own comment documents: this replaces the
@@ -133,8 +135,6 @@ function drawKidStickers(ctx, detection, style) {
   }
 }
 
-const VIDEO_FILTER_STYLES = [null, 'bunny', 'sparkle'];
-let videoFilterStyleIndex = 0;
 let videoFilterState = null; // {sourceVideo, canvas, ctx, rawTrack, style, latestDetection, rafHandle, detectTimer, stopped}
 
 function startVideoFilterCompositor(media) {
@@ -222,20 +222,25 @@ function stopVideoFilterCompositor() {
   videoFilterState = null;
 }
 
-async function cycleVideoFilter(media) {
+// Applies an explicit style (null | 'bunny' | 'sparkle') directly -- the
+// menu passes exactly which item was clicked, no cycling/index-tracking
+// needed. Current selection is read back from videoFilterState?.style
+// (null when off) rather than a separate tracked index.
+async function selectFilterStyle(media, style) {
   if (media.kind !== 'media') return;
   // CADS-webconference-demo (live-reported): toggling a filter on the
   // direct-channel transport froze the video image outright -- see
   // call-session.js's own comment on the `kind` field for the root cause
   // (an already-running MediaRecorder doesn't pick up a live track swap
   // the way RTCRtpSender.replaceTrack does). Refuse the swap up front on
-  // that transport instead of attempting it and freezing the call.
+  // that transport instead of attempting it and freezing the call. The
+  // menu items are also disabled in this case (see syncFilterMenu) -- this
+  // check stays as defense in depth against reaching this function any
+  // other way.
   if (getActiveSession()?.kind === 'channel') {
     addChatMessage('video filters aren\'t available on the direct-channel connection yet -- switching filters here would freeze the video', 'system');
     return;
   }
-  videoFilterStyleIndex = (videoFilterStyleIndex + 1) % VIDEO_FILTER_STYLES.length;
-  const style = VIDEO_FILTER_STYLES[videoFilterStyleIndex];
   if (style === null) {
     disableVideoFilterAndRestoreCamera(media);
     setCtlLabel(btnVideoFilters, '🎭', 'Video filters: off');
@@ -249,7 +254,6 @@ async function cycleVideoFilter(media) {
     } catch (e) {
       log(`video filters unavailable: ${e.message || e}`);
       addChatMessage('video filters failed to load -- continuing without them', 'system');
-      videoFilterStyleIndex = 0;
       btnVideoFilters.disabled = false;
       setCtlLabel(btnVideoFilters, '🎭', 'Video filters: off');
       return;
@@ -261,7 +265,41 @@ async function cycleVideoFilter(media) {
   setCtlLabel(btnVideoFilters, '🎭', `Video filters: ${style}`);
 }
 
+// CADS-webconference-demo#95: reflects the current selection (checked item)
+// and, on a channel-transport call, disables every item with an inline
+// note instead of letting the user pick something that would freeze the
+// video (same underlying restriction selectFilterStyle enforces, surfaced
+// up front here instead of only after a click).
+function syncFilterMenu() {
+  const currentStyle = videoFilterState?.style ?? null;
+  const disabled = getActiveSession()?.kind === 'channel';
+  filterMenuNote.hidden = !disabled;
+  for (const item of filterMenuItems) {
+    item.disabled = disabled;
+    const itemStyle = item.dataset.style || null;
+    item.setAttribute('aria-checked', String(itemStyle === currentStyle));
+  }
+}
+
+function closeFilterMenu() {
+  filterMenu.hidden = true;
+  btnVideoFilters.setAttribute('aria-expanded', 'false');
+}
+
+function toggleFilterMenu(media) {
+  if (media.kind !== 'media') return;
+  if (!filterMenu.hidden) {
+    closeFilterMenu();
+    return;
+  }
+  syncFilterMenu();
+  filterMenu.hidden = false;
+  btnVideoFilters.setAttribute('aria-expanded', 'true');
+}
+
 export {
-  cycleVideoFilter,
+  selectFilterStyle,
+  toggleFilterMenu,
+  closeFilterMenu,
   stopVideoFilterCompositor,
 };

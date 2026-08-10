@@ -117,6 +117,24 @@
  button.ctl.hangup:hover{filter:brightness(1.08)}
  button.ctl[hidden]{display:none}
 
+ /* CADS-webconference-demo#95: the video-filter picker -- a small popup
+    anchored above its button (works the same in both the desktop
+    below-the-grid .controls row and the mobile bottom-docked one, since
+    "above" always points back toward the video area either way). The wrap
+    is the actual flex item in .controls; the button inside it renders
+    exactly as before. */
+ .ctl-menu-wrap{position:relative;display:flex}
+ .filter-menu{position:absolute;bottom:calc(100% + .6rem);left:50%;transform:translateX(-50%);z-index:6;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.35);
+  padding:.4rem;min-width:10rem;display:flex;flex-direction:column;gap:.15rem}
+ .filter-menu-note{font-size:.74rem;color:var(--muted);padding:.4rem .6rem .55rem;max-width:13rem}
+ .filter-menu-item{font-family:inherit;font-size:.85rem;text-align:left;background:transparent;border:none;
+  color:var(--text);padding:.5rem .7rem;border-radius:7px;cursor:pointer;white-space:nowrap}
+ .filter-menu-item:hover{background:var(--panel2)}
+ .filter-menu-item[aria-checked="true"]{background:rgba(95,184,171,.14);color:var(--accent2);font-weight:600}
+ .filter-menu-item:disabled{opacity:.45;cursor:not-allowed}
+ .filter-menu-item:disabled:hover{background:transparent}
+
  /* ---- mobile call view: full-screen remote + small tappable self PiP, ----
     ---- floating overlay controls, WhatsApp-style. Only kicks in once      ----
     ---- #call-screen is actually showing AND the viewport is narrow -- the ----
@@ -654,10 +672,23 @@
           <button class="ctl" id="btn-cam" type="button" aria-label="Camera off"><span class="ctl-icon">📷</span><span class="ctl-label">Camera off</span></button>
           <button class="ctl" id="btn-switch-camera" type="button" aria-label="Switch camera" hidden><span class="ctl-icon">🔄</span><span class="ctl-label">Switch camera</span></button>
           <!-- Live-requested video filters, especially for kids -- see the
-               matching app.js comment for the design (face-api.js tiny models,
-               vendored under /vendor/face-api, lazy-loaded only on first click).
-               Off by default; each click cycles off -> bunny -> sparkle -> off. -->
-          <button class="ctl" id="btn-video-filters" type="button" aria-label="Video filters: off"><span class="ctl-icon">🎭</span><span class="ctl-label">Filters</span></button>
+               matching video-filters.js comment for the design (face-api.js
+               tiny models, vendored under /vendor/face-api, lazy-loaded only
+               on first open). Off by default. CADS-webconference-demo#95:
+               opens a context menu listing every style directly (including
+               "None") instead of cycling through styles one click at a
+               time -- .ctl-menu-wrap gives the popup a position:relative
+               anchor without affecting the .controls flex row (the wrap
+               itself is the flex item; the button inside it is unaffected). -->
+          <div class="ctl-menu-wrap">
+            <button class="ctl" id="btn-video-filters" type="button" aria-label="Video filters: off" aria-haspopup="true" aria-expanded="false"><span class="ctl-icon">🎭</span><span class="ctl-label">Filters</span></button>
+            <div class="filter-menu" id="filter-menu" hidden role="menu" aria-label="Video filter">
+              <div class="filter-menu-note" id="filter-menu-note" hidden>Not available on the direct-channel connection -- switching filters here would freeze the video.</div>
+              <button type="button" class="filter-menu-item" data-style="" role="menuitemradio">None</button>
+              <button type="button" class="filter-menu-item" data-style="bunny" role="menuitemradio">🐰 Bunny ears</button>
+              <button type="button" class="filter-menu-item" data-style="sparkle" role="menuitemradio">✨ Sparkle</button>
+            </div>
+          </div>
           <button class="ctl hangup" id="btn-hangup" type="button" aria-label="Hang up"><span class="ctl-icon">📞</span><span class="ctl-label">Hang up</span></button>
         </div>
 

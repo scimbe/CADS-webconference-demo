@@ -64,6 +64,9 @@ const videoGrid = document.getElementById('video-grid');
 const localTile = document.getElementById('local-tile');
 const btnSwitchCamera = document.getElementById('btn-switch-camera');
 const btnVideoFilters = document.getElementById('btn-video-filters');
+const filterMenu = document.getElementById('filter-menu');
+const filterMenuNote = document.getElementById('filter-menu-note');
+const filterMenuItems = document.querySelectorAll('.filter-menu-item');
 const messengerShell = document.getElementById('messenger-shell');
 const msgMenuToggle = document.getElementById('msg-menu-toggle');
 const msgMenu = document.getElementById('msg-menu');
@@ -277,7 +280,7 @@ export {
   btnCancelCall, logoutLink, transportChannelCheckbox, contactsList, contactsEmpty,
   accessRemoveForm, accessRemoveEmail, accessNote, revokeAccessDetails, accessRemoveConsoleLink,
   accessRequestsDetails, accessRequestsBadge, accessRequestsList, accessRequestsEmpty,
-  videoGrid, localTile, btnSwitchCamera, btnVideoFilters, messengerShell, msgMenuToggle,
+  videoGrid, localTile, btnSwitchCamera, btnVideoFilters, filterMenu, filterMenuNote, filterMenuItems, messengerShell, msgMenuToggle,
   msgMenu, msgSearchForm, msgSearchInput, msgConvPlaceholder, msgConversation, msgBackBtn,
   msgCallBtn, msgBlockBtn, msgComposeForm, msgComposeInput, msgAttachBtn, msgAttachInput,
   convAvatar, convName, convRenameBtn, convStatus, convMessages, onlyContactsToggle,

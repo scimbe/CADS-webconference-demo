@@ -31,7 +31,7 @@ import {
   idEntry, idVerifyError, idVerifyErrorDetail, idVerifyRetry,
   dialForm, logoutLink, contactsList,
   accessRemoveForm, accessRemoveEmail, accessNote, accessRemoveConsoleLink,
-  videoGrid, localTile, btnSwitchCamera, btnVideoFilters, msgMenuToggle,
+  videoGrid, localTile, btnSwitchCamera, btnVideoFilters, filterMenu, msgMenuToggle,
   msgMenu, msgSearchForm, msgSearchInput, msgBackBtn,
   msgCallBtn, msgBlockBtn, msgComposeForm, msgComposeInput, msgAttachBtn, msgAttachInput,
   convName, convRenameBtn, onlyContactsToggle,
@@ -69,7 +69,7 @@ import {
 } from './chat-glue.js';
 import { runIdentityScreen } from './dialer.js';
 import { switchCamera } from './camera.js';
-import { cycleVideoFilter, stopVideoFilterCompositor } from './video-filters.js';
+import { selectFilterStyle, toggleFilterMenu, closeFilterMenu, stopVideoFilterCompositor } from './video-filters.js';
 import { runChannelMediaCall } from './call-channel.js';
 import { runWebrtcMediaCall } from './call-webrtc.js';
 import {
@@ -174,11 +174,28 @@ function setupControls(media, onHangup) {
     btnCam.dataset.off = camOn ? '0' : '1';
   };
   btnSwitchCamera.onclick = () => switchCamera(media);
-  btnVideoFilters.onclick = () => cycleVideoFilter(media);
+  // CADS-webconference-demo#95: opens the filter-picker menu instead of
+  // cycling styles directly -- filterMenu.onclick (item selection) and
+  // document.onclick (outside-click-to-close) are both property
+  // assignments too, same "setupControls may run twice" reasoning as
+  // every other handler here.
+  btnVideoFilters.onclick = () => toggleFilterMenu(media);
+  filterMenu.onclick = (ev) => {
+    const item = ev.target.closest('.filter-menu-item');
+    if (!item || item.disabled) return;
+    selectFilterStyle(media, item.dataset.style || null);
+    closeFilterMenu();
+  };
+  document.onclick = (ev) => {
+    if (!filterMenu.hidden && !filterMenu.contains(ev.target) && !btnVideoFilters.contains(ev.target)) {
+      closeFilterMenu();
+    }
+  };
   btnHangup.onclick = () => {
     try { onHangup(); } catch {}
     setStatus('you-hung-up');
     for (const t of (media.kind === 'media' ? media.stream.getTracks() : [])) t.stop();
+    closeFilterMenu();
     returnToDialerAfterHangup();
   };
 }
@@ -210,7 +227,7 @@ function returnToDialerAfterHangup(delayMs = 1200) {
 // -- see camera.js's header comment for the same circular-import stopgap
 // pattern) so call-channel.js's runChannelMediaCall can reach them; both
 // stay owned by app.js since they're shared plumbing between transports
-// (setupControls references switchCamera/cycleVideoFilter/btnHangup;
+// (setupControls references switchCamera/the filter menu/btnHangup;
 // returnToDialerAfterHangup is the single termination choke point every
 // transport funnels through). To be repointed once call-webrtc.js exists
 // and this shared plumbing finds a permanent, non-app.js home.
