@@ -61,22 +61,58 @@ async function doSyncNow() {
   // Push: new local rows per conversation this device knows about, plus
   // the current contacts/blocked tombstone state (small, always sent in
   // full -- see the bridge's own mergeEntries comment).
+  //
+  // CADS-webconference-demo#87 (live-reported): bundling every unsynced
+  // row for a conversation into ONE /sync/push call could exceed the
+  // bridge's 64KB MAX_BODY_BYTES cap (#12) outright -- confirmed live: a
+  // conversation with a file/image attachment (whose iv/ciphertext are
+  // JSON-encoded as plain number arrays, ~3.5-4x larger than the raw bytes
+  // -- see chatStore.js's _encryptBytes) reliably 413'd, and since the
+  // WHOLE push failed, the cursor never advanced -- silently stalling that
+  // conversation's sync forever, including every OTHER, smaller row
+  // bundled in the same call. The bridge's own comment on this route
+  // already anticipated this ("a device with a large backlog just calls
+  // this multiple times") -- this is that: rows are now batched by
+  // estimated JSON size, well under the server's cap, each submitted as
+  // its own push, with the cursor advanced per successful batch so a
+  // later failure doesn't lose progress already made on earlier ones.
+  const SYNC_PUSH_BATCH_BUDGET_BYTES = 32768; // half of MAX_BODY_BYTES -- headroom for the email field + JSON structure + this being a length-based estimate, not an exact byte count
   for (const peerEmail of myContacts.all()) {
     const sinceSeq = cursor.pushedSeq[peerEmail] || 0;
     const rows = await dialerChatStore.rowsSince(peerEmail, sinceSeq);
     if (!rows.length) continue;
-    const messages = rows.map((r) => ({
-      conversation: r.conversation,
-      seq: r.seq,
-      from: r.from,
-      ts: r.ts,
-      kind: r.kind,
-      iv: r.iv,
-      ciphertext: r.ciphertext,
-      ...(r.kind === 'file' ? { fileName: r.fileName, fileMimeType: r.fileMimeType, fileSize: r.fileSize } : {}),
-    }));
-    const resp = await api('/sync/push', { body: { email: myEmail, messages } });
-    if (!resp.error) cursor.pushedSeq[peerEmail] = Math.max(sinceSeq, ...rows.map((r) => r.seq));
+    let batch = [];
+    let batchBytes = 0;
+    let pushedThrough = sinceSeq;
+    const flushBatch = async () => {
+      if (!batch.length) return true;
+      const resp = await api('/sync/push', { body: { email: myEmail, messages: batch } });
+      if (resp.error) return false;
+      pushedThrough = Math.max(pushedThrough, ...batch.map((m) => m.seq));
+      batch = [];
+      batchBytes = 0;
+      return true;
+    };
+    for (const r of rows) {
+      const msg = {
+        conversation: r.conversation,
+        seq: r.seq,
+        from: r.from,
+        ts: r.ts,
+        kind: r.kind,
+        iv: r.iv,
+        ciphertext: r.ciphertext,
+        ...(r.kind === 'file' ? { fileName: r.fileName, fileMimeType: r.fileMimeType, fileSize: r.fileSize } : {}),
+      };
+      const msgBytes = JSON.stringify(msg).length;
+      if (batch.length && batchBytes + msgBytes > SYNC_PUSH_BATCH_BUDGET_BYTES) {
+        if (!(await flushBatch())) break;
+      }
+      batch.push(msg);
+      batchBytes += msgBytes;
+    }
+    await flushBatch();
+    cursor.pushedSeq[peerEmail] = pushedThrough;
   }
   await api('/sync/push', {
     body: { email: myEmail, contacts: { entries: myContacts.entriesRaw() }, blocked: { entries: blockedEmails.entriesRaw() } },
