@@ -59,7 +59,7 @@ import {
 } from './call-protocol.js';
 import { joinChannel, writeFramed, readFramed, withTimeout, sendTaggedFrame, closeAfterFlush } from './call-transport-shared.js';
 import {
-  setStatus, routeWebrtc, hideConnecting, addChatMessage, chatForm, chatInput, chatSend,
+  setStatus, routeWebrtc, connectingBanner, connectingBannerText, hideConnecting, addChatMessage, chatForm, chatInput, chatSend,
   remoteVideo, remoteEmpty, localVideo, localEmpty, log, setIceState,
 } from './ui-dom.js';
 import { createAckWaiter, flushOutbox } from './chat-glue.js';
@@ -277,6 +277,20 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
         log(`channel receive loop ended: ${e.message} -- attempting to reconnect`);
         addChatMessage('connection lost -- attempting to reconnect…', 'system');
         setStatus('connecting-media');
+        // CADS-webconference-demo#102 (live-reported): the chat message and
+        // status-pill text above already existed, but the chat panel is
+        // hidden entirely on the mobile full-screen call view (see
+        // index.html's mobile media query), and the status-pill text is
+        // small and easy to miss -- a real test run measured up to ~24s
+        // (CHANNEL_RECONNECT_GRACE_MS + detection latency) of the call
+        // screen just sitting there with no obviously-visible sign a
+        // recovery was even in progress. Reuses the same #connecting-banner
+        // element/positioning the initial call-setup phase already shows
+        // (visible on both desktop and mobile), repurposed here for a
+        // mid-call reconnect instead of leaving it exclusively for initial
+        // connect.
+        connectingBannerText.textContent = 'Reconnecting to the other side…';
+        connectingBanner.hidden = false;
         try {
           const fresh = await withTimeout(
             establishChannelSession(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller),
@@ -298,11 +312,13 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           log('channel reconnected -- resuming call');
           addChatMessage('reconnected', 'system');
           setStatus('in-call');
+          hideConnecting();
           continue;
         } catch (e2) {
           log(`channel reconnect failed: ${e2.message}`);
           setStatus('peer-hung-up');
           addChatMessage('peer connection lost', 'system');
+          hideConnecting();
           if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
           setActiveSession(null);
           returnToDialerAfterHangup();
