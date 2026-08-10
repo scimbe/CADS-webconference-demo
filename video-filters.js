@@ -4,14 +4,12 @@
 // client-code consolidation (CADS-webconference-demo#91); every function/
 // const here is a verbatim move, comments included, with no behavior change.
 //
-// CADS-webconference-demo#91 (temporary, per the consolidation plan): same
-// activeWebrtcPc circular-import stopgap camera.js's switchCamera already
-// uses, for the same reason (the inline WebRTC call setup hasn't been
-// extracted into its own call-webrtc.js module yet). Read-only here, safe
-// for the same reason -- see camera.js's own header comment.
+// CADS-webconference-demo#91: same activeWebrtcPc read-only import
+// camera.js's switchCamera uses -- see camera.js's own header comment.
+// call-webrtc.js is its permanent home as of that consolidation cycle.
 
 import { btnVideoFilters, log, addChatMessage, setCtlLabel } from './ui-dom.js';
-import { activeWebrtcPc } from './app.js';
+import { activeWebrtcPc } from './call-webrtc.js';
 
 // Live-requested: video filters, especially for kids. Vendored (not CDN --
 // this app's CSP is script-src 'self', see vendor/face-api/README.md) tiny

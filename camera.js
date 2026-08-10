@@ -3,18 +3,14 @@
 // function/const here is a verbatim move, comments included, with no
 // behavior change.
 //
-// CADS-webconference-demo#91 (temporary, per the consolidation plan):
-// switchCamera reaches into activeWebrtcPc, which is still declared and
-// owned by app.js (the inline WebRTC call setup hasn't been extracted into
-// its own call-webrtc.js module yet -- that's a later cycle). Imported back
-// from app.js as a circular-import stopgap, same pattern pairing.js
-// originally used for `api` before contacts.js existed -- read-only here
-// (camera.js never reassigns it, only app.js's own not-yet-extracted call
-// code does), so the live-binding import is safe. To be repointed to
-// call-webrtc.js once that module exists.
+// CADS-webconference-demo#91: switchCamera reaches into activeWebrtcPc,
+// owned by call-webrtc.js (its permanent home as of that consolidation
+// cycle). Read-only here (camera.js never reassigns it, only
+// call-webrtc.js's own webrtc call setup does), same safe live-binding
+// import pattern as every other circular import in this consolidation.
 
 import { btnSwitchCamera, log } from './ui-dom.js';
-import { activeWebrtcPc } from './app.js';
+import { activeWebrtcPc } from './call-webrtc.js';
 
 // CADS-webconference-demo (user feedback): this used to be acquired as soon
 // as the dialer/messenger screen came up (preloadLocalMedia, called from
