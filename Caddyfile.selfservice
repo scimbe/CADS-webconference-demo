@@ -50,7 +50,22 @@
 		reverse_proxy /api/access-requests {$WEBCONFERENCE_BRIDGE_ADDR}
 	}
 
-	handle {
+	# CADS-webconference-demo (live-reported): a brand-new/anonymous visitor
+	# used to hit the gate on EVERY request, including the very first static
+	# page load -- Caddy 302'd straight to the Keycloak login before the
+	# browser ever received index.html, so the app's own landing page (hero,
+	# "what's real, what's not", the e-mail entry form) never rendered at
+	# all. Only /ws/channel and /api/* actually need a verified identity
+	# (the real per-request Keycloak check, CADS-webconference-demo#9/#10) --
+	# static asset serving below is intentionally OUTSIDE the gate now, so
+	# the landing page always loads first; a login prompt (via a gated
+	# /api/whoami call the client already makes right after showing that
+	# screen, see dialer.js's runIdentityScreen) only follows once the app
+	# actually needs to know who you are, not before you've seen anything.
+	@gated {
+		path /ws/channel /api/*
+	}
+	handle @gated {
 	# Browser-Plane login gate (CADS-Tunnel#214): calls the control-plane's
 	# public /gate/check for every request. Caddy sets X-Forwarded-Host to
 	# this vhost's own Host header automatically, which is exactly what
@@ -160,8 +175,14 @@
 
 	reverse_proxy /ws/channel {$WEBCONFERENCE_EDGE_WS}
 	reverse_proxy /api/* {$WEBCONFERENCE_BRIDGE_ADDR}
-	root * /srv
-	file_server
+	}
+
+	# Ungated: the SPA shell itself (index.html + every JS module + wasm/
+	# vendor assets) -- see the comment on @gated above for why this no
+	# longer sits behind the login gate.
+	handle {
+		root * /srv
+		file_server
 	}
 
 	# handle_errors is NOT an ordered HTTP handler (confirmed live -- Caddy
