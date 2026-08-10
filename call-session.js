@@ -39,6 +39,19 @@
 //   that path to begin with -- matches today's behavior exactly, not a new
 //   limitation introduced by this interface.
 //
+// - kind ('webrtc' | 'channel'): CADS-webconference-demo (live-reported):
+//   toggling a video filter on the direct-channel transport froze the
+//   video image outright -- swapping the live camera track out of
+//   media.stream for the canvas-capture track (see video-filters.js) while
+//   an already-running MediaRecorder is bound to that stream stops the
+//   recorder's video input rather than picking up the new track (this
+//   transport's MediaRecorder has no RTCRtpSender.replaceTrack equivalent
+//   to hand a live substitution to). video-filters.js checks this field
+//   and refuses the swap with a clear message on a channel session instead
+//   of attempting it -- exposed here rather than re-deriving "which
+//   transport" some other way, since this session object is already the
+//   one thing both transports hand to their consumers.
+//
 // - requestFallbackToChannel(reason, peerInitiated = false): mirrors
 //   today's attemptChannelFallback(reason, peerInitiated) -- still inline
 //   in app.js's run(), itself already at the orchestration layer per the
@@ -104,6 +117,7 @@ function makeFallbackEmitter() {
 function createWebrtcCallSession(pc, media, notifyPeerFallback) {
   const emitter = makeFallbackEmitter();
   return {
+    kind: 'webrtc',
     async replaceOutgoingVideoTrack(track) {
       const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
       if (sender) await sender.replaceTrack(track);
@@ -131,6 +145,7 @@ function createWebrtcCallSession(pc, media, notifyPeerFallback) {
 function createChannelCallSession(media) {
   const emitter = makeFallbackEmitter();
   return {
+    kind: 'channel',
     async replaceOutgoingVideoTrack(_track) {
       // No peer-visible effect on this transport -- see header comment.
     },

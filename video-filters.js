@@ -224,6 +224,16 @@ function stopVideoFilterCompositor() {
 
 async function cycleVideoFilter(media) {
   if (media.kind !== 'media') return;
+  // CADS-webconference-demo (live-reported): toggling a filter on the
+  // direct-channel transport froze the video image outright -- see
+  // call-session.js's own comment on the `kind` field for the root cause
+  // (an already-running MediaRecorder doesn't pick up a live track swap
+  // the way RTCRtpSender.replaceTrack does). Refuse the swap up front on
+  // that transport instead of attempting it and freezing the call.
+  if (getActiveSession()?.kind === 'channel') {
+    addChatMessage('video filters aren\'t available on the direct-channel connection yet -- switching filters here would freeze the video', 'system');
+    return;
+  }
   videoFilterStyleIndex = (videoFilterStyleIndex + 1) % VIDEO_FILTER_STYLES.length;
   const style = VIDEO_FILTER_STYLES[videoFilterStyleIndex];
   if (style === null) {
