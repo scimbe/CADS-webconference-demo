@@ -21,6 +21,7 @@ import {
   btnAccept, btnDecline, btnCancelCall, transportChannelCheckbox, onlyContactsToggle,
   log, notifyIfHidden, playIncomingCallSound, isValidEmail, ensureNotificationPermission,
   showSetupScreen, idEntry, idForm, idEmailInput, idVerifyError, idVerifyErrorDetail, idVerifyRetry,
+  idGateRequired, idGateLoginBtn,
 } from './ui-dom.js';
 import { computeAttestation } from './identity.js';
 import { loadOrPairIdentity } from './pairing.js';
@@ -499,20 +500,30 @@ async function runDialer(identity, { verified = false } = {}) {
 // app's own CSP (connect-src 'self') then blocks the resulting cross-origin
 // request outright, so the fetch throws a raw "Failed to fetch" that landed
 // on the id-verify-error panel forever (its own Retry button can never
-// succeed, since the same redirect fires every time) instead of the normal
-// "not verified, please enter your e-mail" fallback below. redirect:'manual'
+// succeed, since the same redirect fires every time). redirect:'manual'
 // stops the browser from ever issuing that second, CSP-blocked request --
 // a denied gate check now resolves to response.type === 'opaqueredirect'
-// (no exception, no cross-origin request attempted at all), which this
-// treats exactly like a real {email:null} body: "no verified identity
-// available," the same safe, non-impersonatable signal an ungated tunnel
-// already produces. A genuine network failure (DNS, connection refused,
-// server down) still throws in the catch below and keeps showing the
-// id-verify-error panel, unchanged from before.
+// (no exception, no cross-origin request attempted at all).
+//
+// CADS-webconference-demo#101 second follow-up (live-reported): an
+// opaqueredirect is NOT the same thing as a real {email:null} JSON body,
+// and treating them identically (this function's first version) was itself
+// a bug -- {email:null} genuinely means the tunnel doesn't enforce login at
+// all, so free-text e-mail entry works end-to-end. An opaqueredirect means
+// the tunnel DOES enforce login and this visitor just isn't authenticated
+// -- /api/* and /ws/channel (see Caddyfile's @gated matcher) stay gated
+// regardless, so routing that case into the SAME free-text flow let
+// someone "go online" with a typed e-mail and then hit the exact same
+// CSP-blocked-redirect wall on every subsequent call (register, presence
+// socket, pairing) -- confusing, half-working, not a real fix. `gateDenied`
+// distinguishes the two so the caller can send a gate-denied visitor to a
+// real login prompt instead. A genuine network failure (DNS, connection
+// refused, server down) still throws in the catch below and keeps showing
+// the id-verify-error panel, unchanged from before.
 async function checkGateIdentity() {
   try {
     const resp = await fetch('/api/whoami', { redirect: 'manual' });
-    if (resp.type === 'opaqueredirect') return { email: null };
+    if (resp.type === 'opaqueredirect') return { email: null, gateDenied: true };
     const body = await resp.json().catch(() => ({}));
     if (!resp.ok && !body.error) body.error = `http ${resp.status}`;
     return body;
@@ -529,9 +540,12 @@ async function runIdentityScreen() {
   // by the origin's Caddyfile from the control-plane's /gate/check) always
   // wins over free-text entry or a stale localStorage identity -- otherwise
   // a gate-authenticated user could still go online as anyone they type in.
-  // A genuine {email: null} response just means the tunnel isn't gated (or
-  // the gate isn't enforcing yet), not an error -- falls through to the
-  // existing free-text flow below, same as always.
+  // A genuine {email: null, gateDenied: undefined} response means the
+  // tunnel isn't gated (or the gate isn't enforcing yet), not an error --
+  // falls through to the existing free-text flow below, same as always.
+  // {email: null, gateDenied: true} is the other, DIFFERENT "no email"
+  // case -- the tunnel IS enforcing login and this visitor just isn't
+  // authenticated -- routed to a real login prompt instead, see below.
   //
   // CADS-webconference-demo#32: api() never actually rejects (it catches
   // fetch failures internally and resolves to {error: '...'} instead), so
@@ -556,6 +570,14 @@ async function runIdentityScreen() {
     // recovery path, not a common one worth building real re-entrant state
     // management for.
     idVerifyRetry.addEventListener('click', () => location.reload());
+    return;
+  }
+  if (whoamiResp.gateDenied) {
+    idEntry.hidden = true;
+    idGateRequired.hidden = false;
+    idGateLoginBtn.onclick = () => {
+      location.href = `https://bunsenbrenner.org/gate/start?host=${encodeURIComponent(location.host)}&return=${encodeURIComponent(location.pathname)}`;
+    };
     return;
   }
   const verifiedEmail = whoamiResp.email;

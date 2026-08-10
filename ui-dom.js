@@ -38,6 +38,8 @@ const idEmailInput = document.getElementById('id-email');
 const idVerifyError = document.getElementById('id-verify-error');
 const idVerifyErrorDetail = document.getElementById('id-verify-error-detail');
 const idVerifyRetry = document.getElementById('id-verify-retry');
+const idGateRequired = document.getElementById('id-gate-required');
+const idGateLoginBtn = document.getElementById('id-gate-login-btn');
 const myEmailEl = document.getElementById('my-email');
 const dialForm = document.getElementById('dial-form');
 const dialEmailInput = document.getElementById('dial-email');
@@ -275,7 +277,8 @@ export {
   statusText, localVideo, remoteVideo, localEmpty, remoteEmpty, btnMic, btnCam, btnHangup,
   chatLog, chatForm, chatInput, chatSend, routeYou, routeSignal, routeWebrtc, routePeer,
   connectingBanner, connectingBannerText,
-  idEntry, idForm, idEmailInput, idVerifyError, idVerifyErrorDetail, idVerifyRetry, myEmailEl,
+  idEntry, idForm, idEmailInput, idVerifyError, idVerifyErrorDetail, idVerifyRetry,
+  idGateRequired, idGateLoginBtn, myEmailEl,
   dialForm, dialEmailInput, callNote, incomingCard, incomingFrom, btnAccept, btnDecline,
   btnCancelCall, logoutLink, transportChannelCheckbox, contactsList, contactsEmpty,
   accessRemoveForm, accessRemoveEmail, accessNote, revokeAccessDetails, accessRemoveConsoleLink,

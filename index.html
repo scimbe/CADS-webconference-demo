@@ -417,6 +417,19 @@
           <p style="margin:0 0 .6rem;font-size:.9rem">Couldn't verify your login just now (<span id="id-verify-error-detail"></span>). Not proceeding as an unverified identity — retry, or reload once your connection's back.</p>
           <button type="button" id="id-verify-retry">Retry</button>
         </div>
+        <!-- CADS-webconference-demo#101 follow-up (live-reported): this tunnel
+             requires a real Keycloak login, but the free-text form below can't
+             actually do anything on it -- /api/* and /ws/channel stay gated
+             (see Caddyfile), so a manually-entered e-mail could "go online"
+             here and then fail on every subsequent call (pairing, presence,
+             register) with confusing CSP/network errors. Shown instead of
+             id-entry when the gate itself says "denied" (not merely "no
+             verified email set" -- see dialer.js's checkGateIdentity), so a
+             visitor is pointed at the real login instead of a dead end. -->
+        <div id="id-gate-required" hidden style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:1rem;margin-bottom:1rem">
+          <p style="margin:0 0 .9rem;font-size:.9rem">This tunnel requires signing in first -- the free-text e-mail entry below only works on tunnels without login enforcement.</p>
+          <button type="button" id="id-gate-login-btn">Log in →</button>
+        </div>
         <div id="id-entry">
           <h2>Enter your e-mail</h2>
           <form class="id-form" id="id-form">
