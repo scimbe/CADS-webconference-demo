@@ -79,7 +79,7 @@
 
 import * as wasm from './pkg/ct_agent_wasm.js';
 import { TAG_FALLBACK } from './call-protocol.js';
-import { writeFramed, readFramed } from './call-transport-shared.js';
+import { writeFramed, readFramed, closeAfterFlush } from './call-transport-shared.js';
 import {
   setStatus, hideConnecting, addChatMessage, log, setIceState,
   localVideo, remoteVideo, localEmpty, remoteEmpty,
@@ -434,7 +434,11 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     sendSignal(wasm.encodeSignalBye()); // already in scope here -- no need to bounce through the (now-removed) window global
     pc.close();
     setActiveSession(null);
-    stream.ws.close(); // CADS-webconference-demo#38 (finding 9) -- see endCallDueToPeerLoss's matching comment
+    // CADS-webconference-demo (live-reported): closeAfterFlush, not a bare
+    // close() -- see its own comment in call-transport-shared.js. The bye
+    // just queued above needs a real chance to actually leave the socket
+    // before it's torn down, especially over a slow/lossy connection.
+    closeAfterFlush(stream.ws); // CADS-webconference-demo#38 (finding 9) -- see endCallDueToPeerLoss's matching comment
   };
   // #38 finding 6 -- same close logic runs on an explicit Hang Up click or a
   // pagehide (tab close/navigation) while this transport's call is live.

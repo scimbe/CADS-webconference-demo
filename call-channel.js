@@ -57,7 +57,7 @@ import * as wasm from './pkg/ct_agent_wasm.js';
 import {
   TAG_MEDIA_INIT, TAG_MEDIA_CHUNK, TAG_CHAT, TAG_BYE, NO_CAMERA_SENTINEL, NO_CODEC_SENTINEL,
 } from './call-protocol.js';
-import { joinChannel, writeFramed, readFramed, withTimeout, sendTaggedFrame } from './call-transport-shared.js';
+import { joinChannel, writeFramed, readFramed, withTimeout, sendTaggedFrame, closeAfterFlush } from './call-transport-shared.js';
 import {
   setStatus, routeWebrtc, hideConnecting, addChatMessage, chatForm, chatInput, chatSend,
   remoteVideo, remoteEmpty, localVideo, localEmpty, log, setIceState,
@@ -503,7 +503,14 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
     // returnToDialerAfterHangup's ~1200ms-delayed reload tore down the whole
     // page. Explicit close here (mirrors backgroundChatSession's own
     // stream.ws.close() in its finally block) frees it immediately instead.
-    byteStream.ws.close();
+    // CADS-webconference-demo (live-reported): closeAfterFlush, not a bare
+    // close() -- see its own comment in call-transport-shared.js. The
+    // TAG_BYE frame just queued above needs a real chance to actually
+    // leave the socket before it's torn down, especially over a slow/lossy
+    // connection -- this transport's own bye is exactly as vulnerable to
+    // the same immediate-close-drops-the-final-frame failure mode as the
+    // webrtc path's sendSignal(bye).
+    closeAfterFlush(byteStream.ws);
   };
   // #38 finding 6 -- same close logic runs on an explicit Hang Up click or a
   // pagehide (tab close/navigation) while this transport's call is live.

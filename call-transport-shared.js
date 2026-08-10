@@ -231,6 +231,37 @@ function sendTaggedFrame(stream, noiseTransport, tag, payloadBytes) {
   });
 }
 
+// CADS-webconference-demo (live-reported): "hanging up doesn't work
+// reliably" -- both onHangup implementations (call-webrtc.js/
+// call-channel.js) send a final bye/TAG_BYE frame and, in the very next
+// synchronous statement, close() the same WebSocket. WebSocket.send()
+// only QUEUES bytes for the underlying network layer to flush; it does not
+// guarantee they've actually left the browser before a following close()
+// runs. Per spec, a UA should flush queued data before completing a close
+// handshake, but this is exactly the kind of ordering guarantee that's far
+// more likely to be cut short on a slow/lossy connection (a mobile network
+// specifically) than on a fast local one -- consistent with the live
+// report not being reliably reproducible, and not being specific to
+// either side initiating. Waits for the socket's own bufferedAmount to
+// drain before closing, bounded by timeoutMs so a stalled/degraded
+// connection still closes promptly rather than hanging the teardown UI --
+// closing anyway once the bound is hit is strictly no worse than today's
+// unconditional immediate close.
+function closeAfterFlush(ws, timeoutMs = 300) {
+  if (ws.bufferedAmount === 0) {
+    ws.close();
+    return;
+  }
+  const deadline = Date.now() + timeoutMs;
+  (function poll() {
+    if (ws.bufferedAmount === 0 || Date.now() >= deadline) {
+      ws.close();
+      return;
+    }
+    setTimeout(poll, 20);
+  })();
+}
+
 export {
   WsByteStream,
   writeFramed,
@@ -239,4 +270,5 @@ export {
   readChallengeOrRefusal,
   joinChannel,
   sendTaggedFrame,
+  closeAfterFlush,
 };
