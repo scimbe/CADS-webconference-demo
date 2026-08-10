@@ -12,6 +12,7 @@ FROM caddy:2
 COPY index.html /srv/index.html
 COPY app.js /srv/app.js
 COPY call-protocol.js /srv/call-protocol.js
+COPY ui-dom.js /srv/ui-dom.js
 COPY chatStore.js /srv/chatStore.js
 COPY request-access.html /srv/request-access.html
 COPY request-access.js /srv/request-access.js
