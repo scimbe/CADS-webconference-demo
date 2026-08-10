@@ -165,6 +165,11 @@ function setupControls(media, onHangup) {
     for (const t of media.stream.getAudioTracks()) t.enabled = micOn;
     setCtlLabel(btnMic, micOn ? '🎤' : '🔇', micOn ? 'Mute' : 'Unmute');
     btnMic.dataset.off = micOn ? '0' : '1';
+    // CADS-webconference-demo#97 (live-reported, GUI-coverage test): the
+    // label text/icon already changed on click, but nothing exposed the
+    // toggle state to assistive tech -- aria-pressed mirrors dataset.off
+    // (true once the mic is muted, the button's "engaged" state).
+    btnMic.setAttribute('aria-pressed', String(!micOn));
   };
   btnCam.onclick = () => {
     if (media.kind !== 'media') return;
@@ -172,6 +177,9 @@ function setupControls(media, onHangup) {
     for (const t of media.stream.getVideoTracks()) t.enabled = camOn;
     setCtlLabel(btnCam, '📷', camOn ? 'Camera off' : 'Camera on');
     btnCam.dataset.off = camOn ? '0' : '1';
+    // CADS-webconference-demo#98: same fix as #97 above, mirrored for the
+    // camera toggle -- aria-pressed true once the camera is switched off.
+    btnCam.setAttribute('aria-pressed', String(!camOn));
   };
   btnSwitchCamera.onclick = () => switchCamera(media);
   // CADS-webconference-demo#95: opens the filter-picker menu instead of
