@@ -13,16 +13,16 @@
 //
 // Split out of app.js as part of the client-code consolidation
 // (CADS-webconference-demo#91); every function/const here is a verbatim
-// move, comments included, with no behavior change. Imports myEmail/
-// dialerChatStore/myContacts/blockedEmails/api/refreshContacts back from
-// app.js -- same deliberate, safe circular-import pattern pairing.js
-// already established (see its own header comment): api/refreshContacts
-// are hoisted function declarations, and myEmail/dialerChatStore/
-// myContacts/blockedEmails are live module bindings only ever read here
-// well after app.js has assigned them real values, not during either
-// module's top-level evaluation.
+// move, comments included, with no behavior change. myEmail/myContacts/
+// blockedEmails/api/refreshContacts now come from contacts.js (their
+// permanent home as of that consolidation cycle) -- dialerChatStore is
+// still imported from app.js, since it hasn't moved yet (chat-glue.js, a
+// later cycle) -- see contacts.js's own header comment for why these
+// particular cross-module reads are safe (live bindings/hoisted functions
+// only ever touched at runtime, well after every module has evaluated).
 
-import { myEmail, dialerChatStore, myContacts, blockedEmails, api, refreshContacts } from './app.js';
+import { myEmail, myContacts, blockedEmails, api, refreshContacts } from './contacts.js';
+import { dialerChatStore } from './app.js';
 
 function syncCursorKeyFor(email) {
   return `ct-webconference-sync-cursor:${email.toLowerCase()}`;

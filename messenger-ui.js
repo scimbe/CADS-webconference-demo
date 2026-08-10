@@ -5,12 +5,18 @@
 // of the client-code consolidation (CADS-webconference-demo#91); every
 // function/const here is a verbatim move, comments included, with no
 // behavior change.
+//
+// Circular with contacts.js, on purpose -- see that module's own header
+// comment for the full reasoning (same safe live-binding/hoisted-function
+// pattern as everywhere else in this consolidation). dialerChatStore still
+// comes from app.js (hasn't moved yet -- chat-glue.js, a later cycle).
 
 import {
   blockedList, blockedEmpty, dialEmailInput, msgConvPlaceholder, msgConversation,
   messengerShell, convAvatar, convName, convStatus, convMessages,
 } from './ui-dom.js';
-import { blockedEmails, myContacts, myNames, api, dialerChatStore, refreshContacts } from './app.js';
+import { blockedEmails, myContacts, myNames, api, refreshContacts } from './contacts.js';
+import { dialerChatStore } from './app.js';
 
 function formatMsgTime(ts) {
   const d = new Date(ts);

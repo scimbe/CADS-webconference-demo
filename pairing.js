@@ -12,15 +12,12 @@
 //
 // Split out of app.js as part of the client-code consolidation
 // (CADS-webconference-demo#91); every function/const here is a verbatim
-// move, comments included, with no behavior change. `api` is temporarily
-// imported back from app.js (still the generic fetch-wrapper's home until
-// a later consolidation cycle extracts contacts.js) -- safe circular
-// import since `api` is a hoisted function declaration there, never
-// referenced here until these functions actually run, well after both
-// modules have finished evaluating.
+// move, comments included, with no behavior change. `api` is imported from
+// contacts.js (its permanent home as of that consolidation cycle) -- a
+// module-level import like any other now, no longer a circular one.
 
 import { storageKeyFor, loadOrCreateIdentity, identityCreatedAt } from './identity.js';
-import { api } from './app.js';
+import { api } from './contacts.js';
 
 const PAIRING_CODE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789'; // matches the bridge's PAIRING_CODE_RE
 function generatePairingCode() {

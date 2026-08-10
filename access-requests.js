@@ -1,14 +1,14 @@
 // Admin-only panel for reviewing/approving/declining login-allowlist access
 // requests (people who hit /request-access.html because the gate's
 // allowlist rejected them) -- distinct from the separate "contact requests"
-// feature (someone wanting to be added as a contact, still in app.js/
-// contacts.js), which is a different concept entirely despite the similar
-// name. Split out of app.js as part of the client-code consolidation
+// feature (someone wanting to be added as a contact, contacts.js), which
+// is a different concept entirely despite the similar name. Split out of
+// app.js as part of the client-code consolidation
 // (CADS-webconference-demo#91); every function/const here is a verbatim
 // move, comments included, with no behavior change.
 
 import { accessRequestsList, accessRequestsEmpty, accessRequestsBadge, log } from './ui-dom.js';
-import { api } from './app.js';
+import { api } from './contacts.js';
 
 const KEYCLOAK_ADMIN_CONSOLE_BASE = 'https://auth.bunsenbrenner.org/admin/master/console/#/ct-demo/users';
 function keycloakAdminConsoleLink(email) {
