@@ -93,6 +93,7 @@ import {
   dialerChatStore,
 } from './chat-glue.js';
 import { runIdentityScreen } from './dialer.js';
+import { getLocalMedia, switchCamera } from './camera.js';
 import {
   setCallNote,
   noteApiResult,
@@ -111,43 +112,6 @@ import {
   setOnlyAcceptFromContacts,
 } from './contacts.js';
 
-// CADS-webconference-demo (user feedback): this used to be acquired as soon
-// as the dialer/messenger screen came up (preloadLocalMedia, called from
-// runDialer) rather than only once a call actually starts -- trading a real
-// cost (the camera/mic light stays on the entire time someone's just
-// browsing contacts or chatting, not only while actually calling) for
-// shaving getUserMedia's latency off the start of a call. Not worth it,
-// especially now that most time in this app has nothing to do with calling
-// at all. Acquired fresh at getLocalMedia() call time now -- i.e. only once
-// a call is actually starting -- accepting the latency this trades back in.
-// 'user' (front/selfie) is the sane default on a device with two cameras;
-// meaningless-but-harmless on a desktop webcam, which just ignores facingMode.
-let currentFacingMode = 'user';
-let cameraSwitchAvailable = false;
-
-async function getLocalMedia() {
-  let media;
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: currentFacingMode } });
-    log('real camera/microphone acquired');
-    media = { kind: 'media', stream };
-  } catch (e) {
-    log(`getUserMedia unavailable (${e.name || e}); falling back to a data channel probe -- \
-the same RTCPeerConnection/ICE machinery a real audio/video call uses, just without a \
-capture device attached in this environment`);
-    media = { kind: 'probe' };
-  }
-  try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    cameraSwitchAvailable = devices.filter((d) => d.kind === 'videoinput').length > 1;
-  } catch (_) {
-    // enumerateDevices itself failing isn't fatal -- the switch button just
-    // stays hidden, same as genuinely having only one camera.
-  }
-  btnSwitchCamera.hidden = !cameraSwitchAvailable;
-  return media;
-}
-
 // CADS-webconference-demo#38 (finding 7): switchCamera needs the active
 // RTCPeerConnection but is declared outside run()'s closure (it's shared by
 // both transports' hangup/control wiring) -- this used to be reached via
@@ -157,7 +121,13 @@ capture device attached in this environment`);
 // signaling. A module-private variable gives switchCamera the same access
 // without handing it to the whole page. Only ever set/cleared from run()'s
 // own webrtc branch below.
+// CADS-webconference-demo#91: exported (read-only, live binding) so
+// camera.js's switchCamera can reach it -- a temporary circular-import
+// stopgap until the WebRTC call setup itself moves into its own
+// call-webrtc.js module (a later consolidation cycle), at which point this
+// export moves there instead and camera.js's import repoints to it.
 let activeWebrtcPc = null;
+export { activeWebrtcPc };
 
 // CADS-webconference-demo#38 (finding 6): a closed tab/navigation away from
 // an active call previously sent no 'bye' at all -- the peer only learned
@@ -212,36 +182,6 @@ window.addEventListener('pagehide', () => {
 window.addEventListener('pageshow', (ev) => {
   if (ev.persisted && !callScreen.hidden) location.reload();
 });
-
-// Live front/back swap. Always correct for the local preview (video elements
-// track live additions/removals on the SAME MediaStream object). For an
-// active WebRTC call, also pushes the new track to the peer via
-// RTCRtpSender.replaceTrack -- the API this exists for, no renegotiation
-// needed. The experimental direct-channel transport (MediaRecorder-based, no
-// RTCPeerConnection) only gets the corrected LOCAL preview here -- its
-// recorder was already told a fixed stream, so switching mid-call keeps
-// sending the callee the outgoing track (before the swap), not a hard bug.
-async function switchCamera(media) {
-  if (media.kind !== 'media' || !cameraSwitchAvailable) return;
-  const nextFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
-  try {
-    const newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: nextFacingMode } });
-    const newTrack = newStream.getVideoTracks()[0];
-    const oldTrack = media.stream.getVideoTracks()[0];
-    if (oldTrack) {
-      media.stream.removeTrack(oldTrack);
-      oldTrack.stop();
-    }
-    media.stream.addTrack(newTrack);
-    currentFacingMode = nextFacingMode;
-    if (activeWebrtcPc) {
-      const sender = activeWebrtcPc.getSenders().find((s) => s.track && s.track.kind === 'video');
-      if (sender) await sender.replaceTrack(newTrack);
-    }
-  } catch (e) {
-    log(`camera switch failed: ${e.message || e}`);
-  }
-}
 
 // Live-requested: video filters, especially for kids. Vendored (not CDN --
 // this app's CSP is script-src 'self', see vendor/face-api/README.md) tiny
