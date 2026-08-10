@@ -173,10 +173,29 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
   // for the experimental video path. Resolves once every chunk has been
   // handed to the socket; flushOutbox (the caller) then awaits the ack the
   // same way it does for a text send.
+  // Robustness audit finding (proactive review, not yet live-reproduced):
+  // this loop used to fire every chunk of a file transfer (up to
+  // MAX_FILE_BYTES = 25MB, ~512 chunks) into stream.ws.send() with no
+  // backpressure at all -- unlike call-channel.js's own media-chunk
+  // sender (#70), which explicitly watches ws.bufferedAmount and pauses
+  // rather than letting it grow unbounded on a slow/lossy connection.
+  // WebSocket.send() is non-blocking and just keeps queuing into
+  // bufferedAmount if the network can't keep up; nothing here was
+  // checking it. waitForDrain below pauses between chunks once buffered
+  // data crosses the same high-water mark call-channel.js already
+  // established as reasonable, so a large attachment degrades to a
+  // slower send instead of ballooning the tab's outgoing buffer.
+  const FILE_SEND_HIGH_WATER = 262144; // matches call-channel.js's MEDIA_BACKPRESSURE_HIGH_WATER
+  async function waitForDrain() {
+    while (stream.ws.bufferedAmount > FILE_SEND_HIGH_WATER) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
   const sendFile = async (m) => {
     deadline = Math.max(deadline, Date.now() + fileTransferWindowMs(m.fileBytes.length));
     sendTagged(TAG_FILE_INIT, new TextEncoder().encode(JSON.stringify({ seq: m.seq, name: m.fileName, mimeType: m.fileMimeType, size: m.fileSize })));
     for (let off = 0; off < m.fileBytes.length; off += FILE_CHUNK_BYTES) {
+      await waitForDrain();
       sendTagged(TAG_FILE_CHUNK, m.fileBytes.subarray(off, off + FILE_CHUNK_BYTES));
     }
   };
