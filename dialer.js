@@ -491,6 +491,36 @@ async function runDialer(identity, { verified = false } = {}) {
   });
 }
 
+// CADS-webconference-demo#101 follow-up (live-reported): once the login
+// gate stopped covering static asset serving, a genuinely-unauthenticated
+// visitor on a gated tunnel reaches this screen and its /api/whoami check
+// -- which the gate still denies with a redirect to the (cross-origin)
+// Keycloak login page. A plain fetch() auto-follows that redirect, and this
+// app's own CSP (connect-src 'self') then blocks the resulting cross-origin
+// request outright, so the fetch throws a raw "Failed to fetch" that landed
+// on the id-verify-error panel forever (its own Retry button can never
+// succeed, since the same redirect fires every time) instead of the normal
+// "not verified, please enter your e-mail" fallback below. redirect:'manual'
+// stops the browser from ever issuing that second, CSP-blocked request --
+// a denied gate check now resolves to response.type === 'opaqueredirect'
+// (no exception, no cross-origin request attempted at all), which this
+// treats exactly like a real {email:null} body: "no verified identity
+// available," the same safe, non-impersonatable signal an ungated tunnel
+// already produces. A genuine network failure (DNS, connection refused,
+// server down) still throws in the catch below and keeps showing the
+// id-verify-error panel, unchanged from before.
+async function checkGateIdentity() {
+  try {
+    const resp = await fetch('/api/whoami', { redirect: 'manual' });
+    if (resp.type === 'opaqueredirect') return { email: null };
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok && !body.error) body.error = `http ${resp.status}`;
+    return body;
+  } catch (e) {
+    return { error: `network error: ${e.message || e}` };
+  }
+}
+
 async function runIdentityScreen() {
   await init('./pkg/ct_agent_wasm_bg.wasm');
   showSetupScreen();
@@ -515,7 +545,7 @@ async function runIdentityScreen() {
   // local identity that may not even match their gate session, with the UI
   // presenting the dialer as if nothing were wrong. Now stops and asks for
   // an explicit retry instead of guessing.
-  const whoamiResp = await api('/whoami');
+  const whoamiResp = await checkGateIdentity();
   if (whoamiResp.error) {
     idEntry.hidden = true;
     idVerifyErrorDetail.textContent = whoamiResp.error;
