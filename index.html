@@ -211,7 +211,7 @@
  .id-form{display:flex;gap:.6rem;max-width:26rem}
  .id-form input{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:.6rem .8rem;font:inherit;font-size:.9rem}
  .id-form input:focus{outline:none;border-color:var(--accent2)}
- .id-form button, a.btn{font-family:inherit;background:var(--accent2);color:#08211d;border:none;border-radius:8px;padding:.6rem 1.1rem;font-size:.88rem;font-weight:600;cursor:pointer;white-space:nowrap}
+ .id-form button, a.btn, button.btn{font-family:inherit;background:var(--accent2);color:#08211d;border:none;border-radius:8px;padding:.6rem 1.1rem;font-size:.88rem;font-weight:600;cursor:pointer;white-space:nowrap}
  .id-form button:disabled{opacity:.5;cursor:not-allowed}
  .online-badge{display:flex;align-items:center;gap:.5rem;font-size:.88rem;color:var(--muted2);margin-bottom:1.2rem}
  .online-badge .dot{width:8px;height:8px;border-radius:50%;background:var(--accent2);box-shadow:0 0 0 3px rgba(95,184,171,.2)}
@@ -428,7 +428,7 @@
              visitor is pointed at the real login instead of a dead end. -->
         <div id="id-gate-required" hidden style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:1rem;margin-bottom:1rem">
           <p style="margin:0 0 .9rem;font-size:.9rem">This tunnel requires signing in first -- the free-text e-mail entry below only works on tunnels without login enforcement.</p>
-          <button type="button" id="id-gate-login-btn">Log in →</button>
+          <button type="button" class="btn" id="id-gate-login-btn">Log in →</button>
           <!-- CADS-webconference-demo (live-reported): the gate-required panel
                only offered "Log in", nothing for someone who's never signed up
                at all -- Keycloak's own login screen has no visible next step
