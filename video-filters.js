@@ -258,6 +258,29 @@ async function selectFilterStyle(media, style) {
       setCtlLabel(btnVideoFilters, '🎭', 'Video filters: off');
       return;
     }
+    // Robustness audit finding (proactive review, not yet live-reproduced
+    // -- needs a real hangup landing inside the real network-fetch window
+    // of a first-ever loadFaceApi() call, timing-dependent): hangup
+    // (returnToDialerAfterHangup) calls stopVideoFilterCompositor() as its
+    // single choke-point cleanup, then reloads the page ~1.2s later. If
+    // that hangup happened WHILE this function's own await above was
+    // still in flight, videoFilterState was still null at cleanup time --
+    // stopVideoFilterCompositor() no-ops on a null state, correctly, since
+    // there was nothing to stop yet. But this continuation, resuming
+    // AFTER that cleanup already ran, would then go ahead and call
+    // startVideoFilterCompositor() anyway -- starting a brand-new rAF
+    // draw loop and 150ms detection setInterval that the choke point
+    // never got a chance to know about, left running until the already-
+    // scheduled reload eventually tears down the whole page. Re-checking
+    // getActiveSession() here (the same "is a call still live" signal
+    // this function already trusts for the channel-transport check at its
+    // own top) catches "the call ended while we were loading" and skips
+    // starting a compositor for a call that's already gone, instead of
+    // relying on the reload's timing to paper over it.
+    if (!getActiveSession()) {
+      btnVideoFilters.disabled = false;
+      return;
+    }
     btnVideoFilters.disabled = false;
     startVideoFilterCompositor(media);
   }
