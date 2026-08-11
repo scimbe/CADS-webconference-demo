@@ -618,7 +618,7 @@ async function getBearerToken() {
 
 async function cpFetch(path, body) {
   const serviceToken = await getBearerToken();
-  const token = serviceToken || process.env.CT_OIDC_TOKEN;
+  const token = serviceToken || readSecret('CT_OIDC_TOKEN');
   const sessionCookie = readSecret('CT_PORTAL_SESSION_COOKIE');
   const headers = { 'content-type': 'application/json' };
   if (token) headers['authorization'] = `Bearer ${token}`;
@@ -1498,7 +1498,7 @@ const [host, port] = LISTEN.split(':');
 server.listen(Number(port), host, () => {
   const authMode = OIDC_CLIENT_ID && OIDC_CLIENT_SECRET
     ? 'service-account (self-refreshing)'
-    : process.env.CT_OIDC_TOKEN
+    : readSecret('CT_OIDC_TOKEN')
       ? 'static bearer token (will expire, no refresh)'
       : readSecret('CT_PORTAL_SESSION_COOKIE')
         ? 'portal session cookie (will expire in ~8h, no refresh; login-allowlist add/remove needs this regardless)'
