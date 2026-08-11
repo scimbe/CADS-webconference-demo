@@ -508,6 +508,39 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
   setActiveCallBye(onHangup);
   setupControls(media, onHangup);
 
+  // Live-reported: "hangup still isn't reflected on the other side" -- an
+  // explicit Hang Up (or an ICE-restart offer, or a TAG_FALLBACK notice)
+  // sent well into an otherwise-stable call could arrive at a peer whose
+  // own signaling receive loop below had already silently given up. Root
+  // cause: readFramed(stream) below had no timeout override, so it
+  // inherited the ambient STALL_TIMEOUT_MS (60s) default -- appropriate for
+  // call-channel.js's own main receive loop (continuous TAG_MEDIA_CHUNK
+  // traffic every ~200ms means it never genuinely goes 60s quiet during a
+  // real call), but wrong for THIS signaling stream: once the initial ICE
+  // candidate trickle finishes (seconds into the call), nothing sends
+  // anything more over it until the next ICE restart, a channel fallback,
+  // or hangup -- entirely normal for a call to sit signaling-silent for
+  // minutes at a time. After 60s of that normal silence, the stall timeout
+  // fired, and the catch below (see its own comment) wrongly treated it
+  // identically to a genuine connection closure -- silently ending this
+  // loop's own readFramed calls for the rest of the call. From that point
+  // on, ANY later frame (a hangup bye included) would still physically
+  // arrive over the WebSocket, but nothing was calling readFramed anymore
+  // to ever read and dispatch it -- it just sat unprocessed in
+  // WsByteStream's own buffer. The peer was left with only the much slower
+  // heartbeat-channel (35s) / ICE-state-based detection paths, which
+  // matches the reported 20s+-to-minutes delay closely. A genuine
+  // connection closure is still detected instantly regardless of this
+  // timeout's size -- WsByteStream's own 'close' listener sets `closed`
+  // and wakes every waiter immediately (see _wake()'s own logic), so
+  // raising this timeout only removes the FALSE stall-trigger during
+  // legitimate silence, without weakening real-closure detection at all.
+  // 30 minutes is far longer than any signaling gap a real call in this
+  // demo should ever hit, while still existing as SOME backstop (matching
+  // STALL_TIMEOUT_MS's own stated purpose: a defense against an unexpected
+  // JS-level stall, not a tight bound).
+  const SIGNALING_STREAM_TIMEOUT_MS = 30 * 60 * 1000;
+
   // Background loop: every subsequent signaling message (from here on the
   // Noise session is established, so everything is encrypted) is decrypted,
   // decoded, and dispatched to the peer connection.
@@ -539,7 +572,7 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
       if (sessionEnded) return;
       let cipher;
       try {
-        cipher = await readFramed(stream);
+        cipher = await readFramed(stream, SIGNALING_STREAM_TIMEOUT_MS);
       } catch {
         return; // connection closed
       }
