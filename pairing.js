@@ -73,17 +73,28 @@ async function pairAsNewDevice(email) {
       const sharedKey = await pairingSharedKey(keyPair.privateKey, poll.oldDevicePubKeyJwk, 'decrypt');
       const receivedIdentity = await pairingDecrypt(sharedKey, poll.iv, poll.ciphertext);
       const key = storageKeyFor(email);
-      const existingRaw = localStorage.getItem(key);
-      if (existingRaw) {
-        const existing = JSON.parse(existingRaw);
-        // This browser already independently held a DIFFERENT identity for
-        // this email (e.g. used before pairing existed) -- the older key
-        // wins; a tie also keeps the existing one (arbitrary but
-        // deterministic, and never discards what was already here).
-        if (identityCreatedAt(existing) <= identityCreatedAt(receivedIdentity)) return existing;
-      }
-      localStorage.setItem(key, JSON.stringify(receivedIdentity));
-      return receivedIdentity;
+      // CADS-webconference-demo#119 follow-up: this reads-then-writes the
+      // SAME localStorage key identity.js's loadOrCreateIdentity does, so it
+      // needs the SAME navigator.locks lock name to actually serialize
+      // against it -- a tab finishing pairing here and another tab's
+      // concurrent loadOrCreateIdentity() for the same brand-new email
+      // would otherwise still race each other even after #119, just across
+      // two different functions instead of within one.
+      const merge = () => {
+        const existingRaw = localStorage.getItem(key);
+        if (existingRaw) {
+          const existing = JSON.parse(existingRaw);
+          // This browser already independently held a DIFFERENT identity for
+          // this email (e.g. used before pairing existed) -- the older key
+          // wins; a tie also keeps the existing one (arbitrary but
+          // deterministic, and never discards what was already here).
+          if (identityCreatedAt(existing) <= identityCreatedAt(receivedIdentity)) return existing;
+        }
+        localStorage.setItem(key, JSON.stringify(receivedIdentity));
+        return receivedIdentity;
+      };
+      if (typeof navigator === 'undefined' || !navigator.locks) return merge();
+      return navigator.locks.request(`ct-webconference-identity-lock:${key}`, merge);
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
