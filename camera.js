@@ -59,10 +59,40 @@ capture device attached in this environment`);
 // RTCPeerConnection) only gets the corrected LOCAL preview here -- its
 // recorder was already told a fixed stream, so switching mid-call keeps
 // sending the callee the outgoing track (before the swap), not a hard bug.
+// Robustness audit finding (proactive review, not yet live-reproduced --
+// needs two genuinely overlapping camera-switch requests, hard to force
+// deterministically even with a real double-click): nothing stopped a
+// rapid double-click on the switch-camera button from starting a second
+// switchCamera() while the first was still awaiting its own getUserMedia
+// (a real hardware round-trip, not instant). Two concrete problems, not
+// just wasted work:
+// 1. `nextFacingMode` is computed from `currentFacingMode` BEFORE either
+//    call's own await -- if both start before either finishes, both read
+//    the SAME stale currentFacingMode and request the SAME target facing
+//    mode, so what should have been "toggle, toggle back" instead
+//    silently collapses into "toggle twice to the same side."
+// 2. Worse: each invocation ends with its own
+//    `await session.replaceOutgoingVideoTrack(newTrack)` -- a second,
+//    independent async step with no ordering guarantee relative to the
+//    other invocation's own replaceTrack call. If the FIRST invocation's
+//    replaceTrack happens to resolve AFTER the second's (a genuine race
+//    between two independent RTCRtpSender.replaceTrack calls), the peer
+//    ends up receiving the first invocation's track as final -- which by
+//    then has already been .stop()'d locally by the second invocation's
+//    own cleanup. The peer would see a black/frozen remote video while
+//    the local preview and currentFacingMode both correctly show the
+//    intended camera.
+// Fix: a simple in-flight guard, same shape as the disable-during-action
+// pattern used for every other double-submit/re-entrancy fix this
+// session (dialForm, idForm, access-requests.js) -- a second click while
+// one switch is already in progress is now just a no-op instead of a
+// second overlapping attempt.
+let switchInFlight = false;
 async function switchCamera(media) {
-  if (media.kind !== 'media' || !cameraSwitchAvailable) return;
-  const nextFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
+  if (media.kind !== 'media' || !cameraSwitchAvailable || switchInFlight) return;
+  switchInFlight = true;
   try {
+    const nextFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
     const newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: nextFacingMode } });
     const newTrack = newStream.getVideoTracks()[0];
     const oldTrack = media.stream.getVideoTracks()[0];
@@ -76,6 +106,8 @@ async function switchCamera(media) {
     if (session) await session.replaceOutgoingVideoTrack(newTrack);
   } catch (e) {
     log(`camera switch failed: ${e.message || e}`);
+  } finally {
+    switchInFlight = false;
   }
 }
 
