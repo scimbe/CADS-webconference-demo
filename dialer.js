@@ -656,8 +656,28 @@ async function runIdentityScreen() {
       idEmailInput.reportValidity();
       return;
     }
-    const identity = await loadOrPairIdentity(email);
-    await runDialer(identity);
+    // Robustness audit finding (proactive review, not yet live-reproduced):
+    // same missing double-submit guard already found and fixed on dialForm
+    // (see that handler's own comment) -- rapid double-click/double-Enter
+    // fires this whole async handler twice concurrently. For a brand-new
+    // email (no local identity yet), loadOrPairIdentity's own confirm()
+    // dialog is a blocking native call, so two overlapping invocations
+    // can't truly interleave there -- but if a local identity already
+    // exists, loadOrPairIdentity resolves near-instantly with no await in
+    // between, and two concurrent runDialer(identity) calls would each
+    // independently wire up the whole dialer screen (presence socket,
+    // polling loops, every event listener runDialer registers), doubling
+    // all of it for the rest of the session. Same fix shape as dialForm:
+    // disable the submit button for the duration of one attempt.
+    const submitBtn = idForm.querySelector('button[type="submit"]');
+    if (submitBtn?.disabled) return;
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      const identity = await loadOrPairIdentity(email);
+      await runDialer(identity);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
   });
 }
 
