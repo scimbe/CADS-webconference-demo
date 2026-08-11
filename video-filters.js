@@ -85,6 +85,56 @@ function drawSparkle(ctx, x, y, r) {
   ctx.fill();
   ctx.restore();
 }
+// Live-requested: generic crown shape (a jagged band + round jewels), not
+// modeled on any specific franchise's design -- same "geometric shape, not
+// a raster likeness" approach as drawEar/drawSparkle above.
+function drawCrown(ctx, x, y, w, h, fillColor, jewelColor) {
+  ctx.save();
+  ctx.translate(x - w / 2, y - h);
+  ctx.fillStyle = fillColor;
+  ctx.beginPath();
+  ctx.moveTo(0, h);
+  ctx.lineTo(0, h * 0.35);
+  ctx.lineTo(w * 0.17, h * 0.7);
+  ctx.lineTo(w * 0.33, h * 0.1);
+  ctx.lineTo(w * 0.5, h * 0.55);
+  ctx.lineTo(w * 0.67, h * 0.1);
+  ctx.lineTo(w * 0.83, h * 0.7);
+  ctx.lineTo(w, h * 0.35);
+  ctx.lineTo(w, h);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = jewelColor;
+  for (const fx of [0.17, 0.5, 0.83]) {
+    ctx.beginPath();
+    ctx.arc(w * fx, h * 0.62, w * 0.045, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+// Six-armed ice-crystal shape -- deliberately not a snowflake emoji glyph or
+// any specific character's iconography, just a generic winter/ice motif.
+function drawSnowflake(ctx, x, y, r) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.strokeStyle = 'rgba(210, 240, 255, 0.95)';
+  ctx.lineWidth = Math.max(1.5, r * 0.12);
+  ctx.lineCap = 'round';
+  for (let i = 0; i < 6; i++) {
+    ctx.save();
+    ctx.rotate((i * Math.PI) / 3);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, -r);
+    ctx.moveTo(0, -r * 0.55);
+    ctx.lineTo(-r * 0.22, -r * 0.75);
+    ctx.moveTo(0, -r * 0.55);
+    ctx.lineTo(r * 0.22, -r * 0.75);
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+}
 // Kept deliberately simple -- geometric shapes anchored to real detected
 // landmark points, not raster sticker images (no extra asset files, and
 // nothing that could be mistaken for a real photo of anyone). Not a claim
@@ -132,6 +182,93 @@ function drawKidStickers(ctx, detection, style) {
       { x: box.x + box.width * 0.82, y: box.y - box.height * 0.12 },
     ];
     for (const s of spots) drawSparkle(ctx, s.x, s.y, eyeSpan * 0.2);
+  } else if (style === 'princess') {
+    const crownWidth = eyeSpan * 1.8;
+    const crownHeight = box.height * 0.32;
+    drawCrown(ctx, box.x + box.width / 2, box.top + crownHeight * 0.15, crownWidth, crownHeight, '#f6c453', '#ff6fa5');
+  } else if (style === 'ice-princess') {
+    // Generalized winter/ice theme -- icy palette + snowflake motif, not
+    // any specific character's braid, dress, or color design.
+    const crownWidth = eyeSpan * 1.7;
+    const crownHeight = box.height * 0.3;
+    drawCrown(ctx, box.x + box.width / 2, box.top + crownHeight * 0.15, crownWidth, crownHeight, '#cdeeff', '#8fd8ff');
+    drawSnowflake(ctx, box.x - box.width * 0.08, box.y + box.height * 0.15, eyeSpan * 0.28);
+    drawSnowflake(ctx, box.x + box.width * 1.08, box.y + box.height * 0.25, eyeSpan * 0.22);
+  } else if (style === 'snowman') {
+    // Generic snowman face: coal eyes + a carrot nose + a simple hat brim --
+    // not modeled on any specific character's proportions or body.
+    ctx.fillStyle = '#1c2733';
+    ctx.beginPath();
+    ctx.arc(leftEye.x, leftEye.y, eyeSpan * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(rightEye.x, rightEye.y, eyeSpan * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ff8a3d';
+    ctx.beginPath();
+    ctx.moveTo(noseTip.x, noseTip.y - eyeSpan * 0.06);
+    ctx.lineTo(noseTip.x + eyeSpan * 0.32, noseTip.y);
+    ctx.lineTo(noseTip.x, noseTip.y + eyeSpan * 0.06);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#22262b';
+    ctx.beginPath();
+    ctx.ellipse(box.x + box.width / 2, box.top - box.height * 0.02, box.width * 0.42, box.height * 0.07, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillRect(box.x + box.width * 0.28, box.top - box.height * 0.24, box.width * 0.44, box.height * 0.24);
+  } else if (style === 'mouse-ears') {
+    // A generic small animal's round ears (gray fur, pink inner ear) --
+    // same construction as the existing bunny filter's own ears, deliberately
+    // NOT a solid-black silhouette or any specific character's bow/color.
+    const earR = eyeSpan * 0.42;
+    const earY = box.top - box.height * 0.12;
+    for (const side of [-1, 1]) {
+      const ex = box.x + box.width / 2 + side * eyeSpan * 0.7;
+      ctx.fillStyle = '#8c92a6';
+      ctx.beginPath();
+      ctx.arc(ex, earY, earR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#f3b8c9';
+      ctx.beginPath();
+      ctx.arc(ex, earY, earR * 0.55, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#6b7182';
+    ctx.beginPath();
+    ctx.ellipse(noseTip.x, noseTip.y, eyeSpan * 0.06, eyeSpan * 0.045, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (style === 'pup') {
+    const earWidth = eyeSpan * 0.5;
+    const earHeight = box.height * 0.55;
+    const earY = box.top + earHeight * 0.15;
+    for (const side of [-1, 1]) {
+      ctx.save();
+      ctx.translate(box.x + box.width / 2 + side * eyeSpan * 0.85, earY);
+      ctx.rotate((side * 18 * Math.PI) / 180);
+      ctx.fillStyle = '#a9754f';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, earWidth / 2, earHeight / 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#7a5439';
+      ctx.beginPath();
+      ctx.ellipse(0, earHeight * 0.08, earWidth * 0.32, earHeight * 0.35, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.fillStyle = '#2b2420';
+    ctx.beginPath();
+    ctx.ellipse(noseTip.x, noseTip.y, eyeSpan * 0.11, eyeSpan * 0.08, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#2b2420';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(noseTip.x, noseTip.y + eyeSpan * 0.06);
+    ctx.lineTo(noseTip.x, noseTip.y + eyeSpan * 0.18);
+    ctx.stroke();
+    ctx.fillStyle = '#ff8fa3';
+    ctx.beginPath();
+    ctx.ellipse(noseTip.x, noseTip.y + eyeSpan * 0.32, eyeSpan * 0.09, eyeSpan * 0.16, 0, 0, Math.PI * 2);
+    ctx.fill();
   }
 }
 
@@ -244,7 +381,8 @@ function stopVideoFilterCompositor() {
 
 let startingCompositor = false; // guards the first-activation branch inside selectFilterStyle, below
 
-// Applies an explicit style (null | 'bunny' | 'sparkle') directly -- the
+// Applies an explicit style (null | 'bunny' | 'sparkle' | 'princess' |
+// 'ice-princess' | 'snowman' | 'mouse-ears' | 'pup') directly -- the
 // menu passes exactly which item was clicked, no cycling/index-tracking
 // needed. Current selection is read back from videoFilterState?.style
 // (null when off) rather than a separate tracked index.
