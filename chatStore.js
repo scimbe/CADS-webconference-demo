@@ -431,22 +431,34 @@ export class ChatStore {
     // outcome without touching the schema. 'me' sends aren't checked here:
     // their seq always comes fresh from nextSeqForSend() (this identity's
     // own Lamport tick), never replayed the way a resent peer seq is.
-    if (received) {
-      const existing = await new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE, 'readonly');
-        const idx = tx.objectStore(STORE).index('byConversation');
-        const req = idx.getAll(IDBKeyRange.only([conversation, seq]));
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-      });
-      const duplicate = existing.find((r) => r.from === from);
-      if (duplicate) return this._decodeRecord(duplicate);
-    }
-    // CADS-webconference-demo#74: built from the CANONICAL (already-
-    // lowercased) values that actually get stored, not the raw params --
-    // _decodeRecord rebuilds this same AAD from the stored row later, and
-    // it has to match byte-for-byte or every future legitimate read of
-    // this record would fail to decrypt too, not just a tampered one.
+    //
+    // Robustness audit finding (proactive review, not forced to reproduce
+    // live -- needs two genuinely concurrent writes for the exact same
+    // (conversation, seq, from), e.g. the same message arriving both over
+    // a live channel and an overlapping cross-device sync pull around the
+    // same moment): the check and the add used to run in TWO SEPARATE
+    // transactions (a readonly getAll, then a later readwrite add). Nothing
+    // stopped a second, concurrent record() call from also passing the
+    // duplicate check before either had committed its write -- both would
+    // then add their own row, defeating the exactly-once guarantee this
+    // whole check exists for. The primary key is auto-incrementing
+    // (openDb's own createObjectStore call), not derived from
+    // (conversation, seq, from), so IndexedDB's own add() would not itself
+    // reject the second row as a collision.
+    //
+    // Fixed below by running the check AND the (conditional) add inside
+    // ONE 'readwrite' transaction instead of two -- IndexedDB gives a
+    // readwrite transaction exclusive write access to the store for its
+    // whole lifetime, so no other transaction can commit a conflicting
+    // write in between anymore. Encryption still happens BEFORE this
+    // transaction opens, not inside it: crypto.subtle is a real async
+    // operation on a different event queue, and awaiting one while an
+    // IndexedDB transaction is open lets that transaction auto-commit out
+    // from under this code (a real IndexedDB gotcha) -- exactly why the
+    // original code needed two transactions to begin with once you factor
+    // encryption in. Doing the check-and-maybe-add as pure, uninterrupted
+    // IndexedDB-request callbacks (no intervening await on anything else)
+    // is what keeps it inside one transaction.
     const aadRecord = { conversation, peerEmail: peerEmail.toLowerCase(), from, seq, kind, fileName, fileMimeType, fileSize };
     const aad = this._buildAad(aadRecord);
     const { iv, ciphertext } = kind === 'file' ? await this._encryptBytes(fileBytes, aad) : await this._encrypt(text, aad);
@@ -462,12 +474,29 @@ export class ChatStore {
       ciphertext,
       ...(kind === 'file' ? { fileName, fileMimeType, fileSize } : {}),
     };
+    let duplicateRow = null;
     await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).add(record);
+      const store = tx.objectStore(STORE);
+      if (received) {
+        const idx = store.index('byConversation');
+        const req = idx.getAll(IDBKeyRange.only([conversation, seq]));
+        req.onsuccess = () => {
+          const duplicate = req.result.find((r) => r.from === from);
+          if (duplicate) {
+            duplicateRow = duplicate; // don't add -- let this transaction complete with nothing written
+            return;
+          }
+          store.add(record);
+        };
+        req.onerror = () => reject(req.error);
+      } else {
+        store.add(record); // 'me' sends are never duplicate-checked -- see the comment above
+      }
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
+    if (duplicateRow) return this._decodeRecord(duplicateRow);
     // CADS-webconference-demo#77: prune the oldest records past
     // MAX_MESSAGES_PER_CONVERSATION, oldest-first, right after a successful
     // write -- keeps this conversation's own row count (and therefore its
@@ -657,14 +686,6 @@ export class ChatStore {
   async mergeEncryptedRow(peerEmail, row) {
     const conversation = conversationKey(this.identity.email, peerEmail);
     const db = await this._getDb();
-    const existing = await new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE, 'readonly');
-      const idx = tx.objectStore(STORE).index('byConversation');
-      const req = idx.getAll(IDBKeyRange.only([conversation, row.seq]));
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-    if (existing.some((r) => r.from === row.from)) return null;
     const record = {
       conversation,
       peerEmail: peerEmail.toLowerCase(),
@@ -677,12 +698,33 @@ export class ChatStore {
       ciphertext: row.ciphertext,
       ...(row.kind === 'file' ? { fileName: row.fileName, fileMimeType: row.fileMimeType, fileSize: row.fileSize } : {}),
     };
+    // Robustness audit finding, same shape and same fix as record()'s own
+    // (see its comment): the check-for-existing and the add used to run in
+    // two separate transactions, leaving a real TOCTOU window for two
+    // concurrent syncs (or a sync overlapping a live receive of the same
+    // message) to both pass the check before either committed. No
+    // encryption step needed here (this row arrives already-encrypted from
+    // another of this identity's own devices), so the check and the add
+    // fit inside one transaction directly, no restructuring needed beyond
+    // that.
+    let isDuplicate = false;
     await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).add(record);
+      const store = tx.objectStore(STORE);
+      const idx = store.index('byConversation');
+      const req = idx.getAll(IDBKeyRange.only([conversation, row.seq]));
+      req.onsuccess = () => {
+        if (req.result.some((r) => r.from === row.from)) {
+          isDuplicate = true;
+          return;
+        }
+        store.add(record);
+      };
+      req.onerror = () => reject(req.error);
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
+    if (isDuplicate) return null;
     await this._pruneConversation(db, conversation);
     this.clock.observe(row.seq);
     let decoded;
