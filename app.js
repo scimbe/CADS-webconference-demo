@@ -607,7 +607,12 @@ async function run() {
   // the grant/attestation were actually issued for -- an opaque join
   // failure instead of an honest error about why.
   if ((!holderPrivHex || !noisePrivHex) && myEmail) {
-    const identity = loadOrCreateIdentity(myEmail, { requireExisting: true });
+    // loadOrCreateIdentity is now async (navigator.locks-based cross-tab
+    // atomicity, see its own comment) -- awaited here since the result is
+    // read synchronously right below, unlike pairing.js's own two call
+    // sites, which already correctly unwrap it via their enclosing async
+    // function's own `return` semantics.
+    const identity = await loadOrCreateIdentity(myEmail, { requireExisting: true });
     holderPrivHex = identity.holderPriv;
     noisePrivHex = identity.noisePriv;
   }

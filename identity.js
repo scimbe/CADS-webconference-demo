@@ -94,33 +94,59 @@ function storageKeyFor(email) {
 // actually issued for, producing an opaque join failure instead of an
 // honest "this browser/profile doesn't have it" error. requireExisting is
 // only ever passed true from that one call site.
-function loadOrCreateIdentity(email, { requireExisting = false } = {}) {
+//
+// Robustness audit finding (round 2 re-read, not yet forced to reproduce
+// live -- needs the SAME brand-new email submitted from two separate tabs
+// of the same browser within a genuinely narrow window): this whole
+// check-then-write body used to run synchronously with no cross-tab
+// atomicity -- fine within a single tab (JS has no yield point in here for
+// another call to interleave through), but two SEPARATE tabs each running
+// their own independent, uninterrupted execution of this same function for
+// the same never-before-seen email could both read `existing` as null,
+// both generate their OWN distinct keypair, and both localStorage.setItem
+// the same key -- whichever tab's write lands LAST silently wins, leaving
+// the OTHER tab holding (and about to register with the server) an
+// in-memory identity object that no longer matches what's actually
+// persisted. That tab would work for the rest of this page load, but a
+// LATER reload would load the other tab's keys instead, no longer matching
+// what the server has on file for it -- a real, if confusing, silent
+// mismatch, not immediately obvious as "the same bug" when it eventually
+// surfaces. Same shape and same fix as chatStore.js's own LamportClock.tick
+// (#25): navigator.locks serializes this across tabs for real, scoped per
+// email (via `key`, already email-specific) so unrelated identities never
+// contend with each other; falls back to the old non-atomic behavior only
+// if genuinely unavailable, same risk profile as before, not worse.
+async function loadOrCreateIdentity(email, { requireExisting = false } = {}) {
   const key = storageKeyFor(email);
-  const existing = localStorage.getItem(key);
-  if (existing) return JSON.parse(existing);
-  if (requireExisting) {
-    throw new Error(`no local identity found for ${email} -- this call link only works in the same browser profile that placed or accepted it`);
-  }
-  const holder = wasm.generate_holder_identity();
-  const noise = wasm.generate_noise_identity();
-  const identity = {
-    email,
-    holderPub: holder.public_hex,
-    holderPriv: holder.private_hex,
-    noisePub: noise.public_hex,
-    noisePriv: noise.private_hex,
-    // CADS-webconference-demo#87: bully-style tie-break input for device
-    // pairing -- when two browsers have independently minted DIFFERENT
-    // keys under the same email (today's status quo whenever no local
-    // identity exists yet), the older key wins and the newer one is
-    // discarded in favor of it. Self-reported and not attested -- fine
-    // here because pairing is a same-person, same-account action, not an
-    // adversarial one; see identityCreatedAt()'s own comment for how a
-    // pre-existing identity from before this field existed is treated.
-    createdAt: Date.now(),
+  const create = () => {
+    const existing = localStorage.getItem(key);
+    if (existing) return JSON.parse(existing);
+    if (requireExisting) {
+      throw new Error(`no local identity found for ${email} -- this call link only works in the same browser profile that placed or accepted it`);
+    }
+    const holder = wasm.generate_holder_identity();
+    const noise = wasm.generate_noise_identity();
+    const identity = {
+      email,
+      holderPub: holder.public_hex,
+      holderPriv: holder.private_hex,
+      noisePub: noise.public_hex,
+      noisePriv: noise.private_hex,
+      // CADS-webconference-demo#87: bully-style tie-break input for device
+      // pairing -- when two browsers have independently minted DIFFERENT
+      // keys under the same email (today's status quo whenever no local
+      // identity exists yet), the older key wins and the newer one is
+      // discarded in favor of it. Self-reported and not attested -- fine
+      // here because pairing is a same-person, same-account action, not an
+      // adversarial one; see identityCreatedAt()'s own comment for how a
+      // pre-existing identity from before this field existed is treated.
+      createdAt: Date.now(),
+    };
+    localStorage.setItem(key, JSON.stringify(identity));
+    return identity;
   };
-  localStorage.setItem(key, JSON.stringify(identity));
-  return identity;
+  if (typeof navigator === 'undefined' || !navigator.locks) return create();
+  return navigator.locks.request(`ct-webconference-identity-lock:${key}`, create);
 }
 
 // A real identity that predates this field (createdAt was added in #87)
