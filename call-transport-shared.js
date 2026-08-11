@@ -117,7 +117,7 @@ class WsByteStream {
     this.totalLen -= n;
     return out;
   }
-  async readLine() {
+  async readLine(timeoutMs) {
     while (true) {
       const buf = this._concat();
       const idx = buf.indexOf(0x0a);
@@ -139,7 +139,10 @@ class WsByteStream {
       // No fixed target length here (we don't know where '\n' will land) --
       // wait for strictly more bytes than we currently have, so this
       // properly re-suspends instead of spinning the same way readExact did.
-      await this._waitForBytes(this.totalLen + 1);
+      // timeoutMs (optional) is threaded through same as readExact's own --
+      // see joinChannel's own comment for why its call here passes a much
+      // shorter budget than the default STALL_TIMEOUT_MS.
+      await this._waitForBytes(this.totalLen + 1, timeoutMs);
     }
   }
   send(bytes) {
@@ -177,13 +180,16 @@ async function readFramed(stream, timeoutMs) {
 }
 
 // The join response is either a 2-byte b"NO" refusal or a 32-byte challenge --
-// two fixed lengths with no framing to disambiguate up front.
-async function readChallengeOrRefusal(stream) {
-  const first2 = await stream.readExact(2);
+// two fixed lengths with no framing to disambiguate up front. timeoutMs
+// (optional) threaded through same as readExact's own -- see joinChannel's
+// own comment for why its call here passes a shorter budget than the
+// default STALL_TIMEOUT_MS.
+async function readChallengeOrRefusal(stream, timeoutMs) {
+  const first2 = await stream.readExact(2, timeoutMs);
   if (first2[0] === 0x4e && first2[1] === 0x4f) {
     return { refused: true };
   }
-  const rest = await stream.readExact(30);
+  const rest = await stream.readExact(30, timeoutMs);
   const challenge = new Uint8Array(32);
   challenge.set(first2, 0);
   challenge.set(rest, 2);
@@ -214,6 +220,27 @@ async function readChallengeOrRefusal(stream) {
 // there's no reason to leave a doomed half-open connection attempt
 // dangling once this function itself has already given up on it.
 const CHANNEL_OPEN_TIMEOUT_MS = 15000;
+// Live-reported: a hard page reload mid-call re-enters run() fresh (a
+// reload replays the same call-screen URL params, including ws/grant/
+// holderPriv), attempting a brand-new joinChannel() against a channel/
+// grant the bridge may still consider tied to the just-abandoned
+// connection -- reproduced live as the ack-line read below stalling for
+// the FULL default STALL_TIMEOUT_MS (60s) with zero user-facing feedback
+// in the meantime ("stalled: no new data for 60000ms while waiting for 1
+// bytes (have 0)", console-confirmed). This wasn't a genuine JS deadlock
+// (the error DID eventually fire and get caught/logged -- WsByteStream's
+// own real-suspension fix from #38 is intact, not regressed), but a full
+// unexplained minute of an apparently-unresponsive "Connecting…" screen
+// reads as "frozen" to a real user regardless. The WS-open wait already
+// got a shorter timeout (CHANNEL_OPEN_TIMEOUT_MS, see the comment further
+// below) -- this closes the same gap for the REST of the join handshake
+// (challenge read + ack-line read), which had no timeout override at all
+// and so silently inherited the full 60s ambient default meant for an
+// already-established, ongoing call's quiet periods, not a fresh setup
+// attempt that should fail fast. Wrapping the whole post-connect
+// exchange in one try/catch (not just the open wait) means ANY setup
+// failure -- connect, join-request, challenge, or ack -- closes the
+// dangling ws the same way, instead of only the connect step doing so.
 async function joinChannel(wsUrl, grantHex, holderPrivHex) {
   const ws = new WebSocket(wsUrl);
   try {
@@ -225,27 +252,27 @@ async function joinChannel(wsUrl, grantHex, holderPrivHex) {
       CHANNEL_OPEN_TIMEOUT_MS,
       `channel connection timed out after ${CHANNEL_OPEN_TIMEOUT_MS / 1000}s`,
     );
+    const stream = new WsByteStream(ws);
+
+    const joinReq = wasm.buildChannelJoinRequest(grantHex, 'relay-only');
+    await writeFramed(stream, joinReq);
+
+    const resp = await readChallengeOrRefusal(stream, CHANNEL_OPEN_TIMEOUT_MS);
+    if (resp.refused) throw new Error('channel join refused');
+    const sig = wasm.holderSign(holderPrivHex, resp.challenge);
+    stream.send(sig);
+
+    const ackLine = await stream.readLine(CHANNEL_OPEN_TIMEOUT_MS);
+    log(`ack: ${ackLine.trim()}`);
+    if (!ackLine.startsWith('OK ')) throw new Error(`unexpected ack line: ${ackLine}`);
+    const parts = ackLine.trim().split(' ');
+    const peerNoiseHex = parts.length === 5 ? parts[2] : null;
+
+    return { ws, stream, peerNoiseHex };
   } catch (e) {
     try { ws.close(); } catch (_) {}
     throw e;
   }
-  const stream = new WsByteStream(ws);
-
-  const joinReq = wasm.buildChannelJoinRequest(grantHex, 'relay-only');
-  await writeFramed(stream, joinReq);
-
-  const resp = await readChallengeOrRefusal(stream);
-  if (resp.refused) throw new Error('channel join refused');
-  const sig = wasm.holderSign(holderPrivHex, resp.challenge);
-  stream.send(sig);
-
-  const ackLine = await stream.readLine();
-  log(`ack: ${ackLine.trim()}`);
-  if (!ackLine.startsWith('OK ')) throw new Error(`unexpected ack line: ${ackLine}`);
-  const parts = ackLine.trim().split(' ');
-  const peerNoiseHex = parts.length === 5 ? parts[2] : null;
-
-  return { ws, stream, peerNoiseHex };
 }
 
 // CADS-webconference-demo#91: previously two near-identical closures existed
@@ -304,4 +331,5 @@ export {
   joinChannel,
   sendTaggedFrame,
   closeAfterFlush,
+  CHANNEL_OPEN_TIMEOUT_MS,
 };

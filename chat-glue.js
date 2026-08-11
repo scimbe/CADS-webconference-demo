@@ -12,7 +12,7 @@
 
 import * as wasm from './pkg/ct_agent_wasm.js';
 import { TAG_CHAT, TAG_FILE_INIT, TAG_FILE_CHUNK, MAX_FILE_BYTES, FILE_CHUNK_BYTES, NO_CAMERA_SENTINEL } from './call-protocol.js';
-import { writeFramed, readFramed, joinChannel, sendTaggedFrame } from './call-transport-shared.js';
+import { writeFramed, readFramed, joinChannel, sendTaggedFrame, CHANNEL_OPEN_TIMEOUT_MS } from './call-transport-shared.js';
 import { computeAttestation, ensureWasmInit } from './identity.js';
 import {
   chatInput, chatSend, chatForm, remoteEmpty, log, addChatMessage, notifyIfHidden, playMessageSound,
@@ -137,15 +137,20 @@ function fileTransferWindowMs(sizeBytes) {
   return Math.min(5 * 60 * 1000, Math.max(BACKGROUND_CHAT_WINDOW_MS, (sizeBytes / 1024) * 50));
 }
 
+// Live-reported (call-transport-shared.js's joinChannel own comment has
+// the full root-cause detail): same "fresh setup attempt should fail
+// fast" fix as establishChannelSession's own matching comment -- these
+// readFramed calls had no timeout override and inherited the full 60s
+// ambient STALL_TIMEOUT_MS.
 async function connectBackgroundChannel(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller) {
   const { stream, peerNoiseHex } = await joinChannel(wsUrl, grantHex, holderPrivHex);
   if (!peerNoiseHex) throw new Error('no peer Noise key in ack -- peer not registered with a Noise key');
   const hs = isCaller ? wasm.NoiseHandshake.newInitiator(noisePrivHex, peerNoiseHex) : wasm.NoiseHandshake.newResponder(noisePrivHex);
   if (isCaller) {
     await writeFramed(stream, hs.writeMessage(new Uint8Array(0)));
-    hs.readMessage(await readFramed(stream));
+    hs.readMessage(await readFramed(stream, CHANNEL_OPEN_TIMEOUT_MS));
   } else {
-    hs.readMessage(await readFramed(stream));
+    hs.readMessage(await readFramed(stream, CHANNEL_OPEN_TIMEOUT_MS));
     await writeFramed(stream, hs.writeMessage(new Uint8Array(0)));
   }
   if (!hs.isFinished()) throw new Error('Noise handshake did not finish after 2 messages');

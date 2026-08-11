@@ -54,6 +54,7 @@ import {
   writeFramed,
   readFramed,
   joinChannel,
+  CHANNEL_OPEN_TIMEOUT_MS,
 } from './call-transport-shared.js';
 import { keycloakAdminConsoleLink } from './access-requests.js';
 import {
@@ -623,11 +624,17 @@ async function run() {
   setStatus('noise-handshake');
   const isCaller = role === 'caller';
   const hs = isCaller ? wasm.NoiseHandshake.newInitiator(noisePrivHex, peerNoiseHex) : wasm.NoiseHandshake.newResponder(noisePrivHex);
+  // Live-reported: a hard page reload mid-call re-enters this function
+  // fresh with the same call-screen URL params -- see joinChannel's own
+  // comment (call-transport-shared.js) for the full root-cause detail.
+  // These readFramed calls had no timeout override and silently inherited
+  // the full 60s ambient STALL_TIMEOUT_MS meant for an ongoing call's
+  // quiet periods, not a fresh setup attempt that should fail fast.
   if (isCaller) {
     await writeFramed(stream, hs.writeMessage(new Uint8Array(0)));
-    hs.readMessage(await readFramed(stream));
+    hs.readMessage(await readFramed(stream, CHANNEL_OPEN_TIMEOUT_MS));
   } else {
-    hs.readMessage(await readFramed(stream));
+    hs.readMessage(await readFramed(stream, CHANNEL_OPEN_TIMEOUT_MS));
     await writeFramed(stream, hs.writeMessage(new Uint8Array(0)));
   }
   if (!hs.isFinished()) throw new Error('Noise handshake did not finish after 2 messages');

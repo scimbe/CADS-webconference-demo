@@ -57,7 +57,7 @@ import * as wasm from './pkg/ct_agent_wasm.js';
 import {
   TAG_MEDIA_INIT, TAG_MEDIA_CHUNK, TAG_CHAT, TAG_BYE, NO_CAMERA_SENTINEL, NO_CODEC_SENTINEL,
 } from './call-protocol.js';
-import { joinChannel, writeFramed, readFramed, withTimeout, sendTaggedFrame, closeAfterFlush } from './call-transport-shared.js';
+import { joinChannel, writeFramed, readFramed, withTimeout, sendTaggedFrame, closeAfterFlush, CHANNEL_OPEN_TIMEOUT_MS } from './call-transport-shared.js';
 import {
   setStatus, routeWebrtc, connectingBanner, connectingBannerText, hideConnecting, addChatMessage, chatForm, chatInput, chatSend,
   remoteVideo, remoteEmpty, localVideo, localEmpty, log, setIceState,
@@ -67,15 +67,22 @@ import { getLocalMedia } from './camera.js';
 import { createChannelCallSession, setActiveSession } from './call-session.js';
 import { setupControls, returnToDialerAfterHangup, setActiveCallBye } from './app.js';
 
+// Live-reported (call-transport-shared.js's joinChannel own comment has
+// the full root-cause detail): the Noise handshake's own readFramed calls
+// below had no timeout override, silently inheriting the full 60s ambient
+// STALL_TIMEOUT_MS meant for an ongoing call's quiet periods -- same class
+// of "fresh setup attempt should fail fast" gap joinChannel's own
+// challenge/ack reads just got fixed for, applied here too since this is
+// squarely still the initial-setup phase, not a steady-state read.
 async function establishChannelSession(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller) {
   const { stream, peerNoiseHex } = await joinChannel(wsUrl, grantHex, holderPrivHex);
   if (!peerNoiseHex) throw new Error('no peer Noise key in ack -- peer not registered with a Noise key');
   const hs = isCaller ? wasm.NoiseHandshake.newInitiator(noisePrivHex, peerNoiseHex) : wasm.NoiseHandshake.newResponder(noisePrivHex);
   if (isCaller) {
     await writeFramed(stream, hs.writeMessage(new Uint8Array(0)));
-    hs.readMessage(await readFramed(stream));
+    hs.readMessage(await readFramed(stream, CHANNEL_OPEN_TIMEOUT_MS));
   } else {
-    hs.readMessage(await readFramed(stream));
+    hs.readMessage(await readFramed(stream, CHANNEL_OPEN_TIMEOUT_MS));
     await writeFramed(stream, hs.writeMessage(new Uint8Array(0)));
   }
   if (!hs.isFinished()) throw new Error('Noise handshake did not finish after 2 messages');
