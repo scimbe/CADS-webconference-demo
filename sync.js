@@ -158,6 +158,25 @@ async function doSyncNow() {
     }
     if (!stopped) await flushBatch();
     cursor.pushedSeq[peerEmail] = pushedThrough;
+    // Robustness audit finding (proactive review, not yet live-reproduced
+    // -- needs a real IndexedDB failure, e.g. under real storage pressure,
+    // mid-loop): saveSyncCursor used to only ever be called once, at the
+    // very end of this whole function -- but dialerChatStore.rowsSince()
+    // just above (unlike every other cross-boundary call in this loop,
+    // which all either check resp.error or carry their own .catch()) has
+    // no error handling at all. If it throws for some LATER contact in
+    // myContacts.all(), the exception propagates straight out of
+    // doSyncNow() uncaught, and the single end-of-function saveSyncCursor
+    // never runs -- silently losing the push-cursor progress this loop
+    // already made (and durably reflected server-side, via already-
+    // successful /sync/push calls) for every EARLIER contact processed in
+    // this same run, undermining the exact "a later failure doesn't lose
+    // progress already made on earlier ones" guarantee this file's own
+    // #87 comment above already promises for a single contact's own
+    // batches. Persisting the cursor right here, after each contact's own
+    // push loop completes, means that guarantee now actually holds across
+    // contacts too, not just within one.
+    saveSyncCursor(myEmail, cursor);
   }
   await api('/sync/push', {
     body: { email: myEmail, contacts: { entries: myContacts.entriesRaw() }, blocked: { entries: blockedEmails.entriesRaw() } },
@@ -183,6 +202,11 @@ async function doSyncNow() {
     if (resp.blocked?.entries) blockedEmails.merge(resp.blocked.entries);
     if (!resp.messages || resp.messages.length === 0 || resp.nextSince === cursor.pulledRevision) break;
     cursor.pulledRevision = resp.nextSince;
+    // Same reasoning as the push loop's own incremental saveSyncCursor
+    // above: myContacts.merge/blockedEmails.merge aren't guarded here
+    // either, so persist each page's pull progress as it's made instead
+    // of only once at the very end.
+    saveSyncCursor(myEmail, cursor);
   }
 
   saveSyncCursor(myEmail, cursor);
