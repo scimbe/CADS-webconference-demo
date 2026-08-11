@@ -219,7 +219,23 @@ async function readChallengeOrRefusal(stream, timeoutMs) {
 // with no cleanup handle, but a WebSocket DOES have one (.close()), so
 // there's no reason to leave a doomed half-open connection attempt
 // dangling once this function itself has already given up on it.
-const CHANNEL_OPEN_TIMEOUT_MS = 15000;
+// Live-reported (follow-up): with real two-device calls, this timeout was
+// firing on essentially every fresh call attempt -- not a reload-conflict
+// case, a first-time join between two genuinely active devices. 15000ms was
+// sized purely around the ORIGINAL bug's own UX concern ("a full
+// unexplained minute of 'Connecting…' reads as frozen", see the comment
+// below) -- it was never validated against real end-to-end join+handshake
+// timing, which includes a full page reload, WASM re-initialization, and
+// real network round-trips for BOTH sides independently reaching this same
+// point (each side's own reload is triggered by its own poll of the SAME
+// shared accepted_and_registered state, so real-world variance between two
+// different devices -- one slower to reload/reinit than the other -- adds
+// up quickly against a 15s budget). Raised to 30000: still meaningfully
+// faster than the original 60s default for the reload-conflict case #116
+// was fixing (so that UX improvement isn't fully reverted), while giving a
+// healthy first-time join realistic headroom to actually complete instead
+// of being killed mid-flight.
+const CHANNEL_OPEN_TIMEOUT_MS = 30000;
 // Live-reported: a hard page reload mid-call re-enters run() fresh (a
 // reload replays the same call-screen URL params, including ws/grant/
 // holderPriv), attempting a brand-new joinChannel() against a channel/
