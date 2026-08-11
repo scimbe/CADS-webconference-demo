@@ -5,6 +5,7 @@
 // consolidation (CADS-webconference-demo#91); every function/const here is a
 // verbatim move, comments included, with no behavior change.
 
+const bootLoading = document.getElementById('boot-loading');
 const setupScreen = document.getElementById('setup-screen');
 const callScreen = document.getElementById('call-screen');
 const siteHero = document.getElementById('site-hero');
@@ -342,12 +343,27 @@ function showAlertOverlay({ title, body, okLabel = 'OK' }) {
   });
 }
 
+// Live-reported: after a call ends (hangup reload, or a hung/frozen peer
+// finally getting torn down) the page could sit showing only the bare
+// hero/eyebrow text for a real, user-perceptible stretch -- neither this
+// function nor showCallScreen had run yet (both need a real WASM module
+// load, and the verified-login path also a live /api/whoami round-trip,
+// to complete first), with nothing signaling loading was in progress. On
+// a degraded connection -- likely exactly the condition already true if
+// what triggered the reload was a peer/connection problem -- this read as
+// landing on an unrelated/broken page. #boot-loading (index.html, visible
+// from first paint, no [hidden] there) covers that gap; hidden here since
+// every real code path (runIdentityScreen, run()) calls one of these two
+// functions before revealing anything else, so this is the single choke
+// point where "we now know what to show" is first true.
 function showSetupScreen() {
+  bootLoading.hidden = true;
   setupScreen.hidden = false;
   callScreen.hidden = true;
 }
 
 function showCallScreen() {
+  bootLoading.hidden = true;
   setupScreen.hidden = true;
   siteHero.hidden = true;
   landingMain.hidden = true;

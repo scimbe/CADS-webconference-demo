@@ -83,6 +83,7 @@ import { writeFramed, readFramed, closeAfterFlush } from './call-transport-share
 import {
   setStatus, hideConnecting, addChatMessage, log, setIceState,
   localVideo, remoteVideo, localEmpty, remoteEmpty, btnHangup,
+  connectingBanner, connectingBannerText,
 } from './ui-dom.js';
 import { setupChatChannel } from './chat-glue.js';
 import { getLocalMedia } from './camera.js';
@@ -155,6 +156,20 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
       return;
     }
     iceRestartAttempted = true;
+    // Live-reported (especially bad on mobile): the only feedback here used
+    // to be the chat message below -- invisible on mobile's full-screen
+    // call view (see index.html's own media query, chat panel not shown
+    // there at all) and easy to miss even on desktop. Same fix shape as
+    // #102 already established for call-channel.js's own reconnect banner
+    // (reused verbatim here, not duplicated logic) -- just never applied to
+    // this transport's OWN recovery path, which #102's own fix didn't
+    // touch. Shown for BOTH sides (outside the isCaller branch below),
+    // since a callee waiting on the caller's restart offer needs the same
+    // visibility as the caller actively sending one. Cleared by the
+    // existing pc.onconnectionstatechange 'connected' handler's own
+    // hideConnecting() call further down, unchanged.
+    connectingBannerText.textContent = 'Reconnecting…';
+    connectingBanner.hidden = false;
     if (isCaller) {
       log(`${reason} -- attempting an ICE restart`);
       addChatMessage('connection lost -- attempting to reconnect…', 'system');
@@ -216,6 +231,13 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     sessionEnded = true;
     log(`${reason} -- WebRTC never established a working connection, falling back to the direct-channel transport`);
     addChatMessage('WebRTC connection failed -- falling back to a direct relay…', 'system');
+    // Same visibility fix as attemptIceRestart's own comment above -- covers
+    // the moment between "ICE gave up" and runChannelMediaCall's own
+    // hideConnecting() call (its first few lines) confirming the channel
+    // transport is back up, instead of leaving the frozen last video frame
+    // on screen with only an invisible-on-mobile chat message.
+    connectingBannerText.textContent = 'Falling back to a direct connection…';
+    connectingBanner.hidden = false;
     setStatus('connecting-media');
     // Tell the peer BEFORE tearing down pc, so it switches into channel
     // mode in lockstep instead of being left speaking the old wasm signal

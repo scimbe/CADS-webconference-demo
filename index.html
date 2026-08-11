@@ -396,9 +396,33 @@
   #messenger-shell[data-conversation-open="1"] .msg-conversation-pane{display:flex}
   #messenger-shell[data-conversation-open="1"] .msg-back-btn{display:flex}
  }
+
+ /* ---- boot-loading overlay: live-reported -- after a call ends (hangup
+    reload, or a hung/frozen peer finally getting detected and torn down),
+    the page could sit showing only the bare hero/eyebrow text for a real,
+    user-perceptible stretch -- neither #setup-screen nor #messenger-shell
+    nor #call-screen had revealed itself yet (both need a real WASM module
+    load, and the verified-login path also a live /api/whoami round-trip,
+    to complete first), and NOTHING signaled that loading was even in
+    progress. On a degraded connection -- exactly the condition already
+    likely if what triggered the reload was a peer/connection problem in
+    the first place -- this read as landing on an unrelated/broken page,
+    not as "still loading." Visible from first paint (no [hidden] here,
+    unlike every other overlay in this file, which all start hidden) --
+    JS hides it explicitly the moment it knows what to show instead (see
+    ui-dom.js's showSetupScreen/showCallScreen, the two functions every
+    real code path already funnels through before revealing content). ---- */
+ #boot-loading{position:fixed;inset:0;z-index:200;background:var(--bg);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.9rem}
+ #boot-loading[hidden]{display:none}
+ #boot-loading .spinner{width:1.8rem;height:1.8rem;border-radius:50%;border:3px solid var(--line);
+  border-top-color:var(--accent2);animation:connecting-spin .8s linear infinite}
+ #boot-loading span{font-family:var(--mono);font-size:.8rem;letter-spacing:.04em;color:var(--muted2)}
+ @media (prefers-reduced-motion: reduce){#boot-loading .spinner{animation:none}}
 </style>
 </head>
 <body>
+<div id="boot-loading"><div class="spinner"></div><span>Loading…</span></div>
 <div class="hero" id="site-hero">
   <div class="wrap hero-top">
     <div class="brand"><span class="flame"></span>CADS-Tunnel <span class="tld">video call</span></div>
