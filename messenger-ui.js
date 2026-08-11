@@ -69,7 +69,21 @@ function revokeConvBlobUrls() {
   convBlobUrls = [];
 }
 
+// Robustness audit finding (proactive review, not yet live-reproduced):
+// rapidly opening two different conversations (contact A, then contact B
+// before A's own presence/history awaits resolve) had no re-entrancy
+// guard -- A's call could resume AFTER B's already finished, overwriting
+// convStatus with A's stale presence and, worse, clearing convMessages
+// and re-rendering A's history into what's now supposed to be B's
+// conversation pane, while currentConversationEmail correctly still says
+// B. Same class of stale-async-resolution race this codebase has fixed
+// several times elsewhere (dialer.js's incomingSocketGeneration,
+// contacts.js's refreshContactsInFlight) -- same fix shape: a generation
+// counter, checked after each await, so a superseded call's continuation
+// never touches UI state a newer call already owns.
+let conversationGeneration = 0;
 async function openConversation(email) {
+  const myGeneration = ++conversationGeneration;
   currentConversationEmail = email;
   dialEmailInput.value = email; // dial-form's existing submit handler reads this as the call target
   msgConvPlaceholder.hidden = true;
@@ -78,12 +92,14 @@ async function openConversation(email) {
   convAvatar.textContent = (email[0] || '?').toUpperCase();
   convName.textContent = myNames?.get(email) || email; // CADS-webconference-demo#54
   const presence = await api(`/presence?email=${encodeURIComponent(email)}`);
+  if (myGeneration !== conversationGeneration) return; // superseded by a newer openConversation call while this one was in flight
   convStatus.textContent = presence.online ? 'online' : 'offline';
   convStatus.dataset.online = presence.online ? '1' : '0';
   revokeConvBlobUrls(); // #59 -- release the previous render's file-attachment blob URLs before creating new ones
   convMessages.innerHTML = '';
   if (dialerChatStore) {
     const history = await dialerChatStore.history(email);
+    if (myGeneration !== conversationGeneration) return; // superseded again during the history load -- don't render into a pane a newer call already owns
     for (const m of history) appendConvMessage(m);
   }
   await refreshContacts(); // updates the .active row highlight
@@ -190,6 +206,7 @@ function markConvMessageDelivered(seq) {
 }
 
 function closeConversation() {
+  conversationGeneration++; // supersedes any still-in-flight openConversation() -- see its own comment; otherwise a pending call's continuation could re-render a conversation the user just explicitly closed
   revokeConvBlobUrls(); // #59 -- nothing left open to re-render into, so release now rather than waiting for the next openConversation
   currentConversationEmail = null;
   messengerShell.dataset.conversationOpen = '0';
