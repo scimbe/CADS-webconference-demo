@@ -185,6 +185,26 @@ function playChime(freqs, toneMs = 150) {
 function playIncomingCallSound() { playChime([880, 660], 180); }
 function playMessageSound() { playChime([660], 100); }
 
+// Robustness audit finding (proactive review, not yet live-reproduced --
+// needs a genuinely long-running call/session to observe, not a timing
+// race): log() and addChatMessage() below both appendChild a new DOM node
+// per call with nothing anywhere in the codebase ever pruning either list
+// -- confirmed by grep, zero removeChild/firstChild references to logEl or
+// chatLog outside this file. log() in particular is this app's single
+// choke point for virtually every network/signaling/reconnect/ICE event
+// across the whole call lifecycle (call-webrtc.js, call-channel.js,
+// chat-glue.js, video-filters.js all funnel through it), so an hours-long
+// call accumulates thousands of DOM nodes in the Technical readout panel,
+// each appendChild + the scrollTop reflow below it getting incrementally
+// more expensive as the list grows -- a real, if slow-building, memory/
+// render-cost leak on a long-running call, same class of issue as #59's
+// already-fixed unbounded blob: URL accumulation. addChatMessage has the
+// identical shape for the in-call chat panel (every real chat message
+// sent/received during a call, not just system notices). Capping both to
+// a bounded, generously-sized ring buffer (pruning the OLDEST entries)
+// keeps them from growing without limit while never losing meaningfully
+// recent diagnostic/chat history during normal use.
+const LOG_MAX_LINES = 500;
 function log(msg) {
   // Timestamped (HH:MM:SS.mmm) so the Technical readout panel can show how
   // far apart events actually happened -- important for diagnosing stalls/
@@ -195,6 +215,7 @@ function log(msg) {
   const line = document.createElement('div');
   line.textContent = `[${ts}] ${msg}`;
   logEl.appendChild(line);
+  while (logEl.childElementCount > LOG_MAX_LINES) logEl.removeChild(logEl.firstChild);
   logEl.scrollTop = logEl.scrollHeight;
   console.log(`[${ts}] ${msg}`);
 }
@@ -238,6 +259,10 @@ function hideConnecting() {
   connectingBanner.hidden = true;
 }
 
+// Same unbounded-growth reasoning as log()'s own comment above -- kept as
+// a separate constant (not a shared LOG_MAX_LINES) since these are two
+// independent panels with no reason to share a cap value.
+const CHAT_LOG_MAX_LINES = 500;
 function addChatMessage(text, who) {
   const div = document.createElement('div');
   div.className = who === 'system' ? 'chat-msg system' : `chat-msg ${who}`;
@@ -253,6 +278,7 @@ function addChatMessage(text, who) {
     div.appendChild(meta);
   }
   chatLog.appendChild(div);
+  while (chatLog.childElementCount > CHAT_LOG_MAX_LINES) chatLog.removeChild(chatLog.firstChild);
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
