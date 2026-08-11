@@ -146,8 +146,27 @@ window.addEventListener('pagehide', () => {
 // same guaranteed-correct recovery already used for identity-mismatch/
 // presence-lost: there's no live call left to preserve, pagehide already
 // ended it.
+//
+// Live-reported follow-up: this guard only checked callScreen -- but a
+// mobile device backgrounded WHILE still stuck on #boot-loading (the very
+// first thing painted, before either showSetupScreen() or showCallScreen()
+// ever runs -- see WASM_INIT_TIMEOUT_MS's own comment in
+// call-transport-shared.js for why that phase can get stuck at all) can
+// ALSO get bfcache-frozen there. Worse, that in-flight init() call's own
+// withTimeout backstop is itself a setTimeout, which is exactly the kind of
+// timer real mobile browsers throttle/freeze while backgrounded (already
+// well-established elsewhere in this file, e.g. the presence-socket
+// reconnect backoff's own comment on this) -- so the one safety net meant
+// to recover from a stall could itself be suspended right along with
+// everything else, and a bfcache restore afterward would resume the exact
+// same still-pending, still-stuck state. Checking #boot-loading's own
+// hidden flag alongside callScreen's closes this the same guaranteed way:
+// any bfcache restore that lands on either "stuck screen" forces the same
+// full reload.
 window.addEventListener('pageshow', (ev) => {
-  if (ev.persisted && !callScreen.hidden) location.reload();
+  if (!ev.persisted) return;
+  const bootLoadingEl = document.getElementById('boot-loading');
+  if (!callScreen.hidden || (bootLoadingEl && !bootLoadingEl.hidden)) location.reload();
 });
 
 function setupControls(media, onHangup) {
