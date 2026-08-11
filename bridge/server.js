@@ -745,10 +745,36 @@ function readBody(req) {
 // in a while.
 const DIRECTORY_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 const CONTACT_REQUEST_STALE_MS = 7 * 24 * 60 * 60 * 1000;
+// Robustness audit finding (proactive review, not yet live-reproduced --
+// needs a genuinely long-running bridge process to observe, not a timing
+// race): the CALL_TTL_MS check just below deliberately skips any call
+// that already reached accepted_and_registered -- see tryRegister's own
+// comment above ("sweepExpired() deliberately never expires an
+// accepted_and_registered call") -- so incomingByEmail doesn't keep
+// re-surfacing a long-finished call as a fresh incoming ring. That
+// reasoning is correct for the SHORT-term (~60s CALL_TTL_MS) window, but
+// nothing else ever prunes an accepted call's own pendingCalls entry --
+// unlike directory/contactRequests just below, which both get this exact
+// generous (days, not the short liveness window) leak-prevention sweep.
+// Every call this bridge ever successfully connects leaves one entry
+// (caller/callee emails, grants, attestations) sitting in memory for the
+// rest of the process's life, unboundedly, on a service explicitly meant
+// to be a durable, long-running deployment (see #68's own framing).
+// Every reader of pendingCalls (/api/attest, /api/cancel, /api/decline,
+// /api/call-status, /api/incoming) already handles a missing entry
+// gracefully (404 or {incoming:null}) -- the exact same response a truly
+// nonexistent/already-expired channel produces today -- so pruning a
+// call this stale is safe: no legitimate client still polls a channel
+// from a call accepted a week ago.
+const ACCEPTED_CALL_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 function sweepExpired() {
   const now = Date.now();
   for (const [channel, call] of pendingCalls) {
-    if (now - call.createdAt > CALL_TTL_MS && call.status?.state !== 'accepted_and_registered') {
+    if (call.status?.state === 'accepted_and_registered') {
+      if (now - call.createdAt > ACCEPTED_CALL_STALE_MS) pendingCalls.delete(channel);
+      continue;
+    }
+    if (now - call.createdAt > CALL_TTL_MS) {
       pendingCalls.delete(channel);
       if (incomingByEmail.get(call.calleeEmail) === channel) incomingByEmail.delete(call.calleeEmail);
     }
