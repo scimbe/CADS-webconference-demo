@@ -161,6 +161,18 @@ function setupControls(media, onHangup) {
   // Direct property assignment fully replaces the prior handler instead,
   // making a second setupControls() call for the same call safe by
   // construction, with no behavior change for the single-call case.
+  //
+  // Robustness audit finding (call-webrtc.js's attemptChannelFallback own
+  // comment has the full detail): that property-assignment fix prevented a
+  // second onHangup registration from stacking on top of the first, but
+  // left a real gap open in the OTHER direction -- the window between
+  // attemptChannelFallback starting the handoff and THIS function's own
+  // (re-)registration below, during which the old transport's now-unsafe
+  // onHangup was still the only one wired up. attemptChannelFallback now
+  // disables btnHangup for exactly that window; re-enabling it here is a
+  // harmless no-op for the normal single-call path (never disabled to
+  // begin with) and the actual fix for the fallback path.
+  btnHangup.disabled = false;
   btnMic.onclick = () => {
     if (media.kind !== 'media') return;
     micOn = !micOn;

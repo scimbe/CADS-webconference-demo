@@ -82,7 +82,7 @@ import { TAG_FALLBACK } from './call-protocol.js';
 import { writeFramed, readFramed, closeAfterFlush } from './call-transport-shared.js';
 import {
   setStatus, hideConnecting, addChatMessage, log, setIceState,
-  localVideo, remoteVideo, localEmpty, remoteEmpty,
+  localVideo, remoteVideo, localEmpty, remoteEmpty, btnHangup,
 } from './ui-dom.js';
 import { setupChatChannel } from './chat-glue.js';
 import { getLocalMedia } from './camera.js';
@@ -229,6 +229,32 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     session?.requestFallbackToChannel(reason, peerInitiated);
     pc.close();
     setActiveSession(null);
+    // Robustness audit finding (round 2 re-read, not yet live-reproduced --
+    // needs a real Hang Up click landing inside runChannelMediaCall's own
+    // getLocalMedia() re-acquisition window, timing-dependent): setupControls
+    // (app.js)'s own #67 comment already flags "the stale first onHangup
+    // closure closing over the now-reused signaling stream out from under
+    // the fallback's own call" as the risk its property-assignment fix
+    // guards against -- but that fix only prevents a SECOND registration
+    // from stacking on top of the first (addEventListener would have),
+    // it doesn't cover the real window where only the FIRST (this
+    // webrtc-transport's own) onHangup is registered at all: runChannelMediaCall
+    // doesn't call setupControls() again until AFTER its own `await
+    // getLocalMedia()` a good way into its body -- a real async gap (fresh
+    // camera/mic re-acquisition), not instant. A Hang Up click landing in
+    // that gap would still fire THIS transport's onHangup -- sending a
+    // stale wasm-encoded bye over `stream` (which the peer, already told
+    // via TAG_FALLBACK to expect raw tag-bytes, would just drop as a
+    // malformed frame -- never learning the call ended, the exact "peer-
+    // side detection takes too long" shape) and closeAfterFlush()-closing
+    // the SAME WebSocket runChannelMediaCall's own setup is about to need.
+    // Disabling the button here (setupControls always re-enables it as
+    // part of its own unconditional per-call setup, whichever transport
+    // calls it) closes the window the same way every other "disable
+    // during a risky async step" guard this session already uses does --
+    // a click during the gap is simply not delivered at all, instead of
+    // reaching a handler that's no longer safe to run.
+    btnHangup.disabled = true;
     // Release the pc-bound camera/mic tracks -- runChannelMediaCall acquires
     // its own via a fresh getLocalMedia() call, and holding both open at
     // once would leave a dangling capture session for no reason.
