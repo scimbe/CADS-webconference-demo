@@ -471,13 +471,28 @@ async function autoAcceptChatDelivery(incoming, identity) {
 // Lamport-ordered), and a message recorded by this SAME
 // identity's OTHER open tab (via chatStore's BroadcastChannel) also renders
 // live here if it's for this same conversation.
+//
+// Robustness audit finding (round 3 spot-check, not yet live-reproduced --
+// needs a real WebRTC call whose ICE fails and falls back to the direct-
+// channel transport, then a message for the same peer arriving via another
+// tab or a cross-device sync merge): the chatStore.onMessage subscription
+// below was never unsubscribed. call-webrtc.js's attemptChannelFallback
+// hands the SAME chatStore instance (constructed once per call, in app.js's
+// run()) to call-channel.js's runChannelMediaCall, which registers its OWN
+// chatStore.onMessage listener for the very same peer -- leaving two
+// listeners permanently registered on one ChatStore after a fallback. Every
+// later notified message would double-render in the in-call chat log, not
+// just in some narrow timing window. Returns the unsubscribe function
+// chatStore.onMessage itself already provides, so call-webrtc.js can
+// unsubscribe this listener before delegating to the channel transport.
 function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
   const ackWaiter = createAckWaiter(); // CADS-webconference-demo#21 -- see createAckWaiter's own comment
+  let unsubscribeOnMessage = null;
   if (chatStore && peerEmail) {
     chatStore.history(peerEmail).then((history) => {
       for (const m of history) addChatMessage(m.text, m.from);
     });
-    chatStore.onMessage((msg) => {
+    unsubscribeOnMessage = chatStore.onMessage((msg) => {
       if (msg.peerEmail === peerEmail.toLowerCase()) addChatMessage(msg.text, msg.from);
     });
   }
@@ -548,6 +563,7 @@ function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
     addChatMessage(text, 'me');
     chatInput.value = '';
   });
+  return unsubscribeOnMessage;
 }
 
 // Instantiated once identity is known so the chat list can show last-message

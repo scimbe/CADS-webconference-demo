@@ -284,6 +284,12 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     document.getElementById('transport-badge').textContent = 'direct-channel (fallback)';
     document.getElementById('chat-transport-note').textContent =
       '— tunneled through the same Noise_IK channel (fell back from WebRTC after ICE failed)';
+    // Robustness audit finding (round 3 spot-check) -- see setupChatChannel's
+    // own comment in chat-glue.js: runChannelMediaCall below registers its
+    // OWN chatStore.onMessage listener on this same chatStore instance;
+    // unsubscribe this transport's listener first so a later notified
+    // message doesn't double-render.
+    unsubscribeChatOnMessage?.();
     // Reuses the SAME stream/noiseTransport this whole call's Noise_IK
     // handshake already authenticated at the top of run() -- no re-dial,
     // no fresh grant/handshake needed, exactly the hand-off the #69/#67
@@ -450,16 +456,25 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
   // the caller creates it, the callee receives it via ondatachannel. Set up
   // after getLocalMedia() resolves so setupChatChannel knows whether to send
   // the no-camera sentinel the moment the channel opens.
+  // Robustness audit finding (round 3 spot-check, not yet live-reproduced --
+  // see setupChatChannel's own comment in chat-glue.js for the full race):
+  // captured here so attemptChannelFallback can unsubscribe this call's
+  // chatStore.onMessage listener before handing the SAME chatStore instance
+  // to call-channel.js's runChannelMediaCall, which registers its own.
+  // Without this, both listeners stay registered forever, double-rendering
+  // every later chat message notified via chatStore's BroadcastChannel/
+  // cross-device sync merge.
+  let unsubscribeChatOnMessage = null;
   let chatChannel;
   if (isCaller) {
     chatChannel = pc.createDataChannel('chat');
-    setupChatChannel(chatChannel, media.kind === 'media', chatStore, peerEmail);
+    unsubscribeChatOnMessage = setupChatChannel(chatChannel, media.kind === 'media', chatStore, peerEmail);
     setupHeartbeatChannel(pc.createDataChannel('heartbeat'));
   } else {
     pc.ondatachannel = (ev) => {
       if (ev.channel.label === 'chat') {
         chatChannel = ev.channel;
-        setupChatChannel(chatChannel, media.kind === 'media', chatStore, peerEmail);
+        unsubscribeChatOnMessage = setupChatChannel(chatChannel, media.kind === 'media', chatStore, peerEmail);
       } else if (ev.channel.label === 'heartbeat') {
         setupHeartbeatChannel(ev.channel);
       }
