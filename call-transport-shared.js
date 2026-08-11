@@ -338,6 +338,30 @@ function closeAfterFlush(ws, timeoutMs = 300) {
   })();
 }
 
+// Live-reported: after a hangup-triggered reload, a real mobile device got
+// stuck showing #boot-loading ("Loading…", visible from first paint, see
+// index.html's own comment) forever, with no error and no way forward short
+// of a manual re-navigation. Root cause: both run() and runIdentityScreen()
+// (app.js, dialer.js) start with a bare `await init('./pkg/ct_agent_wasm_bg.wasm')`
+// -- a real network fetch + WebAssembly.instantiate with no timeout of its
+// own (same class of gap CHANNEL_OPEN_TIMEOUT_MS above already closed for
+// the channel-join sequence, and STALL_TIMEOUT_MS for the byte stream). A
+// fetch() that stalls (not errors -- a genuinely dead/degraded connection,
+// plausible right after a call that was just using real bandwidth) never
+// resolves NOR rejects, so it hangs forever -- and since it never rejects,
+// run().catch()'s own top-level error handling (app.js) never fires either,
+// leaving the page frozen on whatever was visible before the throw, which
+// for a fresh reload is exactly the boot-loading spinner and nothing else.
+// Wrapping this call in withTimeout turns a silent hang into a real
+// rejection, which DOES reach the existing run().catch() handler and its
+// already-correct fallback UI (the id-verify-error panel, with a working
+// Retry-via-reload button) -- no new error-display code needed, just
+// making sure the existing one actually gets a chance to run. 20s is
+// generous for a real (if slow) WASM fetch+instantiate on mobile, while
+// still failing well within what a user would wait before giving up and
+// reloading manually anyway.
+const WASM_INIT_TIMEOUT_MS = 20000;
+
 export {
   WsByteStream,
   writeFramed,
@@ -347,5 +371,6 @@ export {
   joinChannel,
   sendTaggedFrame,
   closeAfterFlush,
+  WASM_INIT_TIMEOUT_MS,
   CHANNEL_OPEN_TIMEOUT_MS,
 };

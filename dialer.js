@@ -25,6 +25,7 @@ import {
 } from './ui-dom.js';
 import { computeAttestation } from './identity.js';
 import { loadOrPairIdentity } from './pairing.js';
+import { withTimeout, WASM_INIT_TIMEOUT_MS } from './call-transport-shared.js';
 import { syncNow } from './sync.js';
 import { refreshAccessRequests } from './access-requests.js';
 import { renderBlockedList } from './messenger-ui.js';
@@ -559,7 +560,14 @@ async function checkGateIdentity() {
 }
 
 async function runIdentityScreen() {
-  await init('./pkg/ct_agent_wasm_bg.wasm');
+  // Live-reported: see WASM_INIT_TIMEOUT_MS's own comment in
+  // call-transport-shared.js -- a stalled (not errored) fetch here used to
+  // hang forever, leaving the page frozen on #boot-loading (visible from
+  // first paint, see index.html) with no error and no recovery. Wrapped in
+  // withTimeout so a real stall becomes a rejection that reaches the
+  // top-level run().catch() (app.js, this function is only ever called
+  // from within run()) and its existing id-verify-error fallback UI.
+  await withTimeout(init('./pkg/ct_agent_wasm_bg.wasm'), WASM_INIT_TIMEOUT_MS, `loading the app module timed out after ${WASM_INIT_TIMEOUT_MS / 1000}s`);
   showSetupScreen();
 
   // CADS-Tunnel#214: a verified login-gate identity (X-Gate-Email, forwarded

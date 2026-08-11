@@ -54,7 +54,9 @@ import {
   writeFramed,
   readFramed,
   joinChannel,
+  withTimeout,
   CHANNEL_OPEN_TIMEOUT_MS,
+  WASM_INIT_TIMEOUT_MS,
 } from './call-transport-shared.js';
 import { keycloakAdminConsoleLink } from './access-requests.js';
 import {
@@ -631,7 +633,11 @@ async function run() {
   document.getElementById('chat-transport-note').textContent =
     transportMode === 'channel' ? '— tunneled through the same Noise_IK channel' : '— over a real WebRTC data channel';
 
-  await init('./pkg/ct_agent_wasm_bg.wasm');
+  // Live-reported: see WASM_INIT_TIMEOUT_MS's own comment in
+  // call-transport-shared.js -- a stalled (not errored) fetch here used to
+  // hang forever with no error and no way for run().catch() below to ever
+  // fire, leaving the page frozen on whatever was showing at the time.
+  await withTimeout(init('./pkg/ct_agent_wasm_bg.wasm'), WASM_INIT_TIMEOUT_MS, `loading the call module timed out after ${WASM_INIT_TIMEOUT_MS / 1000}s`);
 
   setStatus('joining');
   routeYou.classList.add('live');
