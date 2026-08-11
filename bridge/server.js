@@ -633,7 +633,34 @@ async function cpFetch(path, body) {
 // /me/channels gets, so a future CT_OIDC_TOKEN (once core's service-account
 // API lands) won't cover this specific pair of endpoints on its own.
 // `redirect: 'manual'` avoids needlessly following the 302 back to the full
-// /portal/tunnels HTML page -- an opaque redirect (status 0) means success.
+// /portal/tunnels HTML page.
+//
+// Live-diagnosed bug (found while investigating an unrelated report): the
+// `status === 0 ? 200 : status` mapping below assumed BROWSER fetch's
+// opaque-redirect behavior for `redirect: 'manual'` (status forced to 0,
+// type 'opaqueredirect', for exactly this reason -- treating it as success
+// was the original intent). This bridge runs in Node, where fetch (undici)
+// does NOT implement that browser security model: a manual-redirect
+// response's real 3xx status and Location header are directly visible
+// (confirmed empirically -- resp.type was 'basic', status was the genuine
+// 303, never 0 for this code in this runtime). So `status === 0` never
+// actually triggers here, and the REAL status flows straight through the
+// `>= 400` check every caller uses -- meaning ANY redirect, including an
+// auth-failure one, has been silently reported as success. Confirmed live:
+// portal_api.rs's login_allowlist_add_route (the control-plane handler this
+// calls) redirects to the bare "/portal" specifically when
+// session_subject_for(...) returns None (an expired/invalid
+// CT_PORTAL_SESSION_COOKIE) -- every OTHER path (real success, or any other
+// handler's own auth-failure guard) redirects somewhere more specific
+// (e.g. "/portal/tunnels"). With the CT_PORTAL_SESSION_COOKIE this
+// deployment currently has configured genuinely expired, every allowlist
+// add/remove call landed on that exact "/portal" failure redirect, which
+// this bridge reported back as {ok:true} -- an admin clicking Admit/Revoke
+// (or approving an access request) saw success and had the request cleared
+// from their pending list, while NOTHING was actually granted or revoked
+// control-plane-side. Now treats a redirect to exactly "/portal" as the
+// distinguishable failure it is; any other redirect (or a genuine 2xx) is
+// still treated as success, same as before for the actual-success case.
 async function cpFetchForm(path, fields) {
   const sessionCookie = readSecret('CT_PORTAL_SESSION_COOKIE');
   if (!sessionCookie) return { status: 401, text: 'CT_PORTAL_SESSION_COOKIE not configured' };
@@ -643,6 +670,15 @@ async function cpFetchForm(path, fields) {
     body: new URLSearchParams(fields).toString(),
     redirect: 'manual',
   });
+  if (resp.status >= 300 && resp.status < 400) {
+    const location = resp.headers.get('location');
+    let locationPath = location;
+    try { locationPath = location ? new URL(location, CP_URL).pathname : location; } catch (_) { /* keep raw location */ }
+    if (locationPath === '/portal') {
+      return { status: 401, text: 'control plane redirected to /portal -- CT_PORTAL_SESSION_COOKIE is likely expired or invalid' };
+    }
+    return { status: 200, text: '' };
+  }
   const status = resp.status === 0 ? 200 : resp.status;
   return { status, text: await resp.text().catch(() => '') };
 }
