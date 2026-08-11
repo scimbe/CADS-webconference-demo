@@ -99,6 +99,11 @@ const tabRequests = document.getElementById('tab-requests');
 const requestsBadge = document.getElementById('requests-badge');
 const requestsList = document.getElementById('requests-list');
 const requestsEmpty = document.getElementById('requests-empty');
+const confirmOverlay = document.getElementById('confirm-overlay');
+const confirmOverlayTitle = document.getElementById('confirm-overlay-title');
+const confirmOverlayBody = document.getElementById('confirm-overlay-body');
+const confirmOverlayOk = document.getElementById('confirm-overlay-ok');
+const confirmOverlayCancel = document.getElementById('confirm-overlay-cancel');
 
 // CADS-webconference-demo#31: a WASM-thrown crypto error (holderSign,
 // NoiseHandshake, encrypt/decrypt, etc.) can echo its offending input in
@@ -288,6 +293,55 @@ function setCtlLabel(btn, icon, label) {
   btn.setAttribute('aria-label', label);
 }
 
+// Live-reported: pairing's "no account on this device yet" prompt used a
+// native browser confirm() -- this in-page overlay replaces it (and
+// alert(), via showAlertOverlay below), reusing the single shared
+// #confirm-overlay markup (index.html). Built with re-entrancy in mind
+// from the start, matching this session's established double-submit/
+// re-entrancy-guard pattern: the overlay can only ever show ONE prompt at
+// a time, so if a second call arrives while one is still showing, the
+// FIRST call's promise is resolved (as cancelled) before the second one
+// takes over -- no caller is ever left with a permanently-unresolved
+// promise.
+let activeOverlayResolve = null;
+function closeConfirmOverlay(result) {
+  confirmOverlay.hidden = true;
+  confirmOverlayOk.onclick = null;
+  confirmOverlayCancel.onclick = null;
+  const resolve = activeOverlayResolve;
+  activeOverlayResolve = null;
+  if (resolve) resolve(result);
+}
+function showConfirmOverlay({ title, body, confirmLabel = 'OK', cancelLabel = 'Cancel' }) {
+  if (activeOverlayResolve) closeConfirmOverlay(false);
+  return new Promise((resolve) => {
+    activeOverlayResolve = resolve;
+    confirmOverlayTitle.textContent = title;
+    confirmOverlayBody.textContent = body;
+    confirmOverlayOk.textContent = confirmLabel;
+    confirmOverlayCancel.textContent = cancelLabel;
+    confirmOverlayCancel.hidden = false;
+    confirmOverlayOk.onclick = () => closeConfirmOverlay(true);
+    confirmOverlayCancel.onclick = () => closeConfirmOverlay(false);
+    confirmOverlay.hidden = false;
+  });
+}
+// Single-button variant (replaces alert()) -- same shared overlay, cancel
+// button hidden, resolves once OK is clicked.
+function showAlertOverlay({ title, body, okLabel = 'OK' }) {
+  if (activeOverlayResolve) closeConfirmOverlay(false);
+  return new Promise((resolve) => {
+    activeOverlayResolve = () => resolve();
+    confirmOverlayTitle.textContent = title;
+    confirmOverlayBody.textContent = body;
+    confirmOverlayOk.textContent = okLabel;
+    confirmOverlayCancel.hidden = true;
+    confirmOverlayOk.onclick = () => closeConfirmOverlay();
+    confirmOverlayCancel.onclick = null;
+    confirmOverlay.hidden = false;
+  });
+}
+
 function showSetupScreen() {
   setupScreen.hidden = false;
   callScreen.hidden = true;
@@ -320,4 +374,5 @@ export {
   sanitizeErrorMessage, isValidEmail, ensureNotificationPermission, notifyIfHidden,
   playIncomingCallSound, playMessageSound, log, setStatus, setIceState, showConnecting,
   hideConnecting, addChatMessage, setCtlLabel, showSetupScreen, showCallScreen,
+  showConfirmOverlay, showAlertOverlay,
 };

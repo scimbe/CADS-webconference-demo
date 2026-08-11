@@ -18,6 +18,7 @@
 
 import { storageKeyFor, loadOrCreateIdentity, identityCreatedAt } from './identity.js';
 import { api } from './contacts.js';
+import { showConfirmOverlay, showAlertOverlay } from './ui-dom.js';
 
 const PAIRING_CODE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789'; // matches the bridge's PAIRING_CODE_RE
 function generatePairingCode() {
@@ -56,11 +57,15 @@ async function pairAsNewDevice(email) {
   const code = generatePairingCode();
   const offerResp = await api('/pair/offer', { body: { email, code, tempPubKeyJwk: pubJwk } });
   if (offerResp.error) throw new Error(offerResp.error);
-  alert(
-    `Pairing code: ${code}\n\nOn your OTHER (already set up) device: open the menu -> ` +
+  // Live-reported: this used to be a native alert() -- see loadOrPairIdentity's
+  // own comment for the same fix on the confirm() just below it.
+  await showAlertOverlay({
+    title: 'Pairing code',
+    body:
+      `${code}\n\nOn your OTHER (already set up) device: open the menu -> ` +
       `"Pair a new device" and enter this code. This continues automatically once paired ` +
-      `-- times out in 5 minutes.`
-  );
+      `-- times out in 5 minutes.`,
+  });
   const deadline = Date.now() + 5 * 60 * 1000;
   while (Date.now() < deadline) {
     const poll = await api(`/pair/poll?code=${encodeURIComponent(code)}`);
@@ -91,15 +96,23 @@ async function pairAsNewDevice(email) {
 // reopening the app on a device that's already set up.
 async function loadOrPairIdentity(email) {
   if (localStorage.getItem(storageKeyFor(email))) return loadOrCreateIdentity(email);
-  const wantsPairing = confirm(
-    'No account found on this device yet. Pair with an already-set-up device instead of ' +
-      'starting a brand-new, empty account here? (Cancel to start fresh on this device.)'
-  );
+  // Live-reported: this used to be a native browser confirm() -- replaced
+  // with an in-page overlay (ui-dom.js's showConfirmOverlay/#confirm-overlay)
+  // explaining the choice instead of a jarring browser popup.
+  const wantsPairing = await showConfirmOverlay({
+    title: 'No account on this device yet',
+    body: `No account found on this device yet for ${email}. Pair with an already-set-up device instead of starting a brand-new, empty account here?`,
+    confirmLabel: 'Pair with another device',
+    cancelLabel: 'Start fresh on this device',
+  });
   if (wantsPairing) {
     try {
       return await pairAsNewDevice(email);
     } catch (e) {
-      alert(`Pairing failed: ${e.message || e}. Starting a new, empty account on this device instead.`);
+      await showAlertOverlay({
+        title: 'Pairing failed',
+        body: `${e.message || e}. Starting a new, empty account on this device instead.`,
+      });
     }
   }
   return loadOrCreateIdentity(email);

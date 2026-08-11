@@ -39,6 +39,7 @@ import {
   sanitizeErrorMessage, isValidEmail,
   log, setStatus, showConnecting,
   hideConnecting, setCtlLabel, showSetupScreen, showCallScreen,
+  showConfirmOverlay, showAlertOverlay,
 } from './ui-dom.js';
 import {
   forgetIdentityKeys,
@@ -310,8 +311,17 @@ logoutLink.addEventListener('click', async (ev) => {
 // run()'s normal bootstrap already handles "no matching identity in
 // localStorage" correctly on a fresh load, so reusing that path is both
 // simpler and less error-prone than a manual partial reset.
-document.getElementById('forget-identity-btn')?.addEventListener('click', () => {
-  if (!confirm(`Forget this identity (${myEmail || 'this browser\'s current identity'})? Its local chat history becomes permanently unreadable here. You'll stay signed in and can create or switch to a different identity.`)) return;
+// Live-reported: this used to be a native confirm() -- see pairing.js's
+// loadOrPairIdentity for the same fix on the "no account on this device
+// yet" dialog, sharing the same #confirm-overlay markup/helper.
+document.getElementById('forget-identity-btn')?.addEventListener('click', async () => {
+  const ok = await showConfirmOverlay({
+    title: 'Forget this identity?',
+    body: `Forget this identity (${myEmail || 'this browser\'s current identity'})? Its local chat history becomes permanently unreadable here. You'll stay signed in and can create or switch to a different identity.`,
+    confirmLabel: 'Forget identity',
+    cancelLabel: 'Cancel',
+  });
+  if (!ok) return;
   forgetIdentityKeys(myEmail);
   location.reload();
 });
@@ -321,12 +331,17 @@ document.getElementById('forget-identity-btn')?.addEventListener('click', () => 
 // public key, and delivers it. myIdentity is the same global runDialer
 // already sets for background delivery's own use.
 document.getElementById('pair-device-btn')?.addEventListener('click', async () => {
+  // Native prompt() left as-is here -- entering the code is a genuine text
+  // input, which #confirm-overlay doesn't support (it's a message +
+  // confirm/cancel dialog, not a form). The alert()s below it, which ARE
+  // just a message + OK, are converted to showAlertOverlay for the same
+  // reason as loadOrPairIdentity's own confirm()->showConfirmOverlay fix.
   const code = (prompt('Enter the pairing code shown on the new device:') || '').trim().toUpperCase();
   if (!code) return;
   try {
     const lookup = await api(`/pair/lookup?code=${encodeURIComponent(code)}`);
     if (lookup.error) {
-      alert(`Pairing failed: ${lookup.error}`);
+      await showAlertOverlay({ title: 'Pairing failed', body: lookup.error });
       return;
     }
     const keyPair = await pairingKeyPair();
@@ -335,12 +350,12 @@ document.getElementById('pair-device-btn')?.addEventListener('click', async () =
     const { iv, ciphertext } = await pairingEncrypt(sharedKey, myIdentity);
     const resp = await api('/pair/deliver', { body: { code, oldDevicePubKeyJwk: myPubJwk, iv, ciphertext } });
     if (resp.error) {
-      alert(`Pairing failed: ${resp.error}`);
+      await showAlertOverlay({ title: 'Pairing failed', body: resp.error });
       return;
     }
-    alert('Paired. The other device should finish connecting within a few seconds.');
+    await showAlertOverlay({ title: 'Paired', body: 'The other device should finish connecting within a few seconds.' });
   } catch (e) {
-    alert(`Pairing failed: ${e.message || e}`);
+    await showAlertOverlay({ title: 'Pairing failed', body: e.message || String(e) });
   }
 });
 

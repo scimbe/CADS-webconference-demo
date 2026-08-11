@@ -10,7 +10,7 @@
 // CADS-webconference-demo#91 (cycle 17): same getActiveSession() call
 // camera.js's switchCamera uses -- see camera.js's own header comment.
 
-import { btnVideoFilters, filterMenu, filterMenuNote, filterMenuItems, log, addChatMessage, setCtlLabel } from './ui-dom.js';
+import { btnVideoFilters, filterMenu, filterMenuNote, filterMenuItems, log, addChatMessage } from './ui-dom.js';
 import { getActiveSession } from './call-session.js';
 
 // Live-requested: video filters, especially for kids. Vendored (not CDN --
@@ -241,21 +241,29 @@ async function selectFilterStyle(media, style) {
     addChatMessage('video filters aren\'t available on the direct-channel connection yet -- switching filters here would freeze the video', 'system');
     return;
   }
+  // Live-reported: the button's own visible label used to change to
+  // "Video filters: off"/"Video filters: bunny"/etc. on every selection --
+  // the button's job is just to open the menu (it always reads "Filters"),
+  // the CURRENT selection is what the menu itself already shows via
+  // aria-checked on the matching item (syncFilterMenu, below). Only the
+  // aria-label (screen-reader-only, never rendered) still tracks state for
+  // accessibility -- the visible .ctl-icon/.ctl-label span are never
+  // touched here anymore.
   if (style === null) {
     disableVideoFilterAndRestoreCamera(media);
-    setCtlLabel(btnVideoFilters, '🎭', 'Video filters: off');
+    btnVideoFilters.setAttribute('aria-label', 'Video filters: off');
     return;
   }
   if (!videoFilterState) {
     btnVideoFilters.disabled = true;
-    setCtlLabel(btnVideoFilters, '🎭', 'Loading filters…');
+    btnVideoFilters.setAttribute('aria-label', 'Loading filters…');
     try {
       await loadFaceApi();
     } catch (e) {
       log(`video filters unavailable: ${e.message || e}`);
       addChatMessage('video filters failed to load -- continuing without them', 'system');
       btnVideoFilters.disabled = false;
-      setCtlLabel(btnVideoFilters, '🎭', 'Video filters: off');
+      btnVideoFilters.setAttribute('aria-label', 'Video filters: off');
       return;
     }
     // Robustness audit finding (proactive review, not yet live-reproduced
@@ -285,7 +293,7 @@ async function selectFilterStyle(media, style) {
     startVideoFilterCompositor(media);
   }
   videoFilterState.style = style;
-  setCtlLabel(btnVideoFilters, '🎭', `Video filters: ${style}`);
+  btnVideoFilters.setAttribute('aria-label', `Video filters: ${style}`);
 }
 
 // CADS-webconference-demo#95: reflects the current selection (checked item)

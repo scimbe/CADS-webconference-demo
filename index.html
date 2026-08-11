@@ -127,6 +127,7 @@
  .filter-menu{position:absolute;bottom:calc(100% + .6rem);left:50%;transform:translateX(-50%);z-index:6;
   background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:0 8px 28px rgba(0,0,0,.35);
   padding:.55rem;display:flex;flex-direction:column;gap:.4rem;align-items:stretch}
+ .filter-menu[hidden]{display:none} /* author display:flex above otherwise beats the UA stylesheet's [hidden] rule -- live-reported: the menu stayed visible on load and toggleFilterMenu's own hidden toggle appeared to do nothing; same pattern already fixed elsewhere in this file (#messenger-shell, .connecting-banner, .contacts-list li) */
  .filter-menu-note{font-size:.72rem;color:var(--muted);max-width:12rem}
  .filter-menu-items{display:flex;flex-direction:row;gap:.5rem}
  /* Live-requested: each filter as its own round "bubble" showing just the
@@ -227,10 +228,27 @@
  .call-note{margin-top:.9rem;font-size:.85rem;padding:.7rem .9rem;border-radius:8px;border:1px solid var(--line);background:var(--panel2);max-width:26rem}
  .call-note.warn{border-color:rgba(217,138,79,.4);color:var(--accent)}
  .call-note.info{color:var(--muted2)}
- .incoming-card{margin-top:1.2rem;padding:1rem 1.1rem;border-radius:10px;border:1px solid var(--accent2);background:rgba(95,184,171,.08);max-width:26rem}
- .incoming-card .row{display:flex;gap:.6rem;margin-top:.7rem}
  button.accept{font-family:inherit;background:var(--accent2);color:#08211d;border:none;border-radius:8px;padding:.5rem 1rem;font-weight:600;cursor:pointer}
  button.decline{font-family:inherit;background:transparent;color:var(--muted2);border:1px solid var(--line);border-radius:8px;padding:.5rem 1rem;cursor:pointer}
+
+ /* ---- full-screen overlay dialogs: replaces native confirm()/alert() for
+    pairing (live-reported: a native browser popup instead of an in-page
+    element explaining things), and the incoming-call notification (live-
+    reported: should be a full overlay in the page's own colors, not a
+    small floating banner). position:fixed + inset:0 covers the whole
+    viewport regardless of which screen (setup/messenger/call) is showing
+    underneath -- this markup lives as a top-level body child, outside any
+    ancestor that could establish its own containing block. ---- */
+ .overlay-scrim{position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.6);
+  display:flex;align-items:center;justify-content:center;padding:1.2rem}
+ .overlay-scrim[hidden]{display:none} /* same [hidden]-vs-display:flex pattern as .filter-menu/#messenger-shell above */
+ .overlay-panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+  padding:1.6rem 1.5rem;max-width:26rem;width:100%;box-shadow:0 24px 70px rgba(0,0,0,.5)}
+ .overlay-panel h3{font-size:1.1rem;margin:0 0 .7rem}
+ .overlay-panel p{font-size:.9rem;color:var(--muted2);margin:0 0 1.3rem;line-height:1.55;white-space:pre-line} /* pre-line so a \n\n in an overlay body (e.g. the pairing-code message) still breaks like it did in the native alert() it replaced */
+ .overlay-panel .row{display:flex;gap:.6rem;justify-content:flex-end;flex-wrap:wrap}
+ .overlay-panel.incoming-call{text-align:center}
+ .overlay-panel.incoming-call .row{justify-content:center;margin-top:.3rem}
  details.manual-fallback{margin-top:2rem;font-size:.85rem;color:var(--muted)}
  details.manual-fallback summary{cursor:pointer;color:var(--muted2)}
 
@@ -372,11 +390,6 @@
  #msg-compose-form .msg-start-call-btn{width:auto;flex-shrink:0;padding:.6rem .9rem;font-size:1.05rem;aspect-ratio:1;border-radius:50%}
  .chat-msg.pending{opacity:.6}
  .chat-msg .pending-mark{font-size:.7rem;margin-left:.35rem}
-
- .msg-incoming-banner{position:absolute;top:3.6rem;left:50%;transform:translateX(-50%);z-index:6;background:var(--panel);
-  border:1px solid var(--accent2);border-radius:10px;padding:.9rem 1.1rem;box-shadow:0 8px 28px rgba(0,0,0,.35);
-  font-size:.86rem;min-width:16rem}
- .msg-incoming-banner .row{display:flex;gap:.6rem;margin-top:.7rem}
 
  @media (max-width:859px){
   #messenger-shell[data-conversation-open="1"] .msg-list-pane{display:none}
@@ -593,11 +606,21 @@
     <a class="logout" id="logout-link" href="https://bunsenbrenner.org/portal/logout" hidden>Log out</a>
   </div>
 
-  <div class="msg-incoming-banner" id="incoming-card" hidden>
-    <div>Incoming call from <b id="incoming-from"></b></div>
-    <div class="row">
-      <button class="accept" id="btn-accept" type="button">Accept</button>
-      <button class="decline" id="btn-decline" type="button">Decline</button>
+  <!-- Live-reported: this used to be a small floating banner -- now a
+       full-screen overlay in the page's own colors (.overlay-scrim/
+       .overlay-panel, shared with the pairing confirm dialog below),
+       impossible to miss and impossible to accidentally interact with
+       whatever's underneath. id/child ids unchanged -- dialer.js's own
+       showIncoming/clearIncoming keep working exactly as before, only the
+       surrounding markup/classes changed. -->
+  <div class="overlay-scrim" id="incoming-card" hidden>
+    <div class="overlay-panel incoming-call">
+      <h3>Incoming call</h3>
+      <p>from <b id="incoming-from"></b></p>
+      <div class="row">
+        <button class="accept" id="btn-accept" type="button">Accept</button>
+        <button class="decline" id="btn-decline" type="button">Decline</button>
+      </div>
     </div>
   </div>
 
@@ -774,6 +797,24 @@
     </div>
   </section>
 </main>
+
+<!-- Live-reported: pairing's "no account on this device yet" prompt used a
+     native browser confirm() -- replaced with this in-page overlay
+     (.overlay-scrim/.overlay-panel, shared with #incoming-card above). A
+     single shared dialog, its title/body/button text set by whoever calls
+     ui-dom.js's showConfirmOverlay/showAlertOverlay -- top-level body
+     child (not nested in #setup-screen or #messenger-shell) so it works
+     from either screen. -->
+<div class="overlay-scrim" id="confirm-overlay" hidden>
+  <div class="overlay-panel">
+    <h3 id="confirm-overlay-title"></h3>
+    <p id="confirm-overlay-body"></p>
+    <div class="row">
+      <button class="decline" type="button" id="confirm-overlay-cancel"></button>
+      <button class="accept" type="button" id="confirm-overlay-ok"></button>
+    </div>
+  </div>
+</div>
 
 <script type="module" src="./app.js"></script>
 </body>
