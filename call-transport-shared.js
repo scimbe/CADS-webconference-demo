@@ -190,12 +190,45 @@ async function readChallengeOrRefusal(stream) {
   return { refused: false, challenge };
 }
 
+// Robustness audit finding (proactive review, not yet forced to reproduce
+// live -- needs a real network black hole, e.g. a firewall silently
+// dropping the TCP/TLS handshake or a proxy that accepts the connection
+// but never completes the WS upgrade): the WebSocket open/error wait below
+// had NO timeout of its own. If neither 'open' nor 'error' ever fires --
+// exactly the failure shape a silent black hole produces, as opposed to an
+// active refusal, which does fire 'error' -- this hung forever, and so did
+// every caller awaiting it (run()'s own initial connection, this file's
+// establishChannelSession, chat-glue.js's connectBackgroundChannel),
+// leaving the user stuck on "Connecting…" with no error and no recovery.
+// withTimeout (this same file, #69) was already built for exactly this
+// shape but only ever got applied to the RECONNECT path (call-channel.js
+// wraps its own establishChannelSession call in it) -- the first
+// connection attempt had nothing. Applying it here instead of at each of
+// the 3 call sites means every current and future caller gets it
+// automatically, and it composes safely with the reconnect path's own
+// outer timeout (whichever fires first just wins, same as any
+// nested-timeout shape). Explicitly closes the dangling ws on a timeout
+// too -- withTimeout's own contract is "stop waiting, don't cancel the
+// underlying work" (see its own comment), which is correct for a promise
+// with no cleanup handle, but a WebSocket DOES have one (.close()), so
+// there's no reason to leave a doomed half-open connection attempt
+// dangling once this function itself has already given up on it.
+const CHANNEL_OPEN_TIMEOUT_MS = 15000;
 async function joinChannel(wsUrl, grantHex, holderPrivHex) {
   const ws = new WebSocket(wsUrl);
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, { once: true });
-    ws.addEventListener('error', () => reject(new Error('WebSocket connection failed')), { once: true });
-  });
+  try {
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.addEventListener('open', resolve, { once: true });
+        ws.addEventListener('error', () => reject(new Error('WebSocket connection failed')), { once: true });
+      }),
+      CHANNEL_OPEN_TIMEOUT_MS,
+      `channel connection timed out after ${CHANNEL_OPEN_TIMEOUT_MS / 1000}s`,
+    );
+  } catch (e) {
+    try { ws.close(); } catch (_) {}
+    throw e;
+  }
   const stream = new WsByteStream(ws);
 
   const joinReq = wasm.buildChannelJoinRequest(grantHex, 'relay-only');
