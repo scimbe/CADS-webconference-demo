@@ -88,7 +88,17 @@ async function runDialer(identity, { verified = false } = {}) {
     // path via finally, including the success path -- harmless there since
     // startCallFromIdentity navigates away regardless) closes that window
     // the same way a normal "submitting..." button-disable pattern would.
+    //
+    // Follow-up audit finding (contacts.js's own callBtn handler):
+    // disabling the button alone doesn't stop a re-entrant call arriving
+    // via dialForm.requestSubmit() (the contacts list's 📞 button calls
+    // this directly on the FORM, not the button -- requestSubmit() fires
+    // the 'submit' event regardless of the submit button's own disabled
+    // state, since it never goes through that element at all). Checking
+    // the disabled flag explicitly here, not just relying on it to block a
+    // manual click, closes that second path too.
     const submitBtn = dialForm.querySelector('button[type="submit"]');
+    if (submitBtn?.disabled) return;
     if (submitBtn) submitBtn.disabled = true;
     try {
       setCallNote('info', `Calling ${toEmail}…`);
