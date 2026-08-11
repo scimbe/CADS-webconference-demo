@@ -82,9 +82,36 @@ function revokeConvBlobUrls() {
 // counter, checked after each await, so a superseded call's continuation
 // never touches UI state a newer call already owns.
 let conversationGeneration = 0;
+// Robustness audit finding (round 3 spot-check, not yet live-reproduced --
+// needs two tabs/devices open for the same identity, one with a
+// conversation open, while a message for that same peer is recorded by
+// the OTHER tab or relayed via background chat delivery): chatStore.js's
+// own header comment already promises "switching tabs shows a
+// live-updating, consistent history" via its BroadcastChannel -- but
+// nothing in this messenger pane ever subscribed to
+// dialerChatStore.onMessage the way chat-glue.js's setupChatChannel
+// already does for the in-call chat panel. A message recorded in another
+// tab (or by mergeEncryptedRow's own cross-device sync merge, in THIS
+// tab) never appeared live in an already-open conversation -- only after
+// closing and reopening it (which re-reads history()). Registered once,
+// lazily, the first time a conversation is opened (dialerChatStore
+// doesn't exist yet at module load time -- see chat-glue.js's own
+// setDialerChatStore comment); reuses appendConvMessage's own (from,seq)
+// dedupe guard, so this can never double-render a message the initial
+// history() load, or backgroundChatSession's own direct call, already
+// rendered.
+let liveUpdatesRegistered = false;
+function ensureLiveUpdatesRegistered() {
+  if (liveUpdatesRegistered || !dialerChatStore) return;
+  liveUpdatesRegistered = true;
+  dialerChatStore.onMessage((msg) => {
+    if (msg.peerEmail === currentConversationEmail) appendConvMessage(msg);
+  });
+}
 async function openConversation(email) {
   const myGeneration = ++conversationGeneration;
   currentConversationEmail = email;
+  ensureLiveUpdatesRegistered();
   dialEmailInput.value = email; // dial-form's existing submit handler reads this as the call target
   msgConvPlaceholder.hidden = true;
   msgConversation.hidden = false;
