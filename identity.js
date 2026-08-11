@@ -135,9 +135,32 @@ function identityCreatedAt(identity) {
   return typeof identity.createdAt === 'number' ? identity.createdAt : Number.NEGATIVE_INFINITY;
 }
 
+// Robustness audit finding (proactive review, not yet forced to reproduce
+// live -- needs a real transient failure loading the .wasm binary, e.g. a
+// network blip during initial fetch/instantiate): a rejected init() used to
+// stay memoized in wasmInitPromise forever, since the old `||` short-circuit
+// only ever assigned once. Every future call returned that exact same
+// rejected promise for the rest of the page's life, with no retry -- for
+// chat-glue.js's two callers (backgroundChatSession's periodic delivery
+// sweep and autoAcceptChatDelivery), this silently defeated their own
+// documented "will retry next sweep" resilience design: the outer sweep
+// genuinely does retry, but ensureWasmInit() itself could never succeed
+// again after one bad attempt, even once whatever caused the original
+// failure (e.g. a transient network hiccup) had long since cleared up.
+// Fix: on rejection, clear wasmInitPromise so the NEXT call re-attempts
+// init() from scratch, while still rethrowing the original error to
+// whichever caller's await was already in flight -- that caller's own
+// error handling (chat-glue.js's try/catch) sees the exact same failure
+// as before, only the poisoned-forever memoization is gone.
 let wasmInitPromise = null;
 function ensureWasmInit() {
-  return wasmInitPromise || (wasmInitPromise = init('./pkg/ct_agent_wasm_bg.wasm'));
+  if (!wasmInitPromise) {
+    wasmInitPromise = init('./pkg/ct_agent_wasm_bg.wasm').catch((e) => {
+      wasmInitPromise = null;
+      throw e;
+    });
+  }
+  return wasmInitPromise;
 }
 
 export {
