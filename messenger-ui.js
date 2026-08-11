@@ -139,9 +139,25 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 function appendConvMessage({ from, text, pending, corrupted, seq, kind, fileName, fileMimeType, fileSize, blob }) {
+  // Robustness audit finding (round 3 spot-check, not yet live-reproduced --
+  // needs a message to arrive via background chat delivery (chat-glue.js's
+  // backgroundChatSession, the only caller of this function outside this
+  // module) in the same narrow window as openConversation's own presence-
+  // fetch/history-load awaits for the SAME peer): a message already captured
+  // by openConversation's own dialerChatStore.history() read (because
+  // chatStore.record() had already persisted it by then) could ALSO reach
+  // this function via that direct, generation-counter-unaware call site,
+  // rendering the exact same message as two separate bubbles. data-seq used
+  // to be tracked only for 'me' messages (for markConvMessageDelivered's own
+  // lookup); tracking it for 'peer' messages too lets a genuine duplicate be
+  // detected and skipped here -- (from, seq) is the same dedupe key
+  // chatStore.js's own dedupeKey already uses for this exact purpose
+  // (peerEmail is implicit: this is always the single currently-open
+  // conversation's own pane).
+  if (seq != null && convMessages.querySelector(`.chat-msg.${from}[data-seq="${seq}"]`)) return;
   const div = document.createElement('div');
   div.className = `chat-msg ${from}${pending ? ' pending' : ''}`;
-  if (from === 'me' && seq != null) div.dataset.seq = seq;
+  if (seq != null) div.dataset.seq = seq;
   const body = document.createElement('div');
   if (corrupted) {
     // CADS-webconference-demo#24: a record chatStore.history() couldn't
