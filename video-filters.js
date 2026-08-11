@@ -155,12 +155,32 @@ function startVideoFilterCompositor(media) {
   // pass every frame would burn far more CPU than a demo call should cost;
   // stickers tracking a slightly-stale (up to 150ms old) position reads
   // fine for this, not a real AR product's accuracy bar.
+  //
+  // Live-reported: enabling a filter froze the video, and with it the whole
+  // page, for a real, user-perceptible stretch. Root cause: this callback
+  // had no re-entrancy guard -- faceapi.detectSingleFace/withFaceLandmarks
+  // (TensorFlow.js underneath) can easily take longer than 150ms, especially
+  // on the CPU backend or before WebGL shaders have warmed up. setInterval
+  // doesn't wait for an async callback to finish before firing the next
+  // tick, so a slow pass let a SECOND detection start on top of the first,
+  // then a third on top of that -- each one itself expensive CPU/GPU work,
+  // piling up faster than any of them could finish and starving the main
+  // thread (and therefore the rAF-driven draw loop AND page interactivity)
+  // for however long it took the backlog to drain. `detecting` bounds this
+  // to at most one in-flight detection pass at a time -- a tick landing
+  // while one is still running is simply skipped, same shape as every other
+  // "don't start a second overlapping async attempt" guard in this file
+  // (selectFilterStyle's own startingCompositor) and elsewhere this session.
+  let detecting = false;
   state.detectTimer = setInterval(async () => {
-    if (state.stopped || sourceVideo.readyState < 2) return;
+    if (state.stopped || sourceVideo.readyState < 2 || detecting) return;
+    detecting = true;
     try {
       state.latestDetection = (await faceapi.detectSingleFace(sourceVideo, detectorOptions).withFaceLandmarks(true)) || null;
     } catch (_) {
       // one bad detection pass isn't fatal -- keep drawing the last known position
+    } finally {
+      detecting = false;
     }
   }, 150);
 
