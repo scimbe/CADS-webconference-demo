@@ -19,15 +19,17 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # CADS-webconference-demo#29: this pin MUST match Agent.Dockerfile's own
 # CT_AGENT_REF default and both compose files' -- the WASM build here is
 # the browser half of the same wire protocol the NATIVE ct-agent (built
-# from Agent.Dockerfile, run as webconference-demo-agent) speaks. They'd
-# drifted to two different commits (86ab198f here/compose.webconference-demo.yml
-# vs. b03f2efd in compose.webconference-demo.selfservice.yml) with no CI
-# check catching it. Aligned to b03f2efd here since that's the pairing
-# actually verified live this session (real Noise_IK handshakes + channel
-# joins succeeded repeatedly against the selfservice deployment's native
-# agent) -- not a claim 86ab198f was wrong, just that this is the pairing
-# with real evidence behind it. Bump all four together from now on.
-CT_AGENT_REF="${CT_AGENT_REF:-b03f2efd1ab5ec34d745a98336593fa6d9791ff1}"
+# from Agent.Dockerfile, run as webconference-demo-agent) speaks. All four
+# had drifted once before with no CI check catching it -- bump all four
+# together from now on.
+# Bumped 2026-08-12 (live-diagnosed on CADS-flappy-demo, same ct-agent
+# binary): the previous pin (b03f2efd) predated ct-agent#15's TCP-fallback
+# keepalive/ping-role fix -- a parked connection generating no real payload
+# traffic got treated as idle and dropped by some firewall/DPI gateways,
+# surfacing as intermittent attestation/admission/EOF errors that looked
+# like a config bug but weren't. See Agent.Dockerfile's comment for the
+# full story.
+CT_AGENT_REF="${CT_AGENT_REF:-eb4de4d2427ce51e301c0bf31582cce4bbaa097c}"
 OUT_DIR="$REPO_ROOT/pkg"
 
 docker run --rm -m 2g --cpus 2 \

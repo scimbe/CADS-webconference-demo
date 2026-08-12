@@ -131,9 +131,10 @@ services:
       args:
         # CADS-webconference-demo#29: must match build-wasm.sh/Agent.Dockerfile/
         # compose.webconference-demo.yml's own defaults -- see build-wasm.sh's
-        # comment. This was the ONE of the four already on this pin; the other
-        # three were on a different, drifted commit until this same fix.
-        - CT_AGENT_REF=${CT_AGENT_REF:-b03f2efd1ab5ec34d745a98336593fa6d9791ff1}
+        # comment. Bumped 2026-08-12 (ct-agent#15 TCP-fallback keepalive fix,
+        # live-diagnosed on CADS-flappy-demo) -- see Agent.Dockerfile's comment
+        # for the full story; all four sync locations updated together.
+        - CT_AGENT_REF=${CT_AGENT_REF:-eb4de4d2427ce51e301c0bf31582cce4bbaa097c}
     environment:
       - CT_AGENT_MODE=browser
       - CT_AGENT_HOSTNAME=${CT_AGENT_HOSTNAME:?this tunnel's assigned hostname, e.g. site-34a13a96.bunsenbrenner.org}
