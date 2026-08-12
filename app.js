@@ -724,6 +724,27 @@ run().catch((e) => {
     idVerifyErrorDetail.textContent = `couldn't start: ${safeMessage}`;
     idVerifyError.hidden = false;
     idVerifyRetry.addEventListener('click', () => location.reload());
+    // Live-reported: hanging up should always land back on the contacts
+    // view -- if the reload returnToDialerAfterHangup triggers can't
+    // actually complete startup (a genuine connection problem right at
+    // that moment, e.g. the fresh page's own WASM_INIT_TIMEOUT_MS firing --
+    // see that constant's own comment), the user shouldn't have to notice
+    // this panel and click Retry themselves; it should just keep trying on
+    // its own. Same reload-loop-prevention shape as noteApiResult's own
+    // identity-mismatch auto-reload (contacts.js) -- a SEPARATE
+    // sessionStorage key, since this is a different failure class (a
+    // transient startup/connectivity problem, not a stale identity) and
+    // the two auto-reload loops must never suppress each other. Auto-
+    // retries once per window; if it's still failing after that, this
+    // degrades to the same manual-Retry panel as before rather than
+    // flashing forever against a genuinely persistent problem.
+    const AUTO_RETRY_WINDOW_MS = 15000;
+    const lastAutoRetryAt = Number(sessionStorage.getItem('ct-webconference-last-startup-retry') || 0);
+    if (Date.now() - lastAutoRetryAt > AUTO_RETRY_WINDOW_MS) {
+      sessionStorage.setItem('ct-webconference-last-startup-retry', String(Date.now()));
+      idVerifyErrorDetail.textContent += ' -- retrying automatically…';
+      setTimeout(() => location.reload(), 3000);
+    }
   } else {
     // Live-reported ("system frozen" after a mobile connection drop mid-
     // handshake): a failure here (joinChannel/handshake throwing before
