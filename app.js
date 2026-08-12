@@ -601,8 +601,26 @@ async function run() {
   // encrypted chat store's IndexedDB rows under whatever garbage was in the
   // query string. Treated the same as "absent" (chat just isn't persisted)
   // rather than used as-is, same reasoning as the length checks above.
-  const myEmailParam = params.get('myEmail');
-  const peerEmailParam = params.get('peerEmail');
+  //
+  // Live-reported: see startCallFromIdentity's own comment (contacts.js) --
+  // for a normal in-app call these no longer travel in the URL at all;
+  // read back from the same sessionStorage entry that reload just wrote,
+  // then discard it immediately (single-use -- this call's own reload is
+  // its only consumer, so there's no reason for it to linger in storage
+  // after being read). Falls back to the URL params below when nothing was
+  // stashed -- either a manually-built/CLI call link (never wrote one to
+  // begin with) or the rare sessionStorage-unavailable case
+  // startCallFromIdentity's own try/catch already accounts for.
+  let myEmailParam = params.get('myEmail');
+  let peerEmailParam = params.get('peerEmail');
+  try {
+    const stashed = JSON.parse(sessionStorage.getItem('ct-webconference-call-emails') || 'null');
+    if (stashed) {
+      sessionStorage.removeItem('ct-webconference-call-emails');
+      if (stashed.myEmail) myEmailParam = stashed.myEmail;
+      if (stashed.peerEmail) peerEmailParam = stashed.peerEmail;
+    }
+  } catch (_) {}
   const myEmail = isValidEmail(myEmailParam) ? myEmailParam : null;
   const peerEmail = isValidEmail(peerEmailParam) ? peerEmailParam : null;
 

@@ -200,13 +200,38 @@ function startCallFromIdentity(identity, { role, channel, grant, ws, transport, 
   if (peerEmail && myContacts) myContacts.add(peerEmail);
   // CADS-webconference-demo#13: holderPriv/noisePriv deliberately left out
   // of this URL -- see run()'s matching comment for why (localStorage
-  // recovery via myEmail instead). myEmail is now unconditional rather than
+  // recovery via myEmail instead). myEmail is unconditional rather than
   // peerEmail-gated, since it's load-bearing for that recovery on every
-  // in-app call, not just an optional chat-store-keying nicety anymore.
-  const params = new URLSearchParams({ ws, grant, role, myEmail: identity.email });
+  // in-app call, not just an optional chat-store-keying nicety.
+  //
+  // Live-reported: myEmail/peerEmail used to travel as plain query-string
+  // params alongside ws/grant/role -- real PII sitting in the address bar,
+  // browser history, and anywhere this URL might get copied, shared, or
+  // screenshotted (confirmed live: exactly that happened). Neither value
+  // is actually NEEDED in the URL for this reload -- it's the SAME browser
+  // tab reloading into itself, so sessionStorage (scoped to this one tab,
+  // cleared when it closes, never rendered in the address bar or written
+  // to browser history) carries them across it just as reliably. run()'s
+  // own comment has the read-back side; it falls back to a URL param only
+  // for a manually-built/CLI call link, which has no prior in-tab session
+  // to have stashed anything in ahead of time -- that sharing mechanism is
+  // unaffected.
+  // sessionStorage failing (rare -- some private-browsing modes) would
+  // silently lose myEmail, which run() needs to recover holderPriv/
+  // noisePriv from localStorage on the other side of the reload (see its
+  // own comment) -- falling back to the URL in that one case is strictly
+  // better than a broken call, and still closes the leak for the normal
+  // (storage-available) case, which is the overwhelming majority of them.
+  let stashedOk = false;
+  try {
+    sessionStorage.setItem('ct-webconference-call-emails', JSON.stringify({ myEmail: identity.email, peerEmail: peerEmail || null }));
+    stashedOk = true;
+  } catch (_) {}
+  const params = new URLSearchParams({ ws, grant, role });
+  if (!stashedOk) params.set('myEmail', identity.email);
   if (transport === 'channel') params.set('transport', 'channel');
   // peerEmail alone stays optional/chat-store-keying-only, same as before.
-  if (peerEmail) params.set('peerEmail', peerEmail);
+  if (!stashedOk && peerEmail) params.set('peerEmail', peerEmail);
   location.search = params.toString(); // reload into the call screen -- keeps run() as the single entry point
 }
 
