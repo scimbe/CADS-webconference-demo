@@ -9,20 +9,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 # Which ct-agent commit/tag to build -- bump deliberately (bump-ct-agent.yml
-# automates checking for a newer one). No tag newer than v0.3.0 exists yet; pinned
-# past the workspace restructure that added wasm/ (ct-agent-wasm, this demo's
-# browser build -- see build-wasm.sh) as a sibling of this native binary.
-# CADS-webconference-demo#29 -- must match build-wasm.sh's own default and
-# both compose files' CT_AGENT_REF (they'd drifted); see build-wasm.sh's
-# comment for why eb4de4d2 is the one aligned to here.
-# Bumped 2026-08-12 (live-diagnosed on CADS-flappy-demo, same ct-agent binary):
-# the previous pin (b03f2efd) predated ct-agent#15's TCP-fallback keepalive/
-# ping-role fix -- a parked connection generating no real payload traffic got
-# treated as idle and dropped by some firewall/DPI gateways, surfacing as
-# intermittent attestation/admission/EOF errors that looked like a config bug
-# but weren't. Needs CADS-Tunnel's own edge-side half of the same fix (ff415a8)
-# to actually take effect -- that's a separate checkout, not pinned here.
-ARG CT_AGENT_REF=eb4de4d2427ce51e301c0bf31582cce4bbaa097c
+# automates checking for a newer one). Must match build-wasm.sh's own default
+# and both compose files' CT_AGENT_REF (CADS-webconference-demo#29 -- they'd
+# drifted once before).
+# Bumped 2026-08-13 (v0.4.8): the actual root cause of the CADS-flappy-demo
+# admission-stall saga, pinned by the operator via live edge logs -- the
+# edge parks a lone pairing member for a 30s TTL, but the client's own
+# ADMISSION_EXCHANGE_TIMEOUT was only 15s, so any pairing whose second side
+# took 15-30s to arrive failed deterministically. v0.4.8 raises it to 45s.
+# Keep in sync with build-wasm.sh's own default and both compose files'
+# CT_AGENT_REF.
+ARG CT_AGENT_REF=3823343fdc47ea4ed91819cb68bfa8e89399f3f8
 RUN git clone https://github.com/scimbe/ct-agent.git /build && cd /build && git checkout "${CT_AGENT_REF}"
 WORKDIR /build
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

@@ -131,10 +131,11 @@ services:
       args:
         # CADS-webconference-demo#29: must match build-wasm.sh/Agent.Dockerfile/
         # compose.webconference-demo.yml's own defaults -- see build-wasm.sh's
-        # comment. Bumped 2026-08-12 (ct-agent#15 TCP-fallback keepalive fix,
-        # live-diagnosed on CADS-flappy-demo) -- see Agent.Dockerfile's comment
-        # for the full story; all four sync locations updated together.
-        - CT_AGENT_REF=${CT_AGENT_REF:-eb4de4d2427ce51e301c0bf31582cce4bbaa097c}
+        # comment. Bumped 2026-08-13 (v0.4.8, ADMISSION_EXCHANGE_TIMEOUT 15s -> 45s
+        # -- the actual root cause of the CADS-flappy-demo admission-stall saga) --
+        # see Agent.Dockerfile's comment for the full story; all four sync
+        # locations updated together.
+        - CT_AGENT_REF=${CT_AGENT_REF:-3823343fdc47ea4ed91819cb68bfa8e89399f3f8}
     environment:
       - CT_AGENT_MODE=browser
       - CT_AGENT_HOSTNAME=${CT_AGENT_HOSTNAME:?this tunnel's assigned hostname, e.g. site-34a13a96.bunsenbrenner.org}
