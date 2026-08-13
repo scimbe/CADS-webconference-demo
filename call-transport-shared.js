@@ -257,7 +257,36 @@ const CHANNEL_OPEN_TIMEOUT_MS = 30000;
 // exchange in one try/catch (not just the open wait) means ANY setup
 // failure -- connect, join-request, challenge, or ack -- closes the
 // dangling ws the same way, instead of only the connect step doing so.
-async function joinChannel(wsUrl, grantHex, holderPrivHex) {
+// CADS-webconference-demo#130 (live-reproduced: 8/11 real two-party runs, a
+// perfectly normal second call to the same contact after a clean hangup):
+// the channel id is deterministic from (operator, holder_a, holder_b) --
+// see video-call-grant/src/main.rs's own channel_id_for_link comment -- so
+// every call between the same two people reuses the SAME channel, forever.
+// A fresh grant is minted per call, but the channel identity is stable,
+// which leaves any lingering per-channel membership/session state from the
+// PREVIOUS call as a real hazard for the next one: the caller stalls
+// waiting for an ack that never comes, or the callee is actively refused
+// admission to a channel it was legitimately in moments earlier. A genuine
+// fix (a per-call nonce folded into the channel id) needs a protocol change
+// in ct_common (channel_id_for_link's own crate, outside this repo) plus a
+// matching bridge-side change -- real, but too large for a client-only
+// patch. This is the client-side mitigation the issue itself proposes:
+// retry a `refused` or stalled/timed-out join a couple of times with a
+// short backoff, on the theory that lingering server-side state from the
+// prior call is transient and often clears within a second or two -- turns
+// most of these failures into a slightly slower but successful call
+// instead of a hard failure after a silent 30s wait.
+const JOIN_RETRY_ATTEMPTS = 3;
+const JOIN_RETRY_BACKOFF_MS = [0, 600, 1800];
+// Retries use a much shorter per-attempt timeout than the first attempt --
+// a lingering-state condition either clears in a couple of seconds or it
+// doesn't, and #130's own fix #4 explicitly calls out not making the user
+// wait a full CHANNEL_OPEN_TIMEOUT_MS (30s) per attempt. Worst case with
+// this is one full 30s first attempt + two 8s retries + backoff ≈ 48s, not
+// the ~92s three full-length attempts would otherwise add up to.
+const JOIN_RETRY_TIMEOUT_MS = 8000;
+
+async function joinChannelOnce(wsUrl, grantHex, holderPrivHex, timeoutMs) {
   const ws = new WebSocket(wsUrl);
   try {
     await withTimeout(
@@ -265,20 +294,20 @@ async function joinChannel(wsUrl, grantHex, holderPrivHex) {
         ws.addEventListener('open', resolve, { once: true });
         ws.addEventListener('error', () => reject(new Error('WebSocket connection failed')), { once: true });
       }),
-      CHANNEL_OPEN_TIMEOUT_MS,
-      `channel connection timed out after ${CHANNEL_OPEN_TIMEOUT_MS / 1000}s`,
+      timeoutMs,
+      `channel connection timed out after ${timeoutMs / 1000}s`,
     );
     const stream = new WsByteStream(ws);
 
     const joinReq = wasm.buildChannelJoinRequest(grantHex, 'relay-only');
     await writeFramed(stream, joinReq);
 
-    const resp = await readChallengeOrRefusal(stream, CHANNEL_OPEN_TIMEOUT_MS);
+    const resp = await readChallengeOrRefusal(stream, timeoutMs);
     if (resp.refused) throw new Error('channel join refused');
     const sig = wasm.holderSign(holderPrivHex, resp.challenge);
     stream.send(sig);
 
-    const ackLine = await stream.readLine(CHANNEL_OPEN_TIMEOUT_MS);
+    const ackLine = await stream.readLine(timeoutMs);
     log(`ack: ${ackLine.trim()}`);
     if (!ackLine.startsWith('OK ')) throw new Error(`unexpected ack line: ${ackLine}`);
     const parts = ackLine.trim().split(' ');
@@ -289,6 +318,29 @@ async function joinChannel(wsUrl, grantHex, holderPrivHex) {
     try { ws.close(); } catch (_) {}
     throw e;
   }
+}
+
+async function joinChannel(wsUrl, grantHex, holderPrivHex) {
+  let lastErr;
+  for (let attempt = 0; attempt < JOIN_RETRY_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      log(`channel join attempt ${attempt + 1}/${JOIN_RETRY_ATTEMPTS} (previous: ${lastErr.message}) -- retrying after ${JOIN_RETRY_BACKOFF_MS[attempt]}ms`);
+      await new Promise((r) => setTimeout(r, JOIN_RETRY_BACKOFF_MS[attempt]));
+    }
+    try {
+      const timeoutMs = attempt === 0 ? CHANNEL_OPEN_TIMEOUT_MS : JOIN_RETRY_TIMEOUT_MS;
+      return await joinChannelOnce(wsUrl, grantHex, holderPrivHex, timeoutMs);
+    } catch (e) {
+      lastErr = e;
+      // Only retry the two failure shapes #130 actually documents as
+      // transient lingering-state symptoms (an explicit refusal, or the
+      // setup stalling/timing out) -- a WebSocket-level connect failure is a
+      // real network/reachability problem retrying with the SAME url won't
+      // fix, so that one fails fast on the first attempt as before.
+      if (!/refused|timed out|stalled/i.test(e.message)) throw e;
+    }
+  }
+  throw lastErr;
 }
 
 // CADS-webconference-demo#91: previously two near-identical closures existed

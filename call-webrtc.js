@@ -87,7 +87,7 @@ import {
 } from './ui-dom.js';
 import { setupChatChannel } from './chat-glue.js';
 import { getLocalMedia } from './camera.js';
-import { runChannelMediaCall } from './call-channel.js';
+import { runChannelMediaCall, establishChannelSession } from './call-channel.js';
 import { createWebrtcCallSession, setActiveSession } from './call-session.js';
 import { setupControls, returnToDialerAfterHangup, setActiveCallBye } from './app.js';
 
@@ -217,7 +217,7 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
   // and because sendSignal below assumes pc/the webrtc signaling path is
   // still the thing in charge of this channel, which is no longer true once
   // the peer has already announced its own switch.
-  function attemptChannelFallback(reason, peerInitiated = false) {
+  async function attemptChannelFallback(reason, peerInitiated = false) {
     if (channelFallbackAttempted) {
       endCallDueToPeerLoss(`${reason} (channel fallback already attempted this call)`);
       return;
@@ -295,7 +295,32 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     // no fresh grant/handshake needed, exactly the hand-off the #69/#67
     // threads worked out was safe (the channel was open for signaling the
     // whole time, just never carrying TAG_MEDIA_* traffic until now).
-    runChannelMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex);
+    //
+    // CADS-webconference-demo#129 (live-reproduced under real UDP-blocked
+    // netem/iptables emulation): that assumption only holds if the socket
+    // is STILL open by the time this runs. ICE can grind for 20-40s+ before
+    // giving up, and the signaling socket sits idle the whole time -- long
+    // enough on some networks to already be closing/closed (idle timeout,
+    // proxy/LB reset). Handing a dead socket to runChannelMediaCall doesn't
+    // throw here (the reads/writes fail deeper inside, asynchronously) --
+    // it just silently never connects, and the whole call vanishes with no
+    // explanation to either user. Check first; if it's not open, re-join
+    // fresh (a real rejoin + Noise handshake, same shape as the initial
+    // connection) rather than handing off garbage.
+    try {
+      if (stream.ws.readyState !== WebSocket.OPEN) {
+        log('fallback: signaling socket already closing/closed -- re-establishing a fresh channel before handing off');
+        ({ stream, noiseTransport } = await establishChannelSession(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller));
+      }
+      await runChannelMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex);
+    } catch (e) {
+      // Fail loudly (#129 fix 2) -- previously a failure here (or deeper
+      // inside runChannelMediaCall) was an unhandled rejection: both users
+      // just silently landed back on the contact list ~2s later with zero
+      // indication anything went wrong, let alone why.
+      addChatMessage(`Couldn't connect over the fallback transport (${e.message}) -- your network may block it entirely. Try "Use direct-channel media" from the menu before dialling next time.`, 'system');
+      endCallDueToPeerLoss(`channel fallback failed: ${e.message}`);
+    }
   }
 
   pc.oniceconnectionstatechange = () => setIceState(pc.iceConnectionState);
