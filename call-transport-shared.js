@@ -311,7 +311,24 @@ async function joinChannelOnce(wsUrl, grantHex, holderPrivHex, timeoutMs) {
     log(`ack: ${ackLine.trim()}`);
     if (!ackLine.startsWith('OK ')) throw new Error(`unexpected ack line: ${ackLine}`);
     const parts = ackLine.trim().split(' ');
-    const peerNoiseHex = parts.length === 5 ? parts[2] : null;
+    // Live incident (2026-08-15): the edge (crates/edge/src/channel_broker.rs,
+    // finish_rendezvous_pair/finish_relay_pair) always appends trailing `r=<observed-addr>`
+    // (#121 B1-follow) and `sp=<0|1>` (#276 piece 1) tokens now -- "OK <endpoint> [<noise>
+    // <holder> <attest>] r=... sp=...". Both are explicitly documented edge-side as
+    // purely additive / backward-compatible ("a legacy client that doesn't look for r=/sp=
+    // is unaffected"), but this parser's exact `parts.length === 5` check took the full-
+    // suffix case's length literally -- it silently broke the moment the edge actually
+    // started sending r=/sp= (7 tokens, not 5), reading peerNoiseHex as null on every real
+    // call ("no peer Noise key in ack" -- calling completely broken, both transports, since
+    // app.js's run() and call-channel.js's establishChannelSession/chat-glue.js's
+    // connectBackgroundChannel all join through this one shared function). Strip any
+    // trailing r=/sp= tokens before checking length instead -- the noise/holder/attest
+    // suffix, when present, is always the same 3 tokens immediately after the endpoint,
+    // regardless of how many additive tags the edge appends after it. Same peerNoiseHex
+    // semantics either way: null when the peer genuinely has no registered Noise key (the
+    // edge's own member_ack_suffix all-or-nothing convention), the real key otherwise.
+    const coreParts = parts.filter((p) => !/^(r|sp)=/.test(p));
+    const peerNoiseHex = coreParts.length === 5 ? coreParts[2] : null;
 
     return { ws, stream, peerNoiseHex };
   } catch (e) {
