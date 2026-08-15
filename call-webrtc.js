@@ -115,9 +115,42 @@ async function fetchIceServers() {
   }
 }
 
+// CADS-webconference-demo#134 follow-up: one aggregate-only sample per successful
+// connection setup, spec'd by core to feed CADS-Tunnel#517-V2's traffic-offload
+// measurement. Reads pc.getStats() for the SELECTED candidate pair's type
+// (host/srflx/relay -- relay wins if either side used it, since that's the signal
+// TURN was actually needed and worked) and elapsed time since ICE started; posts
+// only that coarse summary, never an IP or candidate string, to /api/ice-outcome.
+// Best-effort: any failure here is logged and swallowed, never affects the call.
+async function reportIceOutcome(pc, iceStartTs, reconnect) {
+  try {
+    const stats = await pc.getStats();
+    let pair = null;
+    for (const s of stats.values()) {
+      if (s.type === 'candidate-pair' && s.state === 'succeeded' && (s.nominated || s.selected)) { pair = s; break; }
+    }
+    if (!pair) return; // stats not settled yet -- next 'connected' event (if any) tries again
+    const localType = stats.get(pair.localCandidateId)?.candidateType;
+    const remoteType = stats.get(pair.remoteCandidateId)?.candidateType;
+    const pairType = localType === 'relay' || remoteType === 'relay' ? 'relay'
+      : (localType === 'srflx' || localType === 'prflx' || remoteType === 'srflx' || remoteType === 'prflx') ? 'srflx'
+      : 'host';
+    await fetch('/api/ice-outcome', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pairType, timeToConnectedMs: Date.now() - iceStartTs, reconnect }),
+    });
+  } catch (e) {
+    log(`ice-outcome report failed (non-fatal): ${e.message}`);
+  }
+}
+
 async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex) {
   setStatus('connecting-webrtc');
   const pc = new RTCPeerConnection({ iceServers: await fetchIceServers() });
+  let iceStartTs = Date.now();
+  let iceIsReconnect = false;
 
   // Liveness above the relay, not through it: the Noise/ws_channel signaling
   // path only tells us the peer is gone if it manages to send a clean 'bye'
@@ -169,6 +202,8 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
       return;
     }
     iceRestartAttempted = true;
+    iceIsReconnect = true;
+    iceStartTs = Date.now(); // fresh ICE cycle -- next 'connected' report times from here, not the original connect
     // Live-reported (especially bad on mobile): the only feedback here used
     // to be the chat message below -- invisible on mobile's full-screen
     // call view (see index.html's own media query, chat panel not shown
@@ -359,6 +394,8 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
       }, ICE_RESTART_GRACE_MS / 2);
     } else if (pc.connectionState === 'connected') {
       if (disconnectedGraceTimer) { clearTimeout(disconnectedGraceTimer); disconnectedGraceTimer = null; }
+      reportIceOutcome(pc, iceStartTs, iceIsReconnect);
+      iceIsReconnect = false; // reported -- a LATER restart sets this again on its own attempt
       iceRestartAttempted = false; // a fresh recovery -- a LATER failure gets its own restart attempt
       // Reported live (both sides, consistently): the "Connecting to X..."
       // banner stayed up forever despite a fully working call -- audio/video

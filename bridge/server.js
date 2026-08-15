@@ -109,6 +109,19 @@ const TURN_URLS = (process.env.WEBCONFERENCE_TURN_URLS || 'turn:bunsenbrenner.or
   .filter(Boolean);
 const TURN_CREDENTIAL_TTL_SECS = 600; // 10 min, per core's recommendation
 
+// CADS-webconference-demo#134 follow-up: aggregate-only ICE outcome telemetry, spec'd
+// by core to feed CADS-Tunnel#517-V2's traffic-offload measurement. Deliberately NO
+// IPs/candidate details, ever -- only the coarse pair type (host/srflx/relay) and a
+// connect-latency sample. In-memory only (no persistence requirement per core); resets
+// on every bridge restart, which is fine for a running-average metric like this.
+const ICE_OUTCOME_PAIR_TYPES = ['host', 'srflx', 'relay'];
+const iceOutcomeCounts = { host: 0, srflx: 0, relay: 0 };
+const iceOutcomeReconnectCounts = { host: 0, srflx: 0, relay: 0 };
+// Bounded ring buffer of recent latency samples -- enough for a meaningful
+// average/min/max/p95 without unbounded growth over a long-running process.
+const ICE_OUTCOME_LATENCY_CAP = 500;
+const iceOutcomeLatenciesMs = [];
+
 // Who's allowed to revoke someone else's login access. Comma-separated,
 // case-insensitive. Empty (unset) preserves the previous behaviour -- any
 // gate-verified caller can revoke -- with a startup warning, so an operator
@@ -914,6 +927,51 @@ const server = http.createServer(async (req, res) => {
           { urls: TURN_URLS, username, credential },
         ],
         ttl: TURN_CREDENTIAL_TTL_SECS,
+      });
+    }
+
+    // CADS-webconference-demo#134 follow-up: one sample per connection setup (initial
+    // or post-restart), reported by call-webrtc.js right after pc.connectionState
+    // reaches 'connected'. Same fail-closed gate as /api/ice-config -- this is
+    // aggregate telemetry, not per-user data, but there's no reason to accept it from
+    // an unverified caller either.
+    if (req.method === 'POST' && url.pathname === '/api/ice-outcome') {
+      if (!gateVerifiedEmail(req)) return json(res, 401, { error: 'gate-verified identity required', code: 'gate_required' });
+      const { pairType, timeToConnectedMs, reconnect } = await readBody(req);
+      if (!ICE_OUTCOME_PAIR_TYPES.includes(pairType)) {
+        return json(res, 400, { error: `pairType must be one of ${ICE_OUTCOME_PAIR_TYPES.join('/')}` });
+      }
+      if (typeof timeToConnectedMs !== 'number' || !Number.isFinite(timeToConnectedMs) || timeToConnectedMs < 0) {
+        return json(res, 400, { error: 'timeToConnectedMs must be a non-negative number' });
+      }
+      iceOutcomeCounts[pairType] += 1;
+      if (reconnect === true) iceOutcomeReconnectCounts[pairType] += 1;
+      iceOutcomeLatenciesMs.push(timeToConnectedMs);
+      if (iceOutcomeLatenciesMs.length > ICE_OUTCOME_LATENCY_CAP) iceOutcomeLatenciesMs.shift();
+      // No IPs, no candidate strings, no per-caller identity in this log line --
+      // only the coarse aggregate fields, per core's explicit data-minimization ask.
+      console.log(`bridge: ice-outcome pairType=${pairType} timeToConnectedMs=${timeToConnectedMs} reconnect=${!!reconnect}`);
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/ice-outcomes') {
+      if (!gateVerifiedEmail(req)) return json(res, 401, { error: 'gate-verified identity required', code: 'gate_required' });
+      const total = ICE_OUTCOME_PAIR_TYPES.reduce((sum, t) => sum + iceOutcomeCounts[t], 0);
+      const sorted = [...iceOutcomeLatenciesMs].sort((a, b) => a - b);
+      const pct = (p) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] : null);
+      return json(res, 200, {
+        total,
+        counts: { ...iceOutcomeCounts },
+        reconnectCounts: { ...iceOutcomeReconnectCounts },
+        relayRate: total ? iceOutcomeCounts.relay / total : null,
+        timeToConnectedMs: {
+          samples: sorted.length,
+          avg: sorted.length ? Math.round(sorted.reduce((a, b) => a + b, 0) / sorted.length) : null,
+          min: sorted.length ? sorted[0] : null,
+          max: sorted.length ? sorted[sorted.length - 1] : null,
+          p50: pct(0.5),
+          p95: pct(0.95),
+        },
       });
     }
 
