@@ -225,14 +225,16 @@
 		# X-Frame-Options DENY below are deliberately redundant (older
 		# browsers only honor the header, CSP is the modern replacement).
 		# connect-src includes the public STUN server (CADS-webconference-demo#18)
-		# -- WebRTC ICE/STUN gathering is CSP-gated in Chrome/Firefox, so without
-		# this entry the STUN fix would be silently defeated by this same policy.
+		# and, since #133's follow-up, bunsenbrenner.org's own TURN relay
+		# (CADS-Tunnel#520) -- WebRTC ICE/STUN/TURN gathering is CSP-gated in
+		# Chrome/Firefox, so without these entries the fix would be silently
+		# defeated by this same policy.
 		# img-src includes blob: (CADS-webconference-demo#50) -- an attached
 		# image renders via URL.createObjectURL(blob) same as media-src's
 		# existing blob: entry already covers for <video>/<audio>; caught
 		# live (a real CSP violation in the console, the image just never
 		# rendered) before this was added.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' stun://stun.l.google.com:19302; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' stun://stun.l.google.com:19302 turn://bunsenbrenner.org:3478; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		# camera/microphone stay allowed for this origin itself (self) --

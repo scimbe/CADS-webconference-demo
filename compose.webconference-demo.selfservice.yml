@@ -118,6 +118,12 @@ services:
       # `ct_portal_session` from the cookie jar.
       - CT_OIDC_TOKEN=${WEBCONFERENCE_OIDC_TOKEN:-}
       - CT_PORTAL_SESSION_COOKIE=${WEBCONFERENCE_PORTAL_SESSION_COOKIE:-}
+      # CADS-webconference-demo#18/#133: coturn's ephemeral-credential shared
+      # secret (bunsenbrenner.org, CADS-Tunnel#520) -- signs short-lived
+      # /api/ice-config TURN usernames server-side; never reaches the browser
+      # or this repo. Same readSecret()/_FILE convention as CT_CHANNEL_OPERATOR_KEY
+      # above, for whenever this migrates to Docker secrets.
+      - TURN_SHARED_SECRET=${WEBCONFERENCE_TURN_SHARED_SECRET:?this deployment's coturn shared secret, from core/bunsenbrenner.org}
     volumes:
       - webconference_demo_access_requests:/srv/data
     expose:

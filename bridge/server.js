@@ -97,6 +97,18 @@ const TUNNEL_ID = process.env.WEBCONFERENCE_TUNNEL_ID || '';
 const PRESENCE_TTL_MS = 45_000;
 const CALL_TTL_MS = 60_000;
 
+// CADS-webconference-demo#18/#133 follow-up: coturn's ephemeral-credential shared
+// secret (bunsenbrenner.org, CADS-Tunnel#520) -- HMAC-signs short-lived TURN
+// usernames per the standard "REST API for TURN Server" mechanism (RFC-adjacent,
+// coturn's own convention), so no static TURN password ever ships to a browser.
+// Server-side only, never logged, never returned to a client.
+const TURN_SHARED_SECRET = readSecret('TURN_SHARED_SECRET');
+const TURN_URLS = (process.env.WEBCONFERENCE_TURN_URLS || 'turn:bunsenbrenner.org:3478?transport=udp,turn:bunsenbrenner.org:3478?transport=tcp')
+  .split(',')
+  .map((u) => u.trim())
+  .filter(Boolean);
+const TURN_CREDENTIAL_TTL_SECS = 600; // 10 min, per core's recommendation
+
 // Who's allowed to revoke someone else's login access. Comma-separated,
 // case-insensitive. Empty (unset) preserves the previous behaviour -- any
 // gate-verified caller can revoke -- with a startup warning, so an operator
@@ -878,6 +890,31 @@ const server = http.createServer(async (req, res) => {
       // verified identity available", not an error.
       const email = req.headers['x-gate-email'] || null;
       return json(res, 200, { email });
+    }
+
+    // CADS-webconference-demo#18/#133: short-lived TURN credentials so the WebRTC
+    // path (call-webrtc.js) can traverse symmetric NAT / locked-down corporate
+    // networks, not just the common case STUN already handles. Deliberately
+    // FAILS CLOSED on a missing gate-verified identity -- unlike identityAllowed's
+    // fail-open default (appropriate there for the free-text/ungated fallback
+    // mode), minting live relay credentials without any verified caller would
+    // hand out TURN access to anyone who can reach this endpoint, gated tunnel or
+    // not. A tunnel running without gate enforcement simply doesn't get TURN;
+    // STUN-only / direct-channel fallback still work for it exactly as before.
+    if (req.method === 'GET' && url.pathname === '/api/ice-config') {
+      const email = gateVerifiedEmail(req);
+      if (!email) return json(res, 401, { error: 'gate-verified identity required for TURN credentials', code: 'gate_required' });
+      if (!TURN_SHARED_SECRET) return json(res, 503, { error: 'TURN not configured on this deployment', code: 'turn_unconfigured' });
+      const expiresAt = Math.floor(Date.now() / 1000) + TURN_CREDENTIAL_TTL_SECS;
+      const username = `${expiresAt}:${email}`;
+      const credential = crypto.createHmac('sha1', TURN_SHARED_SECRET).update(username).digest('base64');
+      return json(res, 200, {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: TURN_URLS, username, credential },
+        ],
+        ttl: TURN_CREDENTIAL_TTL_SECS,
+      });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/register') {

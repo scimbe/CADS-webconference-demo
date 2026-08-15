@@ -91,20 +91,33 @@ import { runChannelMediaCall, establishChannelSession } from './call-channel.js'
 import { createWebrtcCallSession, setActiveSession } from './call-session.js';
 import { setupControls, returnToDialerAfterHangup, setActiveCallBye } from './app.js';
 
+// CADS-webconference-demo#18/#133 follow-up: short-lived TURN credentials from
+// the bridge's /api/ice-config (gate-authenticated, HMAC-signed, ~10min TTL --
+// see server.js) so symmetric NAT / locked-down corporate networks get a real
+// relay path, not just the STUN-only common case #18 originally shipped.
+// Fails soft: any error (network, 401 on an ungated tunnel, 503 if TURN isn't
+// configured on this deployment) falls back to the STUN-only server -- the
+// direct-channel transport remains the reliable fallback beyond that, exactly
+// as before this change.
+async function fetchIceServers() {
+  const fallback = [{ urls: 'stun:stun.l.google.com:19302' }];
+  try {
+    const r = await fetch('/api/ice-config', { credentials: 'same-origin' });
+    if (!r.ok) {
+      log(`ice-config unavailable (${r.status}) -- STUN-only`);
+      return fallback;
+    }
+    const { iceServers } = await r.json();
+    return Array.isArray(iceServers) && iceServers.length ? iceServers : fallback;
+  } catch (e) {
+    log(`ice-config fetch failed (${e.message}) -- STUN-only`);
+    return fallback;
+  }
+}
+
 async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex) {
   setStatus('connecting-webrtc');
-  // CADS-webconference-demo#18: iceServers: [] meant ICE could only ever
-  // find a candidate pair when both sides happened to be reachable directly
-  // (same LAN, or one side has a real public IP) -- anyone behind NAT on
-  // both ends failed silently. A public STUN server fixes the common case
-  // (each side discovers its own reflexive address) but NOT symmetric NAT
-  // or locked-down corporate networks, which need an actual TURN relay --
-  // this demo has no TURN infrastructure/credentials to offer one, so
-  // that harder case stays a known gap, not silently claimed as fixed. The
-  // direct-channel transport (transportMode === 'channel', relayed over
-  // this app's own WebSocket channel instead of raw ICE) remains the
-  // reliable fallback for exactly those networks.
-  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  const pc = new RTCPeerConnection({ iceServers: await fetchIceServers() });
 
   // Liveness above the relay, not through it: the Noise/ws_channel signaling
   // path only tells us the peer is gone if it manages to send a clean 'bye'
