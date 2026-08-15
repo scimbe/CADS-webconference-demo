@@ -390,6 +390,21 @@ const accessRequestRateLimited = makeRateLimiter(ACCESS_REQUEST_RATE_LIMIT, ACCE
 const CALL_RATE_LIMIT = 20;
 const CALL_RATE_WINDOW_MS = 60 * 1000;
 const callRateLimited = makeRateLimiter(CALL_RATE_LIMIT, CALL_RATE_WINDOW_MS);
+// CADS-webconference-demo#134/#517-V2 hardening pass: unlike /api/call above, both
+// /api/ice-config and /api/ice-outcome already REQUIRE a gate-verified identity (401
+// otherwise, see their own handlers) -- so keying by the verified email itself, not IP,
+// is the more precise and harder-to-evade choice here (a shared-NAT/corporate-proxy IP
+// would otherwise unfairly bucket multiple real, distinct users together). Two separate
+// concerns: (a) each /api/ice-config call mints a real coturn allocation credential --
+// core's own coturn quotas are finite (per their #520 report: user-quota 8, total-quota
+// 60), so hammering this endpoint could exhaust a legitimate user's own allocation
+// headroom before they ever place a real call; (b) /api/ice-outcome accepts
+// client-reported telemetry with NO server-side way to verify it's true -- unbounded
+// posting would let one compromised/buggy client poison the aggregate metrics core's
+// own #517-V2 measurement relies on. Limits generous for real usage (a handful of ICE
+// restarts per call is the realistic ceiling) while bounding both costs.
+const iceConfigRateLimited = makeRateLimiter(10, 60 * 1000);
+const iceOutcomeRateLimited = makeRateLimiter(20, 60 * 1000);
 // Real client IP, not the reverse proxy's own socket -- Caddy's
 // reverse_proxy sets X-Forwarded-For by default; falls back to the raw
 // socket address if that's ever missing (e.g. a direct request bypassing
@@ -917,6 +932,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/ice-config') {
       const email = gateVerifiedEmail(req);
       if (!email) return json(res, 401, { error: 'gate-verified identity required for TURN credentials', code: 'gate_required' });
+      if (iceConfigRateLimited(email)) return json(res, 429, { error: 'too many ICE config requests -- try again in a moment' });
       if (!TURN_SHARED_SECRET) return json(res, 503, { error: 'TURN not configured on this deployment', code: 'turn_unconfigured' });
       const expiresAt = Math.floor(Date.now() / 1000) + TURN_CREDENTIAL_TTL_SECS;
       const username = `${expiresAt}:${email}`;
@@ -936,13 +952,21 @@ const server = http.createServer(async (req, res) => {
     // aggregate telemetry, not per-user data, but there's no reason to accept it from
     // an unverified caller either.
     if (req.method === 'POST' && url.pathname === '/api/ice-outcome') {
-      if (!gateVerifiedEmail(req)) return json(res, 401, { error: 'gate-verified identity required', code: 'gate_required' });
+      const email = gateVerifiedEmail(req);
+      if (!email) return json(res, 401, { error: 'gate-verified identity required', code: 'gate_required' });
+      if (iceOutcomeRateLimited(email)) return json(res, 429, { error: 'too many ICE outcome reports -- try again in a moment' });
       const { pairType, timeToConnectedMs, reconnect } = await readBody(req);
       if (!ICE_OUTCOME_PAIR_TYPES.includes(pairType)) {
         return json(res, 400, { error: `pairType must be one of ${ICE_OUTCOME_PAIR_TYPES.join('/')}` });
       }
-      if (typeof timeToConnectedMs !== 'number' || !Number.isFinite(timeToConnectedMs) || timeToConnectedMs < 0) {
-        return json(res, 400, { error: 'timeToConnectedMs must be a non-negative number' });
+      // Upper-bounded, not just non-negative -- this app's own ICE-restart grace window
+      // (call-webrtc.js's ICE_RESTART_GRACE_MS) tops out at 20s, and the channel-fallback
+      // handoff beyond that is its own transport entirely (never reports here); nothing
+      // legitimate reports a multi-minute "time to connected". Caps one bad/malicious
+      // sample from badly skewing the aggregate avg/max/p95 stats core's measurement uses.
+      const ICE_OUTCOME_MAX_MS = 120_000;
+      if (typeof timeToConnectedMs !== 'number' || !Number.isFinite(timeToConnectedMs) || timeToConnectedMs < 0 || timeToConnectedMs > ICE_OUTCOME_MAX_MS) {
+        return json(res, 400, { error: `timeToConnectedMs must be a number in [0, ${ICE_OUTCOME_MAX_MS}]` });
       }
       iceOutcomeCounts[pairType] += 1;
       if (reconnect === true) iceOutcomeReconnectCounts[pairType] += 1;
