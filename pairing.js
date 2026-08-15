@@ -16,7 +16,7 @@
 // contacts.js (its permanent home as of that consolidation cycle) -- a
 // module-level import like any other now, no longer a circular one.
 
-import { storageKeyFor, loadOrCreateIdentity, identityCreatedAt } from './identity.js';
+import { storageKeyFor, loadOrCreateIdentity, loadStoredIdentity, saveStoredIdentity, identityCreatedAt } from './identity.js';
 import { api } from './contacts.js';
 import { showConfirmOverlay, showAlertOverlay } from './ui-dom.js';
 
@@ -80,17 +80,21 @@ async function pairAsNewDevice(email) {
       // concurrent loadOrCreateIdentity() for the same brand-new email
       // would otherwise still race each other even after #119, just across
       // two different functions instead of within one.
-      const merge = () => {
-        const existingRaw = localStorage.getItem(key);
-        if (existingRaw) {
-          const existing = JSON.parse(existingRaw);
+      // CADS-webconference-demo#133: reads/writes go through identity.js's
+      // loadStoredIdentity/saveStoredIdentity now, not raw localStorage --
+      // same encryption-at-rest the normal load/create path gets, applied
+      // here too rather than only closing the gap in one of the two places
+      // the identity blob is written.
+      const merge = async () => {
+        const existing = await loadStoredIdentity(key);
+        if (existing) {
           // This browser already independently held a DIFFERENT identity for
           // this email (e.g. used before pairing existed) -- the older key
           // wins; a tie also keeps the existing one (arbitrary but
           // deterministic, and never discards what was already here).
           if (identityCreatedAt(existing) <= identityCreatedAt(receivedIdentity)) return existing;
         }
-        localStorage.setItem(key, JSON.stringify(receivedIdentity));
+        await saveStoredIdentity(key, receivedIdentity);
         return receivedIdentity;
       };
       if (typeof navigator === 'undefined' || !navigator.locks) return merge();

@@ -86,6 +86,112 @@ function storageKeyFor(email) {
   return `ct-webconference-identity:${email.toLowerCase()}`;
 }
 
+// --- encryption-at-rest for the stored identity blob (CADS-webconference-demo#133) ---
+// #42's "Forget this identity" gave users an exit but never reduced the exposure DURING
+// normal use -- holderPriv/noisePriv sat in localStorage as plain JSON the whole time an
+// identity was active. Wraps the blob in AES-GCM before it ever reaches localStorage,
+// using a non-extractable key held in IndexedDB: readable only by script running in THIS
+// origin via the CryptoKey handle, never as raw exportable bytes. This closes pure
+// data-exfiltration reads of storage (a misconfigured logging/analytics library, a
+// storage-reading browser extension, a sync/backup tool, physical access to browser
+// profile files) -- it does NOT stop a full same-origin XSS with arbitrary script
+// execution (that could still call the CryptoKey's own decrypt operation directly). No
+// client-side scheme can close that without a passphrase-unlock step, which this app
+// deliberately avoids for UX reasons (see #133's own tradeoff discussion) -- the
+// wrapping key is generated once per browser profile and never leaves it, no prompt.
+const IDB_NAME = 'ct-webconference-keystore';
+const IDB_STORE = 'wrapping-keys';
+const IDB_KEY_ID = 'identity-wrapping-key-v1';
+const ENCRYPTED_MARKER = 'ctenc1:'; // distinguishes an encrypted blob from a pre-#133 plaintext one
+
+function openKeystoreDb() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') return reject(new Error('IndexedDB unavailable'));
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// Memoized like ensureWasmInit's own wasmInitPromise just above -- and the same failure
+// shape applies: a rejected attempt must NOT stay poisoned forever, or every later
+// save/load this session would keep hitting the same stale error instead of retrying.
+let wrappingKeyPromise = null;
+function getWrappingKey() {
+  if (!wrappingKeyPromise) {
+    wrappingKeyPromise = (async () => {
+      const db = await openKeystoreDb();
+      const existing = await new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const req = tx.objectStore(IDB_STORE).get(IDB_KEY_ID);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      if (existing) return existing;
+      // extractable=false: the raw key bytes can never leave this CryptoKey handle,
+      // not even to this file's own code -- only encrypt/decrypt operations against it.
+      const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(key, IDB_KEY_ID);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+      return key;
+    })().catch((e) => { wrappingKeyPromise = null; throw e; });
+  }
+  return wrappingKeyPromise;
+}
+
+async function encryptForStorage(obj) {
+  const key = await getWrappingKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj)));
+  return ENCRYPTED_MARKER + JSON.stringify({ iv: bytesToHex(iv), ct: bytesToHex(new Uint8Array(ciphertext)) });
+}
+
+async function decryptFromStorage(raw) {
+  const { iv, ct } = JSON.parse(raw.slice(ENCRYPTED_MARKER.length));
+  const key = await getWrappingKey();
+  const bytes = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: hexToBytes(iv) }, key, hexToBytes(ct));
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+// Reads (and transparently, silently migrates) whatever identity is stored at `key` --
+// null if nothing is there yet. A pre-#133 plaintext blob decodes as plain JSON (no
+// ENCRYPTED_MARKER prefix) and is re-saved encrypted immediately, a one-time upgrade
+// that never discards or changes an existing real identity, just its at-rest form.
+async function loadStoredIdentity(key) {
+  const raw = localStorage.getItem(key);
+  if (!raw) return null;
+  try {
+    if (!raw.startsWith(ENCRYPTED_MARKER)) {
+      const identity = JSON.parse(raw); // pre-#133 plaintext
+      await saveStoredIdentity(key, identity); // best-effort upgrade; identity is still returned even if this fails
+      return identity;
+    }
+    return await decryptFromStorage(raw);
+  } catch (e) {
+    console.error(`identity.js: failed to read stored identity at ${key} -- treating as absent:`, e.message);
+    return null;
+  }
+}
+
+// Fails open (not closed) to plaintext on genuine WebCrypto/IndexedDB unavailability --
+// matches this app's established "an unusual environment gets today's trust level, not
+// a broken demo" pattern (see server.js's identityAllowed comment for the same call made
+// there). A real deployment losing keys entirely because a locked-down browser disabled
+// IndexedDB would be a worse outcome than the plaintext exposure #133 is closing.
+async function saveStoredIdentity(key, identity) {
+  try {
+    localStorage.setItem(key, await encryptForStorage(identity));
+  } catch (e) {
+    console.error(`identity.js: encryption-at-rest unavailable (${e.message}) -- storing this identity in plaintext as a fallback`);
+    localStorage.setItem(key, JSON.stringify(identity));
+  }
+}
+
 // CADS-webconference-demo#42: run()'s #13-era key recovery (myEmail ->
 // localStorage) needs to tell "no identity here yet" apart from "found the
 // existing one" -- silently minting a FRESH identity in that case (this
@@ -118,9 +224,9 @@ function storageKeyFor(email) {
 // if genuinely unavailable, same risk profile as before, not worse.
 async function loadOrCreateIdentity(email, { requireExisting = false } = {}) {
   const key = storageKeyFor(email);
-  const create = () => {
-    const existing = localStorage.getItem(key);
-    if (existing) return JSON.parse(existing);
+  const create = async () => {
+    const existing = await loadStoredIdentity(key);
+    if (existing) return existing;
     if (requireExisting) {
       throw new Error(`no local identity found for ${email} -- this call link only works in the same browser profile that placed or accepted it`);
     }
@@ -142,7 +248,7 @@ async function loadOrCreateIdentity(email, { requireExisting = false } = {}) {
       // pre-existing identity from before this field existed is treated.
       createdAt: Date.now(),
     };
-    localStorage.setItem(key, JSON.stringify(identity));
+    await saveStoredIdentity(key, identity);
     return identity;
   };
   if (typeof navigator === 'undefined' || !navigator.locks) return create();
@@ -198,6 +304,8 @@ export {
   forgetIdentityKeys,
   storageKeyFor,
   loadOrCreateIdentity,
+  loadStoredIdentity,
+  saveStoredIdentity,
   identityCreatedAt,
   ensureWasmInit,
 };

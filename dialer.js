@@ -23,7 +23,7 @@ import {
   showSetupScreen, idEntry, idForm, idEmailInput, idVerifyError, idVerifyErrorDetail, idVerifyRetry,
   idGateRequired, idGateLoginBtn, idGateRegisterForm, idGateRegisterEmail,
 } from './ui-dom.js';
-import { computeAttestation } from './identity.js';
+import { computeAttestation, loadStoredIdentity } from './identity.js';
 import { loadOrPairIdentity } from './pairing.js';
 import { withTimeout, WASM_INIT_TIMEOUT_MS } from './call-transport-shared.js';
 import { syncNow } from './sync.js';
@@ -635,18 +635,20 @@ async function runIdentityScreen() {
   // used one automatically instead of asking again.
   const existingKeys = Object.keys(localStorage).filter((k) => k.startsWith('ct-webconference-identity:'));
   if (existingKeys.length > 0) {
-    let identity = null;
-    try {
-      identity = JSON.parse(localStorage.getItem(existingKeys[existingKeys.length - 1]));
-    } catch (e) {
-      // CADS-webconference-demo#32: corrupted/tampered localStorage used to
-      // throw here uncaught, crashing the whole setup screen (blank page,
-      // no recovery). Drop the corrupted entry and fall through to a fresh
-      // id-entry form instead.
-      log(`stored identity was corrupted, ignoring it: ${e.message}`);
-      localStorage.removeItem(existingKeys[existingKeys.length - 1]);
-    }
-    if (identity) {
+    // CADS-webconference-demo#133: goes through identity.js's loadStoredIdentity
+    // now, not a raw JSON.parse -- the stored value is AES-GCM-encrypted since
+    // #133 (or transparently migrated from a pre-#133 plaintext blob on read),
+    // no longer plain JSON a direct parse can read. loadStoredIdentity already
+    // has its own try/catch (returns null on a decrypt failure, logged there);
+    // this call site's own #32 "drop the corrupted entry" behavior is preserved
+    // for a genuine failure -- loadStoredIdentity returning null after logging
+    // an error is exactly that case, not a *different* failure mode to handle.
+    const lastKey = existingKeys[existingKeys.length - 1];
+    const identity = await loadStoredIdentity(lastKey);
+    if (!identity) {
+      log('stored identity was unreadable, ignoring it');
+      localStorage.removeItem(lastKey);
+    } else {
       await runDialer(identity);
       return;
     }
