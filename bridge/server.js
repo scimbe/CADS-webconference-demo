@@ -1106,7 +1106,13 @@ const server = http.createServer(async (req, res) => {
         return json(res, 403, { error: 'admin only' });
       }
       const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email });
-      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}` });
+      // CADS-webconference-demo#134 follow-up hardening: used to discard cpFetchForm's
+      // own `text` field, surfacing only a bare status code -- exactly the difference
+      // between "control plane -> 401" (useless for anyone debugging this) and
+      // cpFetchForm's actual diagnosis ("CT_PORTAL_SESSION_COOKIE not configured" or
+      // "...is likely expired or invalid", live-hit while investigating CADS-Tunnel#525).
+      // That detail was already computed, just never reached the caller.
+      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}${resp.text ? `: ${resp.text}` : ''}` });
       return json(res, 200, { ok: true });
     }
     // Contact requests: "I added you" shows up in the OTHER person's
@@ -1174,7 +1180,13 @@ const server = http.createServer(async (req, res) => {
         return json(res, 403, { error: 'admin only' });
       }
       const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist/${encodeURIComponent(email)}/remove`, {});
-      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}` });
+      // CADS-webconference-demo#134 follow-up hardening: used to discard cpFetchForm's
+      // own `text` field, surfacing only a bare status code -- exactly the difference
+      // between "control plane -> 401" (useless for anyone debugging this) and
+      // cpFetchForm's actual diagnosis ("CT_PORTAL_SESSION_COOKIE not configured" or
+      // "...is likely expired or invalid", live-hit while investigating CADS-Tunnel#525).
+      // That detail was already computed, just never reached the caller.
+      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}${resp.text ? `: ${resp.text}` : ''}` });
       return json(res, 200, { ok: true });
     }
 
@@ -1247,7 +1259,13 @@ const server = http.createServer(async (req, res) => {
         return json(res, 403, { error: 'admin only' });
       }
       const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email });
-      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}` });
+      // CADS-webconference-demo#134 follow-up hardening: used to discard cpFetchForm's
+      // own `text` field, surfacing only a bare status code -- exactly the difference
+      // between "control plane -> 401" (useless for anyone debugging this) and
+      // cpFetchForm's actual diagnosis ("CT_PORTAL_SESSION_COOKIE not configured" or
+      // "...is likely expired or invalid", live-hit while investigating CADS-Tunnel#525).
+      // That detail was already computed, just never reached the caller.
+      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}${resp.text ? `: ${resp.text}` : ''}` });
       accessRequests.delete(email.trim().toLowerCase());
       persistAccessRequests();
       return json(res, 200, { ok: true });
