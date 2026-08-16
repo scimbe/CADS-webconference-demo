@@ -135,6 +135,47 @@ function drawSnowflake(ctx, x, y, r) {
   }
   ctx.restore();
 }
+// A single braided plait draped over one shoulder -- alternating offset
+// segments (a common procedural-braid technique: tapering ellipses that
+// zig-zag left/right, each with a faint diagonal cross-line to read as
+// "woven" rather than a solid rope) plus a tie band near the top and a
+// small tuft at the tip. Live-requested (2026-08-16, reference: a generic
+// long-braid hairstyle photo) -- same "geometric shape anchored to real
+// landmarks, not a raster likeness of any specific character" approach as
+// drawCrown/drawSnowflake above; hair/tie colors are plain generic tones,
+// not modeled on any particular franchise's palette.
+function drawBraid(ctx, x, y, length, width, tiltDeg, hairColor, tieColor) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate((tiltDeg * Math.PI) / 180);
+  const segments = 9;
+  const segH = length / segments;
+  for (let i = 0; i < segments; i++) {
+    const t = i / segments;
+    const segY = i * segH;
+    const segW = width * (1 - t * 0.6); // taper toward the tip
+    const offsetX = (i % 2 === 0 ? -1 : 1) * segW * 0.22; // alternating weave
+    ctx.fillStyle = hairColor;
+    ctx.beginPath();
+    ctx.ellipse(offsetX, segY + segH / 2, segW / 2, segH * 0.7, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.14)';
+    ctx.lineWidth = Math.max(1, segW * 0.08);
+    ctx.beginPath();
+    ctx.moveTo(offsetX - segW * 0.38, segY + segH * 0.18);
+    ctx.lineTo(offsetX + segW * 0.38, segY + segH * 0.82);
+    ctx.stroke();
+  }
+  ctx.fillStyle = tieColor;
+  ctx.beginPath();
+  ctx.ellipse(0, width * 0.18, width * 0.4, width * 0.22, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = hairColor;
+  ctx.beginPath();
+  ctx.ellipse(0, length, width * 0.16, width * 0.26, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
 // Kept deliberately simple -- geometric shapes anchored to real detected
 // landmark points, not raster sticker images (no extra asset files, and
 // nothing that could be mistaken for a real photo of anyone). Not a claim
@@ -269,6 +310,59 @@ function drawKidStickers(ctx, detection, style) {
     ctx.beginPath();
     ctx.ellipse(noseTip.x, noseTip.y + eyeSpan * 0.32, eyeSpan * 0.09, eyeSpan * 0.16, 0, 0, Math.PI * 2);
     ctx.fill();
+  } else if (style === 'braid') {
+    // Generic single braid draped over one shoulder -- see drawBraid's own
+    // header comment for the "not any specific character's design" note.
+    const braidWidth = eyeSpan * 0.5;
+    const braidLength = box.height * 1.5;
+    const anchorX = box.x + box.width * 0.78;
+    const anchorY = box.top + box.height * 0.72;
+    drawBraid(ctx, anchorX, anchorY, braidLength, braidWidth, 6, '#f2d98a', '#e8a6c1');
+  } else if (style === 'ladybug') {
+    // Generic "ladybug" costume face paint: a red domino mask across the
+    // eyes, black polka dots on both cheeks, and a pair of small bobbing
+    // antennae -- a widely-recognized generic costume motif (red + black
+    // spots + antennae), not modeled on any specific character's face
+    // paint, hairstyle, or color design.
+    const maskW = eyeSpan * 1.9;
+    const maskH = box.height * 0.24;
+    ctx.fillStyle = 'rgba(196, 30, 40, 0.88)';
+    ctx.beginPath();
+    ctx.ellipse((leftEye.x + rightEye.x) / 2, (leftEye.y + rightEye.y) / 2, maskW / 2, maskH / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#1a1a1a';
+    ctx.lineWidth = Math.max(2, eyeSpan * 0.05);
+    ctx.stroke();
+    const dotR = eyeSpan * 0.09;
+    ctx.fillStyle = '#1a1a1a';
+    const cheekDots = [
+      { x: box.x + box.width * 0.14, y: box.y + box.height * 0.62 },
+      { x: box.x + box.width * 0.22, y: box.y + box.height * 0.78 },
+      { x: box.x + box.width * 0.86, y: box.y + box.height * 0.62 },
+      { x: box.x + box.width * 0.78, y: box.y + box.height * 0.78 },
+    ];
+    for (const d of cheekDots) {
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, dotR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.strokeStyle = '#1a1a1a';
+    ctx.lineWidth = Math.max(2, eyeSpan * 0.06);
+    ctx.lineCap = 'round';
+    const antBaseY = box.top + box.height * 0.08;
+    for (const side of [-1, 1]) {
+      const bx = box.x + box.width / 2 + side * eyeSpan * 0.35;
+      const tipX = bx + side * eyeSpan * 0.22;
+      const tipY = antBaseY - box.height * 0.32;
+      ctx.beginPath();
+      ctx.moveTo(bx, antBaseY);
+      ctx.quadraticCurveTo(bx + side * eyeSpan * 0.15, antBaseY - box.height * 0.18, tipX, tipY);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(196, 30, 40, 0.95)';
+      ctx.beginPath();
+      ctx.arc(tipX, tipY, eyeSpan * 0.09, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 }
 
@@ -382,7 +476,8 @@ function stopVideoFilterCompositor() {
 let startingCompositor = false; // guards the first-activation branch inside selectFilterStyle, below
 
 // Applies an explicit style (null | 'bunny' | 'sparkle' | 'princess' |
-// 'ice-princess' | 'snowman' | 'mouse-ears' | 'pup') directly -- the
+// 'ice-princess' | 'snowman' | 'mouse-ears' | 'pup' | 'braid' | 'ladybug')
+// directly -- the
 // menu passes exactly which item was clicked, no cycling/index-tracking
 // needed. Current selection is read back from videoFilterState?.style
 // (null when off) rather than a separate tracked index.
