@@ -12,6 +12,6 @@ path = "src/main.rs"
 # Pinned to a real CADS-Tunnel release tag (matches CADS-auction-demo's own
 # convention) -- no local path, this demo repo is standalone. Bump deliberately
 # when a newer tag is needed.
-ct-common = { git = "https://github.com/scimbe/CADS-Tunnel", tag = "v0.4.13" }
+ct-common = { git = "https://github.com/scimbe/CADS-Tunnel", tag = "v0.4.16" }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
