@@ -169,6 +169,45 @@ window.addEventListener('pageshow', (ev) => {
   if (!callScreen.hidden || (bootLoadingEl && !bootLoadingEl.hidden)) location.reload();
 });
 
+// Live-reported: going offline yourself outside a call had no fast, clear
+// feedback at all -- only the dialer/messenger shell's existing
+// #conn-trouble-banner (contacts.js's noteApiResult), which only shows after
+// 3 CONSECUTIVE failed background polls, however long that takes to
+// accumulate. #96's own window.onoffline/ononline fix (below, previously
+// registered only inside setupControls -- i.e. only once an actual call had
+// started) already solved this instantly for the in-call #offline-banner;
+// this is that exact same instant signal, registered unconditionally at
+// module scope (this script re-runs top-to-bottom on every screen, since
+// every screen transition in this app is a real page load/reload -- see
+// run()'s own URL-param dispatch -- so "always active" just means
+// "registered here instead of only inside setupControls", not a new
+// persistent-SPA listener lifetime to manage) so it covers the dialer/
+// messenger screens too. Reuses the existing #conn-trouble-banner element
+// exactly as contacts.js already drives it -- no new banner, no DOM change.
+// Deliberately does NOT touch #presence-lost-banner (a distinct, narrower
+// signal for the presence WS specifically, with its own manual-reconnect
+// button) or any of the reload-based recovery panels (identity-mismatch,
+// startup/WASM-init failure) -- those handle genuinely different failure
+// classes and are already correctly engineered for them, per this file's
+// own existing comments; scope here is strictly "the browser itself just
+// told us we have no network," recoverable in place, no state teardown.
+function updateOfflineIndicator() {
+  const offline = !navigator.onLine;
+  if (!callScreen.hidden) {
+    offlineBanner.hidden = !offline;
+    return;
+  }
+  // Outside a call: don't fight noteApiResult's own identity-mismatch-sticky
+  // guard or stomp #presence-lost-banner -- just reuse #conn-trouble-banner,
+  // the same element the poll-failure path already owns, so there's exactly
+  // one "connection trouble" banner per screen, not two disagreeing ones.
+  const connBanner = document.getElementById('conn-trouble-banner');
+  if (connBanner) connBanner.hidden = !offline;
+}
+window.addEventListener('offline', updateOfflineIndicator);
+window.addEventListener('online', updateOfflineIndicator);
+updateOfflineIndicator(); // covers already being offline at the moment this script runs
+
 function setupControls(media, onHangup) {
   let micOn = true;
   let camOn = true;
@@ -241,22 +280,15 @@ function setupControls(media, onHangup) {
     closeFilterMenu();
     returnToDialerAfterHangup();
   };
-  // CADS-webconference-demo#96 (live-reported): fast, additional signal for
-  // a total local network outage -- see offline-banner's own comment in
-  // index.html for why this doesn't replace #67/#69's existing
-  // signaling/heartbeat-based recovery for every other disconnect cause.
-  // window.onoffline/ononline, not addEventListener -- same "setupControls
-  // may run twice" reasoning as every other handler above (a second
-  // assignment here safely replaces the first instead of stacking).
-  window.onoffline = () => {
-    offlineBanner.hidden = false;
-  };
-  window.ononline = () => {
-    offlineBanner.hidden = true;
-  };
-  // Covers the edge case of already being offline the moment a call
-  // starts -- the events above only fire on a state CHANGE from here on.
-  offlineBanner.hidden = navigator.onLine;
+  // CADS-webconference-demo#96's offline/online handling moved to module
+  // scope (updateOfflineIndicator, registered once near this file's top) so
+  // it also covers the dialer/messenger screens, not just an active call --
+  // see that function's own comment for the full reasoning. Re-check here
+  // anyway: setupControls can run twice per page load (the webrtc->channel
+  // fallback handoff), and the module-level registration's own "covers
+  // already offline" call happened once at script-load time, before this
+  // specific call (or fallback) existed.
+  updateOfflineIndicator();
 }
 
 // Neither a local hang-up nor a received 'bye' used to navigate anywhere --

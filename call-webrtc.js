@@ -79,7 +79,7 @@
 
 import * as wasm from './pkg/ct_agent_wasm.js';
 import { TAG_FALLBACK } from './call-protocol.js';
-import { writeFramed, readFramed, closeAfterFlush } from './call-transport-shared.js';
+import { writeFramed, readFramed, closeAfterFlush, withTimeout } from './call-transport-shared.js';
 import {
   setStatus, hideConnecting, addChatMessage, log, setIceState,
   localVideo, remoteVideo, localEmpty, remoteEmpty, btnHangup,
@@ -355,12 +355,33 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     // explanation to either user. Check first; if it's not open, re-join
     // fresh (a real rejoin + Noise handshake, same shape as the initial
     // connection) rather than handing off garbage.
+    // Live-reported: "Hang Up does nothing." Root cause (2 of 2 -- see
+    // onHangup's own comment for the other): btnHangup.disabled is set true
+    // above, and the ONLY place it gets re-enabled is setupControls(), called
+    // again deep inside runChannelMediaCall once the fallback finishes
+    // setting up. Nothing before this point (establishChannelSession,
+    // runChannelMediaCall's own getLocalMedia() re-acquisition) had a
+    // bounded timeout at THIS call site -- if any of it hung (a camera not
+    // yet released by the just-abandoned pc, a network path that neither
+    // succeeds nor cleanly fails), the button stayed disabled forever, which
+    // to a user IS "clicking Hang Up does nothing" even though the button
+    // itself was working exactly as coded. A blind re-enable-on-timeout
+    // instead would race a genuinely-still-in-flight handoff (the OLD
+    // transport's onHangup is unsafe to fire mid-handoff, per the comment on
+    // btnHangup.disabled above) -- bounding the whole handoff attempt and
+    // routing a timeout through the SAME endCallDueToPeerLoss teardown every
+    // other failure here already uses is the safe fix: it closes pc,
+    // disconnects, and reloads back to the dialer either way, which also
+    // re-enables the button as a side effect of the reload.
+    const CHANNEL_FALLBACK_TIMEOUT_MS = 45000;
     try {
-      if (stream.ws.readyState !== WebSocket.OPEN) {
-        log('fallback: signaling socket already closing/closed -- re-establishing a fresh channel before handing off');
-        ({ stream, noiseTransport } = await establishChannelSession(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller));
-      }
-      await runChannelMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex);
+      await withTimeout((async () => {
+        if (stream.ws.readyState !== WebSocket.OPEN) {
+          log('fallback: signaling socket already closing/closed -- re-establishing a fresh channel before handing off');
+          ({ stream, noiseTransport } = await establishChannelSession(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller));
+        }
+        await runChannelMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex);
+      })(), CHANNEL_FALLBACK_TIMEOUT_MS, `channel fallback timed out after ${CHANNEL_FALLBACK_TIMEOUT_MS / 1000}s`);
     } catch (e) {
       // Fail loudly (#129 fix 2) -- previously a failure here (or deeper
       // inside runChannelMediaCall) was an unhandled rejection: both users
@@ -569,7 +590,24 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     sessionEnded = true; // before pc.close(), so the heartbeat/connection-state
     // watchdogs above see the session as already-ended and don't also fire
     // a redundant "peer connection lost" on top of our own local hang-up.
-    sendSignal(wasm.encodeSignalBye()); // already in scope here -- no need to bounce through the (now-removed) window global
+    //
+    // Live-reported: clicking Hang Up on a call whose peer was already long gone did
+    // NOTHING -- the call stayed stuck. Root cause: sendSignal's own encrypt() call
+    // below is SYNCHRONOUS (see its own comment) -- on a transport whose underlying
+    // state is already dead (exactly this scenario), it can throw before writeFramed
+    // ever runs, which used to abort this whole function before pc.close()/
+    // setActiveSession(null) below ever got a chance to run. Mainstream call apps
+    // (Signal/WhatsApp/Telegram/BigBlueButton) all treat local call termination as an
+    // unconditional client action -- the peer-bye is a best-effort courtesy, never a
+    // precondition for actually ending the call on this side. try/catch here (rather
+    // than reordering teardown before the notify) preserves closeAfterFlush's own
+    // "let the just-queued bye leave the socket before closing" behavior on the
+    // normal/success path, while guaranteeing teardown still runs on the failure path.
+    try {
+      sendSignal(wasm.encodeSignalBye()); // already in scope here -- no need to bounce through the (now-removed) window global
+    } catch (e) {
+      log(`bye notify failed (peer likely already gone): ${e.message || e}`);
+    }
     pc.close();
     setActiveSession(null);
     // CADS-webconference-demo (live-reported): closeAfterFlush, not a bare

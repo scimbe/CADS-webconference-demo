@@ -55,7 +55,7 @@
 
 import * as wasm from './pkg/ct_agent_wasm.js';
 import {
-  TAG_MEDIA_INIT, TAG_MEDIA_CHUNK, TAG_CHAT, TAG_BYE, NO_CAMERA_SENTINEL, NO_CODEC_SENTINEL,
+  TAG_MEDIA_INIT, TAG_MEDIA_CHUNK, TAG_CHAT, TAG_BYE, TAG_PING, TAG_PONG, NO_CAMERA_SENTINEL, NO_CODEC_SENTINEL,
 } from './call-protocol.js';
 import { joinChannel, writeFramed, readFramed, withTimeout, sendTaggedFrame, closeAfterFlush, CHANNEL_OPEN_TIMEOUT_MS } from './call-transport-shared.js';
 import {
@@ -149,6 +149,55 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   let remoteMediaFatal = false;
   let mediaRecreateAttempts = 0;
   const MAX_MEDIA_RECREATE_ATTEMPTS = 3;
+
+  // Active liveness watchdog (see TAG_PING/TAG_PONG's own comment in
+  // call-protocol.js for why this transport needed one) -- same interval/
+  // timeout values as call-webrtc.js's heartbeat data channel, for
+  // consistency between the two transports' peer-loss detection latency.
+  const HEARTBEAT_INTERVAL_MS = 8000;
+  const HEARTBEAT_TIMEOUT_MS = 35000;
+  let heartbeatLastSeen = Date.now();
+  let heartbeatSendTimer = null;
+  let heartbeatWatchdogTimer = null;
+  function stopHeartbeat() {
+    if (heartbeatSendTimer) clearInterval(heartbeatSendTimer);
+    if (heartbeatWatchdogTimer) clearInterval(heartbeatWatchdogTimer);
+    heartbeatSendTimer = null;
+    heartbeatWatchdogTimer = null;
+  }
+  function startHeartbeat() {
+    heartbeatLastSeen = Date.now();
+    heartbeatSendTimer = setInterval(() => {
+      try {
+        sendTagged(TAG_PING, new Uint8Array(0));
+      } catch (e) {
+        log(`ping send failed: ${e.message || e}`);
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+    // Same "remote media still advancing -- don't treat heartbeat silence
+    // alone as peer loss" escape hatch as call-webrtc.js's #79 fix -- this
+    // transport also feeds remoteVideo (via mediaSource, see remoteVideo.src
+    // above), so the identical currentTime-advancing check applies here.
+    let lastWatchdogVideoTime = remoteVideo.currentTime;
+    heartbeatWatchdogTimer = setInterval(() => {
+      const videoTimeNow = remoteVideo.currentTime;
+      const videoAdvancing = videoTimeNow > lastWatchdogVideoTime;
+      lastWatchdogVideoTime = videoTimeNow;
+      if (Date.now() - heartbeatLastSeen <= HEARTBEAT_TIMEOUT_MS) return;
+      if (videoAdvancing) {
+        log('heartbeat silent but remote media still advancing -- not treating as peer loss');
+        return;
+      }
+      stopHeartbeat();
+      log('heartbeat timeout -- declaring peer lost');
+      setStatus('peer-hung-up');
+      addChatMessage('peer connection lost (heartbeat timeout)', 'system');
+      if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
+      byteStream.ws.close(); // CADS-webconference-demo#38 (finding 9) -- see onHangup's matching comment
+      setActiveSession(null);
+      returnToDialerAfterHangup();
+    }, HEARTBEAT_INTERVAL_MS);
+  }
   function handleAppendError(e, failedChunk) {
     if (e.name === 'QuotaExceededError') {
       // Standard MSE pattern for long-lived streams: evict buffered data
@@ -276,6 +325,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           setStatus('peer-hung-up');
           addChatMessage('peer connection lost', 'system');
           if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
+          stopHeartbeat();
           setActiveSession(null);
           returnToDialerAfterHangup();
           return;
@@ -327,6 +377,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           addChatMessage('peer connection lost', 'system');
           hideConnecting();
           if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
+          stopHeartbeat();
           setActiveSession(null);
           returnToDialerAfterHangup();
           return;
@@ -344,9 +395,19 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
       // wrong with this stream, not safe to just keep reading past.
       try {
         const plain = noiseTransport.decrypt(cipher);
+        // Any successfully-decrypted frame is real proof this transport is still
+        // alive end-to-end -- not just an explicit TAG_PONG reply. Updated here,
+        // once, rather than per-branch below.
+        heartbeatLastSeen = Date.now();
         const tag = plain[0];
         const payload = plain.slice(1);
-        if (tag === TAG_MEDIA_INIT) {
+        if (tag === TAG_PING) {
+          try {
+            sendTagged(TAG_PONG, new Uint8Array(0));
+          } catch (e) {
+            log(`pong reply failed: ${e.message || e}`);
+          }
+        } else if (tag === TAG_MEDIA_INIT) {
           const mimeType = new TextDecoder().decode(payload);
           if (mediaSource.readyState === 'open' && MediaSource.isTypeSupported(mimeType)) {
             sourceBufferMimeType = mimeType; // CADS-webconference-demo#78 -- needed if handleAppendError has to recreate this
@@ -406,6 +467,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           // is already closing regardless), but not the clean immediate
           // teardown onHangup gets -- matching that shape here too.
           if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
+          stopHeartbeat();
           byteStream.ws.close(); // CADS-webconference-demo#38 (finding 9) -- see setupControls' onHangup callback's matching comment
           setActiveSession(null);
           returnToDialerAfterHangup();
@@ -416,6 +478,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
         setStatus('peer-hung-up');
         addChatMessage('connection lost (a corrupted or unexpected frame arrived)', 'system');
         if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval); // CADS-webconference-demo#70 (review follow-up) -- see the TAG_BYE branch's matching comment above
+        stopHeartbeat();
         byteStream.ws.close();
         setActiveSession(null);
         returnToDialerAfterHangup();
@@ -514,12 +577,23 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
 
   const onHangup = () => {
     setActiveCallBye(null); // #38 finding 6 -- see returnToDialerAfterHangup's matching clear
-    sendTagged(TAG_BYE, new Uint8Array(0));
+    // Live-reported, same root cause + fix as call-webrtc.js's onHangup (see its own
+    // fuller comment): sendTagged -> sendTaggedFrame's noiseTransport.encrypt() call is
+    // synchronous and can throw on an already-dead transport, which used to abort this
+    // whole function before recorder.stop()/setActiveSession(null) below ever ran --
+    // clicking Hang Up on a long-gone peer did nothing. try/catch makes the bye
+    // notify best-effort without blocking local teardown.
+    try {
+      sendTagged(TAG_BYE, new Uint8Array(0));
+    } catch (e) {
+      log(`bye notify failed (peer likely already gone): ${e.message || e}`);
+    }
     if (recorder && recorder.state !== 'inactive') recorder.stop();
     // CADS-webconference-demo#70: the backpressure poll interval outlives
     // the recorder otherwise -- same leaked-timer shape #38 already fixed
     // for the signaling WS below.
     if (activeMediaBackpressureInterval) clearInterval(activeMediaBackpressureInterval);
+    stopHeartbeat();
     setActiveSession(null);
     // CADS-webconference-demo#38 (finding 9): neither hangup path closed the
     // underlying signaling WS -- it lingered open until
@@ -542,6 +616,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
 
   setIceState('connected'); // no real ICE in this mode -- 'connected' just reflects the channel being fully up
   setStatus('in-call');
+  startHeartbeat();
 }
 
 export {
