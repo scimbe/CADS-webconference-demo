@@ -22,6 +22,7 @@ import {
   log, notifyIfHidden, playIncomingCallSound, isValidEmail, ensureNotificationPermission,
   showSetupScreen, idEntry, idForm, idEmailInput, idVerifyError, idVerifyErrorDetail, idVerifyRetry,
   idGateRequired, idGateLoginBtn, idGateRegisterForm, idGateRegisterEmail,
+  simpleModeEnterBtn, simpleExitBtn, simplePracticeBtn, showSimpleScreen, showMessengerShell,
 } from './ui-dom.js';
 import { computeAttestation, loadStoredIdentity } from './identity.js';
 import { loadOrPairIdentity } from './pairing.js';
@@ -30,12 +31,28 @@ import { syncNow } from './sync.js';
 import { refreshAccessRequests } from './access-requests.js';
 import { renderBlockedList } from './messenger-ui.js';
 import { tryBackgroundDeliver, autoAcceptChatDelivery, setDialerChatStore } from './chat-glue.js';
+import { enterPracticeMode } from './practice-mode.js';
 import {
   setCallNote, pollEvery, api, pollCallStatus, startCallFromIdentity, localSetFor, nameMapFor,
   myContacts, blockedEmails, onlyAcceptFromContacts, pendingRequests, renderRequests,
-  outgoingChannel, setOutgoingChannel, setMyEmail, setMyIdentity, setMyContacts, setMyNames,
-  setBlockedEmails, setOnlyAcceptFromContacts, identityMismatchDetected, refreshContacts,
+  outgoingChannel, setOutgoingChannel, setMyEmail, setMyIdentity, setMyContacts, setSimplePins,
+  setMyNames, setBlockedEmails, setOnlyAcceptFromContacts, identityMismatchDetected, refreshContacts,
 } from './contacts.js';
+
+// Live-requested large-button call screen for kids/grandparents -- a
+// per-identity localStorage preference (like every other per-identity
+// setting here, e.g. onlyAcceptFromContacts above) so it's remembered
+// across visits without grandma having to re-navigate to it every time.
+function simpleModeKey(email) { return `ct-webconference-simple-mode:${email.toLowerCase()}`; }
+function enterSimpleMode(identity) {
+  localStorage.setItem(simpleModeKey(identity.email), '1');
+  showSimpleScreen();
+  refreshContacts(); // populates the tiles immediately, not just on the next poll tick
+}
+function exitSimpleMode(identity) {
+  localStorage.setItem(simpleModeKey(identity.email), '0');
+  showMessengerShell();
+}
 
 async function runDialer(identity, { verified = false } = {}) {
   setupScreen.hidden = true;
@@ -46,6 +63,7 @@ async function runDialer(identity, { verified = false } = {}) {
   setMyEmail(identity.email);
   setMyIdentity(identity);
   setMyContacts(localSetFor('contacts', identity.email));
+  setSimplePins(localSetFor('simple-pins', identity.email));
   setMyNames(nameMapFor(identity.email));
   setBlockedEmails(localSetFor('blocked', identity.email));
   setOnlyAcceptFromContacts(localStorage.getItem(`ct-webconference-settings:${identity.email.toLowerCase()}`) === '1');
@@ -517,6 +535,17 @@ async function runDialer(identity, { verified = false } = {}) {
       },
     });
   });
+
+  // Property assignment (.onclick), not addEventListener -- same
+  // "runDialer/setupControls may run more than once for the same login"
+  // reasoning as every other handler in this file (a second assignment
+  // safely replaces the first instead of stacking).
+  simpleModeEnterBtn.onclick = () => enterSimpleMode(identity);
+  simpleExitBtn.onclick = () => exitSimpleMode(identity);
+  simplePracticeBtn.onclick = () => enterPracticeMode(() => showSimpleScreen());
+  if (localStorage.getItem(simpleModeKey(identity.email)) === '1') {
+    enterSimpleMode(identity);
+  }
 }
 
 // CADS-webconference-demo#101 follow-up (live-reported): once the login

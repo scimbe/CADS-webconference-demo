@@ -74,6 +74,22 @@ const filterMenu = document.getElementById('filter-menu');
 const filterMenuNote = document.getElementById('filter-menu-note');
 const filterMenuItems = document.querySelectorAll('.filter-menu-item');
 const messengerShell = document.getElementById('messenger-shell');
+// Live-requested: a large-button call screen for kids/grandparents
+// (dialer.js's renderSimpleScreen/enterSimpleMode/exitSimpleMode) and a
+// local-only filter practice screen (practice-mode.js) -- both new,
+// independent top-level screens, same "hidden until shown" convention as
+// setupScreen/callScreen/messengerShell above.
+const simpleModeEnterBtn = document.getElementById('simple-mode-enter-btn');
+const simpleScreen = document.getElementById('simple-screen');
+const simpleExitBtn = document.getElementById('simple-exit-btn');
+const simpleTiles = document.getElementById('simple-tiles');
+const simpleTilesEmpty = document.getElementById('simple-tiles-empty');
+const simplePracticeBtn = document.getElementById('simple-practice-btn');
+const practiceScreen = document.getElementById('practice-screen');
+const practiceVideo = document.getElementById('practice-video');
+const practiceFilterRow = document.getElementById('practice-filter-row');
+const practiceDoneBtn = document.getElementById('practice-done-btn');
+const practiceEmpty = document.getElementById('practice-empty');
 const msgMenuToggle = document.getElementById('msg-menu-toggle');
 const msgMenu = document.getElementById('msg-menu');
 const msgSearchForm = document.getElementById('msg-search-form');
@@ -371,6 +387,30 @@ function showCallScreen() {
   callScreen.hidden = false;
 }
 
+// Live-requested: same "hide everything else, show this one" pattern as
+// showSetupScreen/showCallScreen above, for the two new screens. Simple
+// mode and the messenger shell are mutually exclusive alternate views of
+// the SAME logged-in dialer state (never both at once); the practice
+// screen is reachable from either and returns to whichever one opened it.
+function showSimpleScreen() {
+  bootLoading.hidden = true;
+  siteHero.hidden = true;
+  landingMain.hidden = true;
+  messengerShell.hidden = true;
+  practiceScreen.hidden = true;
+  simpleScreen.hidden = false;
+}
+function showMessengerShell() {
+  simpleScreen.hidden = true;
+  practiceScreen.hidden = true;
+  messengerShell.hidden = false;
+}
+function showPracticeScreen() {
+  simpleScreen.hidden = true;
+  messengerShell.hidden = true;
+  practiceScreen.hidden = false;
+}
+
 export {
   setupScreen, callScreen, siteHero, landingMain, statusEl, iceEl, logEl, statusPill,
   statusText, localVideo, remoteVideo, localEmpty, remoteEmpty, btnMic, btnCam, btnHangup,
@@ -383,6 +423,9 @@ export {
   accessRemoveForm, accessRemoveEmail, accessNote, revokeAccessDetails, accessRemoveConsoleLink,
   accessRequestsDetails, accessRequestsBadge, accessRequestsList, accessRequestsEmpty,
   videoGrid, localTile, btnSwitchCamera, btnVideoFilters, filterMenu, filterMenuNote, filterMenuItems, messengerShell, msgMenuToggle,
+  simpleModeEnterBtn, simpleScreen, simpleExitBtn, simpleTiles, simpleTilesEmpty, simplePracticeBtn,
+  practiceScreen, practiceVideo, practiceFilterRow, practiceDoneBtn, practiceEmpty,
+  showSimpleScreen, showMessengerShell, showPracticeScreen,
   msgMenu, msgSearchForm, msgSearchInput, msgConvPlaceholder, msgConversation, msgBackBtn,
   msgCallBtn, msgBlockBtn, msgComposeForm, msgComposeInput, msgAttachBtn, msgAttachInput,
   convAvatar, convName, convRenameBtn, convStatus, convMessages, onlyContactsToggle,

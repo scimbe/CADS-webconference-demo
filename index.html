@@ -142,6 +142,40 @@
  .filter-menu-item:disabled{opacity:.45;cursor:not-allowed}
  .filter-menu-item:disabled:hover{background:var(--panel2)}
 
+ /* ---- simple mode (large-button call screen) + practice mode (local filter
+    try-on) -- both new, independent screens, deliberately large touch
+    targets/text (kids/grandparents, per the live request) rather than a
+    variant of any existing compact control. */
+ .simple-wrap{max-width:600px;margin:0 auto;padding:1.4rem 1.2rem 2rem}
+ .simple-header{display:flex;justify-content:space-between;align-items:center;gap:.6rem;
+   flex-wrap:wrap;margin-bottom:1.2rem}
+ .simple-header h1{font-size:1.7rem;margin:0}
+ .simple-exit-btn{font-family:inherit;font-size:.9rem;padding:.6rem 1rem;border-radius:12px;
+   border:1px solid var(--line);background:var(--panel2);color:var(--text);cursor:pointer}
+ .simple-exit-btn:hover{background:var(--line-soft)}
+ .simple-empty{color:var(--muted);font-size:1.05rem;text-align:center;padding:2.5rem 1rem;line-height:1.6}
+ .simple-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:1rem;margin-bottom:1rem}
+ .simple-tile{font-family:inherit;display:flex;flex-direction:column;align-items:center;
+   justify-content:center;gap:.6rem;min-height:150px;border-radius:22px;border:2px solid var(--line);
+   background:var(--panel);color:var(--text);cursor:pointer;padding:1rem;position:relative}
+ .simple-tile:hover,.simple-tile:active{background:var(--panel2);border-color:var(--accent)}
+ .simple-tile-icon{font-size:2.8rem;line-height:1}
+ .simple-tile-name{font-size:1.2rem;font-weight:700;text-align:center;word-break:break-word}
+ .simple-tile-online-dot{position:absolute;top:.9rem;right:.9rem;width:.85rem;height:.85rem;
+   border-radius:50%;background:var(--muted);border:2px solid var(--panel)}
+ .simple-tile-online-dot[data-online="1"]{background:var(--accent2)}
+ .simple-tile-practice{border-style:dashed;border-color:var(--accent2);width:100%;grid-column:1/-1;min-height:110px}
+ .practice-video-wrap{width:100%;max-width:380px;margin:0 auto 1.2rem;border-radius:18px;
+   overflow:hidden;background:#000;aspect-ratio:4/3}
+ #practice-video{width:100%;height:100%;object-fit:cover}
+ .practice-filter-row{display:flex;flex-wrap:wrap;justify-content:center;gap:.7rem}
+ .practice-filter-row .filter-menu-item{width:3.2rem;height:3.2rem;font-size:1.5rem}
+ @media (max-width:640px){
+  .simple-tiles{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}
+  .simple-tile{min-height:130px}
+  .simple-tile-icon{font-size:2.4rem}
+ }
+
  /* ---- mobile call view: full-screen remote + small tappable self PiP, ----
     ---- floating overlay controls, WhatsApp-style. Only kicks in once      ----
     ---- #call-screen is actually showing AND the viewport is narrow -- the ----
@@ -565,6 +599,12 @@
       <input type="checkbox" id="only-contacts-toggle" style="accent-color:var(--accent2)" />
       Only take calls/chats from contacts — anyone else lands in Requests instead of ringing right away.
     </label>
+    <!-- Live-requested: a large-button call screen for kids/grandparents --
+         pin contacts for it via the 📍/📌 button on each contact row below.
+         See dialer.js's renderSimpleScreen/enterSimpleMode. -->
+    <button type="button" id="simple-mode-enter-btn" class="msg-start-call-btn" style="width:100%;margin:.4rem 0">
+      👵 Einfache Ansicht (große Tasten)
+    </button>
     <details class="manage-access">
       <summary>Blocked</summary>
       <p style="margin:.6rem 0;font-size:.78rem;color:var(--muted)">Blocked emails are silently
@@ -831,6 +871,61 @@
     </div>
   </section>
 </main>
+
+<!-- ============ SIMPLE MODE (large-button call screen for kids/grandparents) ============
+     Live-requested: pin a contact via the 📍/📌 button on its row in the normal contacts
+     list (renderContacts in contacts.js) -- those pinned contacts show up here as large
+     tiles. Dialing reuses the EXACT SAME #dial-form the normal dialer uses (dialer.js's
+     renderSimpleScreen sets #dial-email then calls dialForm.requestSubmit(), same as the
+     contacts list's own 📞 button) -- zero duplicated call-setup logic, same ringing/
+     accept flow, same error handling. -->
+<section id="simple-screen" hidden>
+  <div class="simple-wrap">
+    <div class="simple-header">
+      <h1>📞 Anrufen</h1>
+      <button type="button" id="simple-exit-btn" class="simple-exit-btn">🔧 Normale Ansicht</button>
+    </div>
+    <p id="simple-tiles-empty" class="simple-empty" hidden>Noch niemand angeheftet — in der
+      normalen Ansicht bei einem Kontakt auf 📍 tippen, um ihn hier groß anzuzeigen.</p>
+    <div class="simple-tiles" id="simple-tiles"></div>
+    <button type="button" id="simple-practice-btn" class="simple-tile simple-tile-practice">
+      <span class="simple-tile-icon" aria-hidden="true">🎥</span>
+      <span class="simple-tile-name">Üben</span>
+    </button>
+  </div>
+</section>
+
+<!-- ============ PRACTICE MODE (local camera + filters, no call, no peer) ============
+     Live-requested: lets a kid try out the video filters before a real call. Genuinely
+     local-only -- getLocalMedia() + the same startVideoFilterCompositor/selectFilterStyle
+     video-filters.js already uses for real calls, with the call session left null
+     throughout (both functions already tolerate that). No joinChannel, no Noise
+     handshake, no RTCPeerConnection -- see practice-mode.js. -->
+<section id="practice-screen" hidden>
+  <div class="simple-wrap">
+    <div class="simple-header">
+      <h1>🎥 Filter üben</h1>
+      <button type="button" id="practice-done-btn" class="simple-exit-btn">✅ Fertig</button>
+    </div>
+    <p id="practice-empty" class="simple-empty" hidden>Keine Kamera gefunden — Filter zum
+      Ausprobieren brauchen eine Kamera.</p>
+    <div class="practice-video-wrap">
+      <video id="practice-video" autoplay muted playsinline></video>
+    </div>
+    <div class="practice-filter-row" id="practice-filter-row">
+      <button type="button" class="filter-menu-item" data-style="" aria-label="No filter" title="No filter">🚫</button>
+      <button type="button" class="filter-menu-item" data-style="bunny" aria-label="Bunny ears filter" title="Bunny ears">🐰</button>
+      <button type="button" class="filter-menu-item" data-style="sparkle" aria-label="Sparkle filter" title="Sparkle">✨</button>
+      <button type="button" class="filter-menu-item" data-style="princess" aria-label="Princess filter" title="Princess">👸</button>
+      <button type="button" class="filter-menu-item" data-style="ice-princess" aria-label="Ice princess filter" title="Ice princess">❄️</button>
+      <button type="button" class="filter-menu-item" data-style="snowman" aria-label="Snowman filter" title="Snowman">⛄</button>
+      <button type="button" class="filter-menu-item" data-style="mouse-ears" aria-label="Mouse ears filter" title="Mouse ears">🐭</button>
+      <button type="button" class="filter-menu-item" data-style="pup" aria-label="Puppy filter" title="Puppy">🐶</button>
+      <button type="button" class="filter-menu-item" data-style="braid" aria-label="Braid filter" title="Braid">🪢</button>
+      <button type="button" class="filter-menu-item" data-style="ladybug" aria-label="Ladybug filter" title="Ladybug">🐞</button>
+    </div>
+  </div>
+</section>
 
 <!-- Live-reported: pairing's "no account on this device yet" prompt used a
      native browser confirm() -- replaced with this in-page overlay

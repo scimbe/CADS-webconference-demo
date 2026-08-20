@@ -27,6 +27,7 @@ COPY video-filters.js /srv/video-filters.js
 COPY call-session.js /srv/call-session.js
 COPY call-channel.js /srv/call-channel.js
 COPY call-webrtc.js /srv/call-webrtc.js
+COPY practice-mode.js /srv/practice-mode.js
 COPY chatStore.js /srv/chatStore.js
 COPY request-access.html /srv/request-access.html
 COPY request-access.js /srv/request-access.js

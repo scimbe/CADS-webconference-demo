@@ -16,7 +16,8 @@
 
 import {
   callNote, contactsList, contactsEmpty, requestsList, requestsEmpty, requestsBadge,
-  dialForm, convStatus, log,
+  dialForm, dialEmailInput, convStatus, log,
+  simpleTiles, simpleTilesEmpty,
 } from './ui-dom.js';
 import { formatMsgTime, openConversation, closeConversation, currentConversationEmail } from './messenger-ui.js';
 import { dialerChatStore } from './chat-glue.js';
@@ -347,6 +348,12 @@ function nameMapFor(email) {
   };
 }
 let myContacts = null;
+// Live-requested: which of myContacts show up as large tiles in simple mode
+// (see dialer.js's renderSimpleScreen) -- same localSetFor('<kind>', email)
+// storage mechanism myContacts itself already uses (add/remove/has/all,
+// tombstone-based merge), just a different `kind` string, no new storage
+// code needed. Instantiated alongside myContacts in runDialer.
+let simplePins = null;
 let myNames = null;
 let blockedEmails = null;
 let onlyAcceptFromContacts = false;
@@ -363,6 +370,7 @@ let myIdentity = null; // set once in runDialer -- full identity object (needed 
 function setMyEmail(v) { myEmail = v; }
 function setMyIdentity(v) { myIdentity = v; }
 function setMyContacts(v) { myContacts = v; }
+function setSimplePins(v) { simplePins = v; }
 function setMyNames(v) { myNames = v; }
 function setBlockedEmails(v) { blockedEmails = v; }
 function setOnlyAcceptFromContacts(v) { onlyAcceptFromContacts = v; }
@@ -410,6 +418,11 @@ async function doRefreshContacts() {
   const presence = new Map((resp.error ? [] : resp.contacts || []).map((c) => [c.email, c.online]));
   const contacts = mine.map((email) => ({ email, online: presence.get(email) || false }));
   await renderContacts(contacts);
+  // Reuses this SAME already-scoped presence fetch, same "no second poll"
+  // reasoning as the open-conversation-header reuse just below -- simple
+  // mode's tiles are a subset (simplePins) of the same myContacts/presence
+  // data, at zero extra request cost.
+  renderSimpleScreen(contacts);
   renderRequests();
   // The open conversation's own header used to be set once, in
   // openConversation(), and never touched again -- if the peer's presence
@@ -490,6 +503,23 @@ async function renderContacts(contacts) {
       ev.stopPropagation();
       openConversation(email).then(() => dialForm.requestSubmit());
     });
+    // Live-requested: pin this contact as a large tile in simple mode
+    // (dialer.js's renderSimpleScreen reads simplePins.all()) -- reflects
+    // current pinned state via aria-pressed, same pattern as #97/#98's
+    // mic/cam toggle buttons.
+    const pinned = simplePins?.has(email) ?? false;
+    const pinBtn = document.createElement('button');
+    pinBtn.type = 'button';
+    pinBtn.setAttribute('aria-label', pinned ? `Unpin ${email} from simple mode` : `Pin ${email} for simple mode`);
+    pinBtn.setAttribute('aria-pressed', String(pinned));
+    pinBtn.textContent = pinned ? '📌' : '📍';
+    pinBtn.title = pinned ? 'Unpin from simple mode' : 'Pin for simple mode';
+    pinBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (!simplePins) return;
+      if (pinned) simplePins.remove(email); else simplePins.add(email);
+      renderContacts();
+    });
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
     removeBtn.className = 'danger';
@@ -501,11 +531,59 @@ async function renderContacts(contacts) {
       if (currentConversationEmail === email) closeConversation();
       refreshContacts();
     });
-    actions.append(chatBtn, callBtn, removeBtn);
+    actions.append(chatBtn, callBtn, pinBtn, removeBtn);
 
     li.append(avatar, body, actions);
     li.addEventListener('click', () => openConversation(email));
     contactsList.appendChild(li);
+  }
+}
+
+// ============ Simple mode (large-button tiles for pinned contacts) =======
+// Live-requested large-button call screen for kids/grandparents. `contacts`
+// is the SAME {email,online}[] doRefreshContacts already fetched for the
+// normal contacts list -- filtered here to simplePins, not a second fetch.
+// Harmless to call even while #simple-screen is hidden (just writes to DOM
+// nobody's looking at yet), same "safe on a hidden screen" reasoning this
+// consolidation already relies on elsewhere (e.g. camera.js's
+// btnSwitchCamera.hidden write from inside getLocalMedia).
+function renderSimpleScreen(contacts) {
+  if (!simpleTiles) return; // defensive -- only null if index.html's markup is missing
+  // simple-practice-btn is a SIBLING of #simple-tiles (see index.html), not a
+  // child -- this container only ever holds dynamically-rendered pinned-
+  // contact tiles, safe to fully clear every render.
+  simpleTiles.textContent = '';
+  const pinned = simplePins ? simplePins.all() : [];
+  const byEmail = new Map(contacts.map((c) => [c.email, c.online]));
+  simpleTilesEmpty.hidden = pinned.length > 0;
+  for (const email of pinned) {
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'simple-tile';
+    const dot = document.createElement('span');
+    dot.className = 'simple-tile-online-dot';
+    dot.dataset.online = byEmail.get(email) ? '1' : '0';
+    const icon = document.createElement('span');
+    icon.className = 'simple-tile-icon';
+    icon.textContent = '👤';
+    icon.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'simple-tile-name';
+    // Same fallback as the normal contacts list -- the display name if one's
+    // been set (nameMapFor, e.g. "Mama"/"Papa"), the raw email otherwise.
+    name.textContent = myNames?.get(email) || email;
+    tile.append(dot, icon, name);
+    tile.setAttribute('aria-label', `${name.textContent} anrufen`);
+    tile.addEventListener('click', () => {
+      // Exact same reuse the normal contacts list's own 📞 button already
+      // established (contacts.js's callBtn handler) -- sets the real
+      // dial-form's target and submits it for real, same ringing/accept
+      // flow, same error handling, zero duplicated call-setup logic. Skips
+      // openConversation() (messenger-UI-specific, not needed here).
+      dialEmailInput.value = email;
+      dialForm.requestSubmit();
+    });
+    simpleTiles.appendChild(tile);
   }
 }
 
@@ -573,6 +651,7 @@ export {
   localSetFor,
   nameMapFor,
   myContacts,
+  simplePins,
   myNames,
   blockedEmails,
   onlyAcceptFromContacts,
@@ -589,6 +668,7 @@ export {
   setMyEmail,
   setMyIdentity,
   setMyContacts,
+  setSimplePins,
   setMyNames,
   setBlockedEmails,
   setOnlyAcceptFromContacts,
