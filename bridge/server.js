@@ -1543,6 +1543,13 @@ const server = http.createServer(async (req, res) => {
     // for a still-pending, not-yet-delivered offer, which is public key
     // material by definition.
     if (req.method === 'GET' && url.pathname === '/api/pair/lookup') {
+      // CADS-webconference-demo#135: this was the one pairing endpoint missing the
+      // pairingRateLimited check /pair/offer and /pair/deliver both have -- PAIRING_CODE_RE's
+      // own comment claims the 8-char (~37 bit) code space is "brute-force bounded further by
+      // the rate limiter below", but a free, side-effect-free GET is exactly what an attacker
+      // would use to enumerate active codes before spending their limited /deliver attempts on
+      // a confirmed hit. Same limiter, same per-IP key, closing the actual guessing surface.
+      if (pairingRateLimited(clientIp(req))) return json(res, 429, { error: 'too many pairing attempts, try again later' });
       prunePairingOffers();
       const code = (url.searchParams.get('code') || '').toUpperCase();
       const offer = pairingOffers.get(code);
