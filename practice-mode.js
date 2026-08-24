@@ -30,13 +30,35 @@ import {
 
 let practiceMedia = null;
 let onExit = null; // set by enterPracticeMode -- returns to whichever screen opened this one
+// Real gap found live 2026-08-24: getUserMedia() (inside getLocalMedia())
+// blocks on a real camera-permission prompt, which can take arbitrarily
+// long -- if exitPracticeMode() fired while that await was still pending
+// (the kid clicks "Done" during the prompt), practiceMedia was still null
+// at that point (nothing to stop), but the LATER getLocalMedia() resolution
+// still assigned the now-live camera/mic stream to practiceMedia and
+// practiceVideo.srcObject even though the screen was already dismissed --
+// no code path ever stopped those tracks again (orphaned live camera/mic,
+// indicator light stuck on until page reload). Bumped on every enter/exit
+// so a stale resolution can tell it was superseded.
+let practiceGeneration = 0;
 
 async function enterPracticeMode(exitCallback) {
   onExit = exitCallback;
   showPracticeScreen();
   practiceEmpty.hidden = true;
   practiceFilterRow.hidden = false;
-  practiceMedia = await getLocalMedia();
+  const myGeneration = ++practiceGeneration;
+  const media = await getLocalMedia();
+  if (myGeneration !== practiceGeneration) {
+    // Superseded by an exit (or a fresh re-entry) while this was pending --
+    // stop whatever we just acquired and bail out silently rather than
+    // resurrecting a dismissed screen's camera/mic.
+    if (media.kind === 'media') {
+      for (const t of media.stream.getTracks()) t.stop();
+    }
+    return;
+  }
+  practiceMedia = media;
   if (practiceMedia.kind !== 'media') {
     // No camera/mic (denied, in use elsewhere, no hardware) -- getLocalMedia
     // already logged why; tell the kid plainly instead of showing a dead
@@ -56,6 +78,7 @@ async function enterPracticeMode(exitCallback) {
 }
 
 function exitPracticeMode() {
+  practiceGeneration++;
   stopVideoFilterCompositor();
   if (practiceMedia?.stream) {
     for (const t of practiceMedia.stream.getTracks()) t.stop();

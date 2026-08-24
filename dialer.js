@@ -576,9 +576,23 @@ async function runDialer(identity, { verified = false } = {}) {
 // real login prompt instead. A genuine network failure (DNS, connection
 // refused, server down) still throws in the catch below and keeps showing
 // the id-verify-error panel, unchanged from before.
+// Real gap found live 2026-08-24: this fetch had no timeout at all, unlike
+// runIdentityScreen's own WASM-init fetch just below (wrapped in withTimeout
+// for exactly this reason -- a real stall, not an error, used to hang the
+// page forever with no recovery). A stalled /api/whoami (proxy/tunnel hang,
+// a gate handshake race -- this repo has documented gate-related session
+// races elsewhere) meant showSetupScreen() had already run by the time
+// runIdentityScreen awaited this, so the page LOOKED loaded but the identity
+// form's real setup (idForm submit listener, existing-identity auto-login,
+// gate-required prompt) never ran -- inert with no error and no retry path.
+const GATE_IDENTITY_TIMEOUT_MS = 15000;
 async function checkGateIdentity() {
   try {
-    const resp = await fetch('/api/whoami', { redirect: 'manual' });
+    const resp = await withTimeout(
+      fetch('/api/whoami', { redirect: 'manual' }),
+      GATE_IDENTITY_TIMEOUT_MS,
+      `checking gate identity timed out after ${GATE_IDENTITY_TIMEOUT_MS / 1000}s`
+    );
     if (resp.type === 'opaqueredirect') return { email: null, gateDenied: true };
     const body = await resp.json().catch(() => ({}));
     if (!resp.ok && !body.error) body.error = `http ${resp.status}`;
