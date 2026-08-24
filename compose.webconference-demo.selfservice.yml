@@ -141,7 +141,7 @@ services:
         # -- the actual root cause of the CADS-flappy-demo admission-stall saga) --
         # see Agent.Dockerfile's comment for the full story; all four sync
         # locations updated together.
-        - CT_AGENT_REF=${CT_AGENT_REF:-3823343fdc47ea4ed91819cb68bfa8e89399f3f8}
+        - CT_AGENT_REF=${CT_AGENT_REF:-c7b986acc343c785820a944cf098db07fa455ca6}
     environment:
       - CT_AGENT_MODE=browser
       - CT_AGENT_HOSTNAME=${CT_AGENT_HOSTNAME:?this tunnel's assigned hostname, e.g. site-34a13a96.bunsenbrenner.org}
