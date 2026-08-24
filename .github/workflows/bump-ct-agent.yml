@@ -1,13 +1,19 @@
 name: Bump pinned ct-agent
 
-# Keeps this repo's three scimbe/ct-agent pins from silently going stale --
-# Agent.Dockerfile's build arg and compose.webconference-demo.yml's default (the
-# native onboarding agent) AND build-wasm.sh's CT_AGENT_REF (ct-agent-wasm, the
-# browser build -- moved into scimbe/ct-agent's own wasm/ workspace member, see
-# that repo's workspace restructure commit). All three now track the SAME repo,
-# so one commit bump updates all of them together. ct-agent has no tagged release
-# newer than v0.3.0 yet (see Agent.Dockerfile's own comment), so this tracks its
-# default branch's latest commit instead of a tag.
+# Keeps this repo's four scimbe/ct-agent pins from silently going stale --
+# Agent.Dockerfile's build arg, compose.webconference-demo.yml's AND
+# compose.webconference-demo.selfservice.yml's default (the native onboarding
+# agent) AND build-wasm.sh's CT_AGENT_REF (ct-agent-wasm, the browser build --
+# moved into scimbe/ct-agent's own wasm/ workspace member, see that repo's
+# workspace restructure commit). All four now track the SAME repo, so one
+# commit bump updates all of them together.
+#
+# Real gap found live 2026-08-24: compose.webconference-demo.selfservice.yml
+# was NOT in this workflow's sed target list despite this comment's own claim
+# that all sync locations update together -- the exact #29 drift class this
+# workflow exists to prevent, recurring because its own coverage was
+# incomplete. Fixed; watch for a fifth CT_AGENT_REF location appearing
+# elsewhere in the future the same way.
 #
 # Verifies the wasm build actually still succeeds against the new commit BEFORE
 # opening a PR -- opens a PR rather than auto-merging either way: an untested
@@ -38,10 +44,14 @@ jobs:
       - name: Resolve latest ct-agent commit
         id: latest
         # CADS-webconference-demo#28: prefer the newest GPG-signed commit on
-        # main over the raw HEAD. ct-agent has no tagged release newer than
-        # v0.3.0 (see this workflow's own header comment), so a signed tag
-        # to pin to stays genuinely upstream-blocked -- but ct-agent's
-        # PR-merge commits ARE signed even though direct pushes to main
+        # main over the raw HEAD. ct-agent now has real tags through v0.6.9
+        # (its own header comment here was stale, corrected 2026-08-24) --
+        # this deliberately still tracks the latest signed commit rather than
+        # switching to tag-tracking, since main.rs-worth of ct-agent's own
+        # consolidation fixes land between tagged releases and this repo's
+        # own wasm-build verification step below is the real safety net, not
+        # the tag boundary. ct-agent's PR-merge commits ARE signed even
+        # though direct pushes to main
         # aren't (confirmed via the GitHub API's commit.verification field:
         # mixed signed/unsigned in recent history, not uniformly one or the
         # other). Landing the pin on a signed commit gives at least
@@ -76,7 +86,7 @@ jobs:
         if: steps.diff.outputs.changed == 'true'
         run: |
           sed -i "s/^ARG CT_AGENT_REF=.*/ARG CT_AGENT_REF=${{ steps.latest.outputs.sha }}/" Agent.Dockerfile
-          sed -i "s/CT_AGENT_REF:-[0-9a-f]\{40\}/CT_AGENT_REF:-${{ steps.latest.outputs.sha }}/" compose.webconference-demo.yml build-wasm.sh
+          sed -i "s/CT_AGENT_REF:-[0-9a-f]\{40\}/CT_AGENT_REF:-${{ steps.latest.outputs.sha }}/" compose.webconference-demo.yml compose.webconference-demo.selfservice.yml build-wasm.sh
 
       - name: Verify -- wasm build against the new commit
         if: steps.diff.outputs.changed == 'true'
