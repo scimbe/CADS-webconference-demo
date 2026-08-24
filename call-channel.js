@@ -125,6 +125,18 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   let sourceBuffer = null;
   let sourceBufferMimeType = null; // CADS-webconference-demo#78 -- needed to recreate the sourceBuffer below
   const pendingChunks = [];
+  // Real gap found live 2026-08-24: the sender's own MEDIA_BACKPRESSURE_*
+  // watermarks (below) only throttle a well-behaved local MediaRecorder --
+  // they do nothing to bound how fast a REMOTE peer's TAG_MEDIA_CHUNK frames
+  // arrive here. A slow/paused sourceBuffer.appendBuffer (backgrounded tab,
+  // a burst of QuotaExceededError evictions, or simply a remote peer sending
+  // faster than real-time) let pendingChunks grow without limit -- unlike
+  // ui-dom.js's LOG_MAX_LINES/CHAT_LOG_MAX_LINES, nothing capped it. A flood
+  // of chunks (malicious or buggy remote peer, or just sustained backlog)
+  // exhausts the receiving tab's memory. ~150 chunks at the sender's
+  // existing ~200ms cadence is ~30s of buffered media -- generous headroom
+  // for a real transient stall, small enough to bound worst-case memory.
+  const MAX_PENDING_CHUNKS = 150;
   // Set once we know the peer's codec can never be played here (e.g. Safari
   // receiving the WebM/VP8/Opus this transport hardcodes -- see
   // NO_CODEC_SENTINEL above). Without this, appendChunk kept pushing every
@@ -253,7 +265,20 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   }
   function appendChunk(bytes) {
     if (mediaUnsupported || remoteMediaFatal) return; // can never be played -- drop instead of buffering forever
-    if (!sourceBuffer || sourceBuffer.updating) { pendingChunks.push(bytes); return; }
+    if (!sourceBuffer || sourceBuffer.updating) {
+      if (pendingChunks.length >= MAX_PENDING_CHUNKS) {
+        // Drop the newest chunk rather than the oldest: 'sequence' mode
+        // appends chunks in FIFO order regardless of which ones survive, so
+        // dropping from the middle/front would corrupt playback order --
+        // dropping the incoming one just means a dropped frame, the same
+        // visible degradation MAX_MEDIA_RECREATE_ATTEMPTS already accepts
+        // elsewhere in this file.
+        log(`pendingChunks at its cap of ${MAX_PENDING_CHUNKS} -- dropping incoming media chunk rather than growing memory unbounded`);
+        return;
+      }
+      pendingChunks.push(bytes);
+      return;
+    }
     try {
       sourceBuffer.appendBuffer(bytes);
     } catch (e) {
@@ -354,6 +379,21 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
             CHANNEL_RECONNECT_GRACE_MS,
             `reconnect timed out after ${CHANNEL_RECONNECT_GRACE_MS / 1000}s`
           );
+          // Real leak found live 2026-08-24: readFramed()'s failure above is a
+          // client-side read stall (STALL_TIMEOUT_MS et al), not necessarily
+          // the underlying WebSocket actually closing -- on lossy links (the
+          // exact condition #69/#102/#129 target) the old socket can still be
+          // genuinely open on the wire. Swapping byteStream to the fresh
+          // session without closing the old one first left one abandoned,
+          // still-open WebSocket per reconnect episode, accumulating across
+          // repeated reconnects in a single long call. Best-effort: a socket
+          // that's already dead just throws/no-ops here, same as every other
+          // byteStream.ws.close() call site in this file.
+          try {
+            byteStream.ws.close();
+          } catch (closeErr) {
+            log(`old channel socket close (pre-reconnect) failed harmlessly: ${closeErr.message}`);
+          }
           byteStream = fresh.stream;
           noiseTransport = fresh.noiseTransport;
           channelReconnectAttempted = false; // a fresh recovery -- a LATER drop gets its own attempt, same as attemptIceRestart's own reset
