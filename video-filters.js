@@ -528,6 +528,15 @@ async function selectFilterStyle(media, style) {
     // no-op instead of a second overlapping compositor.
     if (startingCompositor) return;
     startingCompositor = true;
+    // Live-reported 2026-08-24: filters did nothing at all in practice mode
+    // (practice-mode.js) -- captured here, BEFORE the loadFaceApi() await
+    // below, because the "call ended while loading" guard further down reads
+    // getActiveSession() again AFTER that await and needs to tell "a call
+    // was live and then ended" apart from "there was never a call in the
+    // first place" (practice mode's permanent, legitimate baseline -- see
+    // that file's own header comment: it deliberately never touches
+    // call-transport code, so getActiveSession() is always null there).
+    const hadSessionBeforeLoad = !!getActiveSession();
     try {
       btnVideoFilters.disabled = true;
       btnVideoFilters.setAttribute('aria-label', 'Loading filters…');
@@ -553,13 +562,12 @@ async function selectFilterStyle(media, style) {
       // startVideoFilterCompositor() anyway -- starting a brand-new rAF
       // draw loop and 150ms detection setInterval that the choke point
       // never got a chance to know about, left running until the already-
-      // scheduled reload eventually tears down the whole page. Re-checking
-      // getActiveSession() here (the same "is a call still live" signal
-      // this function already trusts for the channel-transport check at its
-      // own top) catches "the call ended while we were loading" and skips
-      // starting a compositor for a call that's already gone, instead of
-      // relying on the reload's timing to paper over it.
-      if (!getActiveSession()) {
+      // scheduled reload eventually tears down the whole page. Only bail
+      // here if a session WAS live before this await and is gone now (a
+      // real hangup-during-load) -- not merely because there's no session
+      // at all, which is practice mode's normal, permanent state and isn't
+      // "the call ended", there never was one to end.
+      if (hadSessionBeforeLoad && !getActiveSession()) {
         btnVideoFilters.disabled = false;
         return;
       }
