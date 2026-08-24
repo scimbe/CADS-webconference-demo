@@ -19,7 +19,7 @@ RUN apt-get update \
 # took 15-30s to arrive failed deterministically. v0.4.8 raises it to 45s.
 # Keep in sync with build-wasm.sh's own default and both compose files'
 # CT_AGENT_REF.
-ARG CT_AGENT_REF=3823343fdc47ea4ed91819cb68bfa8e89399f3f8
+ARG CT_AGENT_REF=c7b986acc343c785820a944cf098db07fa455ca6
 RUN git clone https://github.com/scimbe/ct-agent.git /build && cd /build && git checkout "${CT_AGENT_REF}"
 WORKDIR /build
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
