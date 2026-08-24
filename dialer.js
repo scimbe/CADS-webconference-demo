@@ -25,7 +25,7 @@ import {
   simpleModeEnterBtn, simpleExitBtn, simplePracticeBtn, showSimpleScreen, showMessengerShell,
   showAlertOverlay,
 } from './ui-dom.js';
-import { computeAttestation, loadStoredIdentity } from './identity.js';
+import { computeAttestation, loadStoredIdentity, SUPPRESS_AUTO_IDENTITY_KEY } from './identity.js';
 import { loadOrPairIdentity } from './pairing.js';
 import { withTimeout, WASM_INIT_TIMEOUT_MS } from './call-transport-shared.js';
 import { syncNow } from './sync.js';
@@ -728,7 +728,22 @@ async function runIdentityScreen() {
 
   // If any identity already exists in this browser, use the most recently
   // used one automatically instead of asking again.
-  const existingKeys = Object.keys(localStorage).filter((k) => k.startsWith('ct-webconference-identity:'));
+  //
+  // Live-reported 2026-08-24: this is exactly what made "log out, then log
+  // in as a different account" silently keep landing on an old account --
+  // logoutLink's own forgetIdentityKeys(myEmail) only clears the ONE
+  // identity being logged out of (#33/#42: a blanket clear would destroy
+  // every OTHER identity this browser has ever held), so any OTHER
+  // previously-used identity's key was still sitting here and got silently
+  // auto-picked below, never showing the entry form at all. The suppress
+  // flag set by that same handler makes an explicit logout skip this
+  // whole auto-pick for its very next load, however many identities remain
+  // cached -- consumed (removed) immediately so it only ever applies once.
+  const suppressAutoIdentity = sessionStorage.getItem(SUPPRESS_AUTO_IDENTITY_KEY);
+  if (suppressAutoIdentity) sessionStorage.removeItem(SUPPRESS_AUTO_IDENTITY_KEY);
+  const existingKeys = suppressAutoIdentity
+    ? []
+    : Object.keys(localStorage).filter((k) => k.startsWith('ct-webconference-identity:'));
   if (existingKeys.length > 0) {
     // CADS-webconference-demo#133: goes through identity.js's loadStoredIdentity
     // now, not a raw JSON.parse -- the stored value is AES-GCM-encrypted since

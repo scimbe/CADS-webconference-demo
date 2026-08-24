@@ -82,6 +82,11 @@ function forgetIdentityKeys(email) {
   }
 }
 
+// See app.js's logoutLink handler (where this is set) for the full story --
+// shared here since both that handler and runIdentityScreen's auto-login
+// fallback (dialer.js) need the exact same key.
+const SUPPRESS_AUTO_IDENTITY_KEY = 'ct-webconference-suppress-auto-identity';
+
 function storageKeyFor(email) {
   return `ct-webconference-identity:${email.toLowerCase()}`;
 }
@@ -308,4 +313,5 @@ export {
   saveStoredIdentity,
   identityCreatedAt,
   ensureWasmInit,
+  SUPPRESS_AUTO_IDENTITY_KEY,
 };

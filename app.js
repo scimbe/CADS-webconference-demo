@@ -44,6 +44,7 @@ import {
 import {
   forgetIdentityKeys,
   loadOrCreateIdentity,
+  SUPPRESS_AUTO_IDENTITY_KEY,
 } from './identity.js';
 import {
   pairingKeyPair,
@@ -360,6 +361,23 @@ logoutLink.addEventListener('click', async (ev) => {
   // reuses the just-logged-out identity on the next visit instead of
   // prompting fresh. Clear it here too, or the other two fixes are moot.
   forgetIdentityKeys(myEmail);
+  // Live-reported 2026-08-24: that third piece only covers the ONE
+  // identity being logged out of -- forgetIdentityKeys is deliberately
+  // scoped to a single email (#33/#42, see its own comment: a blanket
+  // clear would destroy every OTHER identity ever used on this browser).
+  // But that same scoping means if this browser has EVER held more than
+  // one identity (exactly what testing "log out, log in as a different
+  // account" produces), the just-logged-out identity's key disappears but
+  // an OLDER one is still sitting there -- and runIdentityScreen's "use
+  // the most recently used one automatically" fallback silently picks
+  // THAT one instead of ever showing the entry form, landing back on some
+  // old account regardless of which one was just logged out of. This flag
+  // (sessionStorage -- survives the /portal/logout round trip in the same
+  // tab, self-scopes to this one browsing session, needs no explicit
+  // cleanup) tells the very next load of runIdentityScreen to skip that
+  // auto-pick entirely and show the real entry form, however many other
+  // identities remain cached.
+  sessionStorage.setItem(SUPPRESS_AUTO_IDENTITY_KEY, '1');
   try {
     await fetch('https://bunsenbrenner.org/gate/logout?host=bunsenbrenner.org', {
       credentials: 'include',
