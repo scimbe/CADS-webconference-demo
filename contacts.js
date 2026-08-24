@@ -518,7 +518,16 @@ async function renderContacts(contacts) {
       ev.stopPropagation();
       if (!simplePins) return;
       if (pinned) simplePins.remove(email); else simplePins.add(email);
-      renderContacts();
+      // Real bug found live 2026-08-24: called the raw renderContacts()
+      // with no argument -- it requires a contacts array (contacts.length
+      // is read immediately), so this threw TypeError on every click and
+      // never actually re-rendered the pin state (it only self-corrected
+      // on the next 5s poll). Every other mutating handler in this file
+      // (see removeBtn just below) correctly calls refreshContacts(),
+      // which re-fetches presence and calls renderContacts(contacts) with
+      // real data -- also updates the simple-mode pinned tiles, which the
+      // raw renderContacts() call never touched at all.
+      refreshContacts();
     });
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
