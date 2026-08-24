@@ -23,6 +23,7 @@ import {
   showSetupScreen, idEntry, idForm, idEmailInput, idVerifyError, idVerifyErrorDetail, idVerifyRetry,
   idGateRequired, idGateLoginBtn, idGateRegisterForm, idGateRegisterEmail,
   simpleModeEnterBtn, simpleExitBtn, simplePracticeBtn, showSimpleScreen, showMessengerShell,
+  showAlertOverlay,
 } from './ui-dom.js';
 import { computeAttestation, loadStoredIdentity } from './identity.js';
 import { loadOrPairIdentity } from './pairing.js';
@@ -52,6 +53,55 @@ function enterSimpleMode(identity) {
 function exitSimpleMode(identity) {
   localStorage.setItem(simpleModeKey(identity.email), '0');
   showMessengerShell();
+}
+
+// Live-requested 2026-08-24: switching back out of Simple Mode must require
+// a PIN, so a kid can't just tap their way back into the full messenger
+// (contacts, chat, settings) unsupervised. Stored as a SHA-256 hash, never
+// the raw PIN -- same "don't keep the secret itself around" instinct as
+// this app's existing WebCrypto usage elsewhere (identity.js's AES-GCM
+// wrapping), even though the actual stakes here are "don't let a curious
+// kid guess it from devtools", not a real security boundary.
+function simplePinKey(email) { return `ct-webconference-simple-pin:${email.toLowerCase()}`; }
+async function hashPin(pin) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pin));
+  return Array.from(new Uint8Array(bytes)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+// Called right before switching INTO Simple Mode, while still in the normal
+// (trusted) view -- if this identity has never set a PIN, sets one now
+// rather than letting Simple Mode start unprotected (there'd be nothing to
+// gate the exit with). Returns false (and leaves the PIN unset) if the
+// parent/grandparent cancels or the two entries don't match, so the caller
+// can bail out of entering Simple Mode instead of leaving it exit-able with
+// an empty check.
+async function ensureSimplePinSet(identity) {
+  if (localStorage.getItem(simplePinKey(identity.email))) return true;
+  const pin = (prompt('Set a PIN to protect switching back out of Simple Mode (kids/grandparents shouldn\'t need it -- only you should):') || '').trim();
+  if (!pin) return false;
+  const confirmPin = (prompt('Enter the same PIN again to confirm:') || '').trim();
+  if (pin !== confirmPin) {
+    await showAlertOverlay({ title: 'PINs didn\'t match', body: 'Simple Mode was not enabled -- try again.' });
+    return false;
+  }
+  localStorage.setItem(simplePinKey(identity.email), await hashPin(pin));
+  return true;
+}
+// Called from the exit button INSIDE Simple Mode -- only actually exits on
+// a correct PIN. Deliberately no PIN-reset/recovery path here beyond
+// clearing this browser's site data entirely (same no-cloud-account
+// philosophy as the rest of this app's local-only state) -- a "forgot the
+// PIN" recovery flow reachable from inside Simple Mode itself would defeat
+// the whole point.
+async function exitSimpleModeWithPin(identity) {
+  const storedHash = localStorage.getItem(simplePinKey(identity.email));
+  if (!storedHash) { exitSimpleMode(identity); return; } // no PIN was ever set (shouldn't happen via the enter path above) -- don't lock the user out
+  const pin = (prompt('Enter the PIN to leave Simple Mode:') || '').trim();
+  if (!pin) return;
+  if ((await hashPin(pin)) !== storedHash) {
+    await showAlertOverlay({ title: 'Wrong PIN', body: 'Simple Mode stays on.' });
+    return;
+  }
+  exitSimpleMode(identity);
 }
 
 async function runDialer(identity, { verified = false } = {}) {
@@ -540,8 +590,10 @@ async function runDialer(identity, { verified = false } = {}) {
   // "runDialer/setupControls may run more than once for the same login"
   // reasoning as every other handler in this file (a second assignment
   // safely replaces the first instead of stacking).
-  simpleModeEnterBtn.onclick = () => enterSimpleMode(identity);
-  simpleExitBtn.onclick = () => exitSimpleMode(identity);
+  simpleModeEnterBtn.onclick = async () => {
+    if (await ensureSimplePinSet(identity)) enterSimpleMode(identity);
+  };
+  simpleExitBtn.onclick = () => exitSimpleModeWithPin(identity);
   simplePracticeBtn.onclick = () => enterPracticeMode(() => showSimpleScreen());
   if (localStorage.getItem(simpleModeKey(identity.email)) === '1') {
     enterSimpleMode(identity);
