@@ -109,7 +109,7 @@ services:
         # build-wasm.sh's comment. Bumped 2026-08-13 (v0.4.8, ADMISSION_EXCHANGE_TIMEOUT
         # 15s -> 45s -- the actual root cause of the CADS-flappy-demo admission-stall
         # saga); all four sync locations updated together.
-        - CT_AGENT_REF=${CT_AGENT_REF:-c27e9aee8465c6605df98bd7268cc419e3c484a1}
+        - CT_AGENT_REF=${CT_AGENT_REF:-71bda9164b8c3069ab47cab8c80f22f405b260e2}
     environment:
       - CT_AGENT_MODE=browser
       - CT_AGENT_HOSTNAME=webconference.bunsenbrenner.org

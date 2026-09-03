@@ -19,7 +19,7 @@ RUN apt-get update \
 # took 15-30s to arrive failed deterministically. v0.4.8 raises it to 45s.
 # Keep in sync with build-wasm.sh's own default and both compose files'
 # CT_AGENT_REF.
-ARG CT_AGENT_REF=c27e9aee8465c6605df98bd7268cc419e3c484a1
+ARG CT_AGENT_REF=71bda9164b8c3069ab47cab8c80f22f405b260e2
 # Optional gh-token secret (--secret id=gh_token,src=<file>): GitHub's anonymous
 # git-clone rate limit for this host's IP was hit 2026-09-02 (same fix already
 # applied to CADS-cookbook-demo/CADS-DEMO-deutschlandatlas-callcenter). Falls
