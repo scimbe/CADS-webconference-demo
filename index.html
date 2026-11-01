@@ -484,11 +484,6 @@
   <!-- ============ IDENTITY / DIALER SCREEN (shown until ws/grant/holderPriv/noisePriv/role are all present) ============ -->
   <section id="setup-screen" hidden>
     <h1>A real video call, actually encrypted.</h1>
-    <p class="lede">Enter your e-mail to go online, then call anyone else who's online by theirs. Two browser
-    tabs join a real Agent-Fabric channel, run a genuine Noise_IK handshake, and exchange encrypted WebRTC
-    signaling to open a real <code>RTCPeerConnection</code> — the operator never sees your audio, video, or
-    chat text, at any point. (It does learn who's calling whom, the same way a phone exchange routes a call
-    without hearing it — see "what's real" alongside.)</p>
 
     <div class="panel-card setup-grid">
       <div>
@@ -517,19 +512,6 @@
         <div id="id-gate-required" hidden style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:1rem;margin-bottom:1rem">
           <p style="margin:0 0 .9rem;font-size:.9rem">This tunnel requires signing in first -- the free-text e-mail entry below only works on tunnels without login enforcement.</p>
           <button type="button" class="btn" id="id-gate-login-btn">Log in →</button>
-          <!-- CADS-webconference-demo (live-reported): the gate-required panel
-               only offered "Log in", nothing for someone who's never signed up
-               at all -- Keycloak's own login screen has no visible next step
-               for that either (a separate repo, not editable here, same
-               #36 constraint). Reuses the already-gate-exempt
-               request-access.html flow (#36) instead of inventing a new one --
-               that page's own /api/access-requests POST already works
-               unauthenticated. -->
-          <p style="margin:1rem 0 .5rem;font-size:.85rem;color:var(--muted)">Don't have an account yet?</p>
-          <form class="id-form" id="id-gate-register-form">
-            <input id="id-gate-register-email" type="email" placeholder="you@example.com" required autocomplete="email" />
-            <button type="submit">Register →</button>
-          </form>
         </div>
         <div id="id-entry">
           <h2>Enter your e-mail</h2>
