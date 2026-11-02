@@ -4,43 +4,27 @@
 # closer to how a real customer installs ct-agent: build (or, once a tagged release
 # exists for the pinned ref, download a prebuilt binary) from that repo directly.
 
-FROM rust:1-slim-bookworm AS builder
+# Since v0.8.0 the pinned ref is a tagged release with prebuilt, checksummed binaries, so this image
+# downloads that binary instead of compiling: no Rust toolchain, no cargo build on the 2-vCPU demo host,
+# and the browser half (build-wasm.sh, built from the same commit) speaks the same wire protocol.
+# Bumped 2026-11-02 to v0.8.0 (commit 09ac2ee). The running agent had drifted to 0.7.24 and the served
+# WASM to an August build while all four pins still said c27e9ae; this brings both halves back together.
+# Keep CT_AGENT_REF equal to the commit the tag points to, and in sync with build-wasm.sh and both compose files.
+FROM debian:bookworm-slim AS fetch
+ARG CT_AGENT_VERSION=v0.8.0
+ARG CT_AGENT_REF=09ac2eefb9500ee0122d7afb7ff7321bd8b4c3a6
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git pkg-config libssl-dev \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
-# Which ct-agent commit/tag to build -- bump deliberately (bump-ct-agent.yml
-# automates checking for a newer one). Must match build-wasm.sh's own default
-# and both compose files' CT_AGENT_REF (CADS-webconference-demo#29 -- they'd
-# drifted once before).
-# Bumped 2026-08-13 (v0.4.8): the actual root cause of the CADS-flappy-demo
-# admission-stall saga, pinned by the operator via live edge logs -- the
-# edge parks a lone pairing member for a 30s TTL, but the client's own
-# ADMISSION_EXCHANGE_TIMEOUT was only 15s, so any pairing whose second side
-# took 15-30s to arrive failed deterministically. v0.4.8 raises it to 45s.
-# Keep in sync with build-wasm.sh's own default and both compose files'
-# CT_AGENT_REF.
-ARG CT_AGENT_REF=c27e9aee8465c6605df98bd7268cc419e3c484a1
-# Optional gh-token secret (--secret id=gh_token,src=<file>): GitHub's anonymous
-# git-clone rate limit for this host's IP was hit 2026-09-02 (same fix already
-# applied to CADS-cookbook-demo/CADS-DEMO-deutschlandatlas-callcenter). Falls
-# back to a plain anonymous clone when no secret is passed, so this is a no-op
-# for anyone building without a token.
-RUN --mount=type=secret,id=gh_token \
-    if [ -s /run/secrets/gh_token ]; then \
-      git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x:%s' "$(cat /run/secrets/gh_token)" | base64 -w0)" clone https://github.com/scimbe/ct-agent.git /build; \
-    else \
-      git clone https://github.com/scimbe/ct-agent.git /build; \
-    fi \
-    && cd /build && git checkout "${CT_AGENT_REF}"
-WORKDIR /build
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    cargo build --release --locked -p ct-agent \
-    && cp target/release/ct-agent /tmp/ct-agent
+RUN set -eu; base="https://github.com/scimbe/ct-agent/releases/download/${CT_AGENT_VERSION}"; cd /tmp \
+    && curl -fsSL -o ct-agent-linux-x86_64 "$base/ct-agent-linux-x86_64" \
+    && curl -fsSL -o ct-agent-linux-x86_64.sha256 "$base/ct-agent-linux-x86_64.sha256" \
+    && sha256sum -c ct-agent-linux-x86_64.sha256 \
+    && install -m 0755 ct-agent-linux-x86_64 /tmp/ct-agent
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /tmp/ct-agent /usr/local/bin/ct-agent
+COPY --from=fetch /tmp/ct-agent /usr/local/bin/ct-agent
 CMD ["ct-agent"]
