@@ -917,14 +917,20 @@ function identityAllowed(req, claimedEmail) {
 // open /api/play/* does not open the channel to anyone without both. Game traffic itself goes browser to browser.
 const PLAY_ORIGINS = new Set(String(process.env.PLAY_ALLOWED_ORIGINS || 'https://demos-34a13a96.bunsenbrenner.org,https://bunsenbrenner.org').split(',').map((s) => s.trim()).filter(Boolean));
 const PLAY_INVITE_TTL_MS = 15 * 60_000;      // an unanswered invite lapses
-const PLAY_GAME_TTL_MS = 2 * 60 * 60_000;    // a game's channel is removed from the control plane afterwards
-const PLAY_GRANT_TTL_SECS = 2 * 60 * 60;
+const PLAY_GAME_TTL_MS = 20 * 60_000;        // a game's channel is removed from the control plane afterwards
+const PLAY_GRANT_TTL_SECS = 30 * 60;
+// Games share the control-plane account (100 channels) and the TURN quota with real calls: games never take more than this.
+const PLAY_MAX_GAMES = Number(process.env.PLAY_MAX_GAMES || 20);
 const PLAY_MAX_OPEN = 500;                   // invites held in memory at once
 const HEX64 = /^[0-9a-f]{64}$/i;
 const TOKEN_RE = /^[A-Za-z0-9_-]{22}$/;
 const playInvites = new Map();               // token -> { a, createdAt, used, channel }
 const playChannels = new Map();              // channel -> { createdAt, registered }
-const playRateLimited = makeRateLimiter(30, 10 * 60_000);   // per IP: opening, joining and asking for ICE together
+// The tunnel hands the bytes through unchanged, so every request reaches this bridge from the same address: a per-IP
+// limit would be one shared bucket. Budgets are global instead, and every later step is bound to the secret invite token.
+const playRateLimited = makeRateLimiter(60, 60_000);         // all new invites and joins together, per minute
+const playPollLimited = makeRateLimiter(400, 15 * 60_000); // per invite token: a waiting inviter polls the status
+let playMinting = 0;                                         // grant processes running at once on the shared host
 
 function playCors(req, res) {
   const o = req.headers.origin;
@@ -968,7 +974,10 @@ setInterval(sweepPlay, 60_000).unref();
 async function handlePlay(req, res, url) {
   playCors(req, res);
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
-  if (playRateLimited(clientIp(req))) return json(res, 429, { error: 'too many requests', code: 'rate' });
+  const polling = req.method === 'GET' && url.pathname === '/api/play/status';
+  if (req.method === 'POST' && !/^application\/json/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'json only' });
+  const opening = req.method === 'POST' && (url.pathname === '/api/play/open' || url.pathname === '/api/play/join');
+  if (polling ? playPollLimited(url.searchParams.get('token') || '') : opening && playRateLimited('play')) return json(res, 429, { error: 'too many requests', code: 'rate' });
   if (req.method === 'POST' && url.pathname === '/api/play/open') {
     const { holderPub, noisePub } = await readBody(req);
     if (!HEX64.test(holderPub || '') || !HEX64.test(noisePub || '')) return json(res, 400, { error: 'bad keys' });
@@ -983,14 +992,17 @@ async function handlePlay(req, res, url) {
     const inv = playInvites.get(token);
     if (!inv || inv.used || Date.now() - inv.createdAt > PLAY_INVITE_TTL_MS) return json(res, 404, { error: 'invite gone', code: 'gone' });
     if (inv.a.holderPub === holderPub.toLowerCase()) return json(res, 409, { error: 'same device', code: 'self' });
+    if (playChannels.size >= PLAY_MAX_GAMES || playMinting >= 2) return json(res, 503, { error: 'busy', code: 'busy' });
     inv.used = true;                                   // burnt before the slow part, so a second visitor cannot race in
     let minted;
+    playMinting++;
     try { minted = await mintPlayGrants(inv.a.holderPub, holderPub.toLowerCase()); }
     catch (e) { console.error('bridge: play grant minting failed:', e); inv.used = false; return json(res, 500, { error: 'grant minting failed' }); }
+    finally { playMinting--; }
     const call = { channel: minted.channel, operatorPub: minted.operatorPub, callerEmail: null, calleeEmail: null, grantForCaller: minted.grantA, grantForCallee: minted.grantB,
       transport: 'webrtc', kind: 'play', createdAt: Date.now(), callerAttest: null, calleeAttest: null, status: { state: 'ringing' } };
     pendingCalls.set(call.channel, call);
-    playChannels.set(call.channel, { createdAt: Date.now(), registered: false });
+    playChannels.set(call.channel, { createdAt: Date.now(), registered: false, token: token, holders: { caller: inv.a.holderPub, callee: holderPub.toLowerCase() }, attested: {}, ice: {} });
     inv.channel = call.channel;
     return json(res, 200, { channel: call.channel, grant: call.grantForCallee, ws: PLAY_WS_URL, role: 'callee' });
   }
@@ -1004,9 +1016,12 @@ async function handlePlay(req, res, url) {
     return json(res, 200, { state: 'joined', channel: call.channel, grant: call.grantForCaller, ws: PLAY_WS_URL, role: 'caller', status: call.status });
   }
   if (req.method === 'POST' && url.pathname === '/api/play/attest') {
-    const { channel, role, holderPub, noisePub, attestation } = await readBody(req);
-    const call = pendingCalls.get(channel);
-    if (!call || call.kind !== 'play') return json(res, 404, { error: 'no such game' });
+    const { channel, role, holderPub, noisePub, attestation, token } = await readBody(req);
+    const call = pendingCalls.get(channel), g0 = playChannels.get(channel || '');
+    if (!call || call.kind !== 'play' || !g0 || g0.token !== token) return json(res, 404, { error: 'no such game' });
+    if (g0.holders[role] !== String(holderPub || '').toLowerCase()) return json(res, 403, { error: 'not your seat' });
+    if (g0.attested[role]) return json(res, 200, { status: call.status });      // once per seat: no repeated control-plane calls
+    g0.attested[role] = true;
     if (!HEX64.test(holderPub || '') || !HEX64.test(noisePub || '') || !/^[0-9a-f]{128}$/i.test(attestation || '')) return json(res, 400, { error: 'bad attestation' });
     const rec = { holder: holderPub, noise_pubkey: noisePub, noise_attestation: attestation };
     if (role === 'caller') call.callerAttest = rec; else if (role === 'callee') call.calleeAttest = rec; else return json(res, 400, { error: 'bad role' });
@@ -1016,8 +1031,11 @@ async function handlePlay(req, res, url) {
   }
   // TURN under a pseudonym, so the two players do not learn each other's IP address.
   if (req.method === 'GET' && url.pathname === '/api/play/ice') {
-    const channel = url.searchParams.get('channel') || '';
-    if (!HEX64.test(channel) || !playChannels.has(channel)) return json(res, 404, { error: 'no such game' });
+    const channel = url.searchParams.get('channel') || '', role = url.searchParams.get('role'), g1 = playChannels.get(channel);
+    if (!HEX64.test(channel) || !g1 || g1.token !== url.searchParams.get('token')) return json(res, 404, { error: 'no such game' });
+    if (!g1.registered) return json(res, 409, { error: 'not registered yet', code: 'early' });   // no relay before both seats are in
+    if ((role !== 'caller' && role !== 'callee') || g1.ice[role]) return json(res, 429, { error: 'already issued', code: 'rate' });
+    g1.ice[role] = true;
     if (!TURN_SHARED_SECRET) return json(res, 503, { error: 'TURN not configured', code: 'turn_unconfigured' });
     const expiresAt = Math.floor(Date.now() / 1000) + TURN_CREDENTIAL_TTL_SECS;
     const username = `${expiresAt}:play-${crypto.createHash('sha256').update(channel).digest('hex').slice(0, 12)}`;
@@ -1025,10 +1043,11 @@ async function handlePlay(req, res, url) {
     return json(res, 200, { iceServers: [{ urls: TURN_URLS, username, credential }], ttl: TURN_CREDENTIAL_TTL_SECS, relayOnly: true });
   }
   if (req.method === 'POST' && url.pathname === '/api/play/done') {
-    const { channel } = await readBody(req);
+    const { channel, token } = await readBody(req);
     const g = playChannels.get(channel || '');
-    if (!g) return json(res, 200, { ok: true });
+    if (!g || g.token !== token) return json(res, 200, { ok: true });
     playChannels.delete(channel); pendingCalls.delete(channel);
+    for (const [t, inv] of playInvites) if (inv.channel === channel) playInvites.delete(t);
     if (g.registered) cpDelete(`/me/channels/${channel}`).catch((e) => console.error('bridge: play channel delete failed', channel, e.message));
     return json(res, 200, { ok: true });
   }
