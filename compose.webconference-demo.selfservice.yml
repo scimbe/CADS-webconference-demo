@@ -124,6 +124,12 @@ services:
       # or this repo. Same readSecret()/_FILE convention as CT_CHANNEL_OPERATOR_KEY
       # above, for whenever this migrates to Docker secrets.
       - TURN_SHARED_SECRET=${WEBCONFERENCE_TURN_SHARED_SECRET:?this deployment's coturn shared secret, from core/bunsenbrenner.org}
+      # Games (My Daily Idea): their own service account and operator key, never the webconference's. All three
+      # empty keeps /api/play at 503 "off"; PLAY_OPERATOR_KEY_FILE works like the other *_FILE secrets.
+      - PLAY_OIDC_CLIENT_ID=${PLAY_OIDC_CLIENT_ID:-}
+      - PLAY_OIDC_CLIENT_SECRET=${PLAY_OIDC_CLIENT_SECRET:-}
+      - PLAY_OPERATOR_KEY=${PLAY_OPERATOR_KEY:-}
+      - PLAY_OPERATOR_KEY_FILE=${PLAY_OPERATOR_KEY_FILE:-}
     volumes:
       - webconference_demo_access_requests:/srv/data
     expose:
