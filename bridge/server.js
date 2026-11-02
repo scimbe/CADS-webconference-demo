@@ -917,14 +917,18 @@ function identityAllowed(req, claimedEmail) {
 // open /api/play/* does not open the channel to anyone without both. Game traffic itself goes browser to browser.
 const PLAY_ORIGINS = new Set(String(process.env.PLAY_ALLOWED_ORIGINS || 'https://demos-34a13a96.bunsenbrenner.org,https://bunsenbrenner.org').split(',').map((s) => s.trim()).filter(Boolean));
 const PLAY_INVITE_TTL_MS = 15 * 60_000;      // an unanswered invite lapses
-const PLAY_GAME_TTL_MS = 2 * 60 * 60_000;    // a game's channel is removed from the control plane afterwards
-const PLAY_GRANT_TTL_SECS = 2 * 60 * 60;
+const PLAY_GAME_TTL_MS = 20 * 60_000;        // a game's channel is removed from the control plane afterwards
+const PLAY_GRANT_TTL_SECS = 30 * 60;
+// Games share the control-plane account (100 channels) and the TURN quota with real calls: games never take more than this.
+const PLAY_MAX_GAMES = Number(process.env.PLAY_MAX_GAMES || 20);
 const PLAY_MAX_OPEN = 500;                   // invites held in memory at once
 const HEX64 = /^[0-9a-f]{64}$/i;
 const TOKEN_RE = /^[A-Za-z0-9_-]{22}$/;
 const playInvites = new Map();               // token -> { a, createdAt, used, channel }
 const playChannels = new Map();              // channel -> { createdAt, registered }
-const playRateLimited = makeRateLimiter(30, 10 * 60_000);   // per IP: opening, joining and asking for ICE together
+const playRateLimited = makeRateLimiter(30, 10 * 60_000);   // per IP: opening, joining, attesting and asking for ICE
+const playPollLimited = makeRateLimiter(400, 15 * 60_000); // per invite token: a waiting inviter polls the status
+let playMinting = 0;                                         // grant processes running at once on the shared host
 
 function playCors(req, res) {
   const o = req.headers.origin;
@@ -968,7 +972,8 @@ setInterval(sweepPlay, 60_000).unref();
 async function handlePlay(req, res, url) {
   playCors(req, res);
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
-  if (playRateLimited(clientIp(req))) return json(res, 429, { error: 'too many requests', code: 'rate' });
+  const polling = req.method === 'GET' && url.pathname === '/api/play/status';
+  if (polling ? playPollLimited(url.searchParams.get('token') || '') : playRateLimited(clientIp(req))) return json(res, 429, { error: 'too many requests', code: 'rate' });
   if (req.method === 'POST' && url.pathname === '/api/play/open') {
     const { holderPub, noisePub } = await readBody(req);
     if (!HEX64.test(holderPub || '') || !HEX64.test(noisePub || '')) return json(res, 400, { error: 'bad keys' });
@@ -983,10 +988,13 @@ async function handlePlay(req, res, url) {
     const inv = playInvites.get(token);
     if (!inv || inv.used || Date.now() - inv.createdAt > PLAY_INVITE_TTL_MS) return json(res, 404, { error: 'invite gone', code: 'gone' });
     if (inv.a.holderPub === holderPub.toLowerCase()) return json(res, 409, { error: 'same device', code: 'self' });
+    if (playChannels.size >= PLAY_MAX_GAMES || playMinting >= 2) return json(res, 503, { error: 'busy', code: 'busy' });
     inv.used = true;                                   // burnt before the slow part, so a second visitor cannot race in
     let minted;
+    playMinting++;
     try { minted = await mintPlayGrants(inv.a.holderPub, holderPub.toLowerCase()); }
     catch (e) { console.error('bridge: play grant minting failed:', e); inv.used = false; return json(res, 500, { error: 'grant minting failed' }); }
+    finally { playMinting--; }
     const call = { channel: minted.channel, operatorPub: minted.operatorPub, callerEmail: null, calleeEmail: null, grantForCaller: minted.grantA, grantForCallee: minted.grantB,
       transport: 'webrtc', kind: 'play', createdAt: Date.now(), callerAttest: null, calleeAttest: null, status: { state: 'ringing' } };
     pendingCalls.set(call.channel, call);
@@ -1029,6 +1037,7 @@ async function handlePlay(req, res, url) {
     const g = playChannels.get(channel || '');
     if (!g) return json(res, 200, { ok: true });
     playChannels.delete(channel); pendingCalls.delete(channel);
+    for (const [t, inv] of playInvites) if (inv.channel === channel) playInvites.delete(t);
     if (g.registered) cpDelete(`/me/channels/${channel}`).catch((e) => console.error('bridge: play channel delete failed', channel, e.message));
     return json(res, 200, { ok: true });
   }
