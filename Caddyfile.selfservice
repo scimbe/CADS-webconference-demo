@@ -62,7 +62,22 @@
 	# /api/whoami call the client already makes right after showing that
 	# screen, see dialer.js's runIdentityScreen) only follows once the app
 	# actually needs to know who you are, not before you've seen anything.
-	# Account-free games stay closed until hardened (separate account, TURN quota, IP handling): see the security review.
+	# Account-free games (My Daily Idea): only these two paths skip the login gate. The bridge answers 503 "off" without
+	# the games' own service account; the edge still checks grant, membership and key possession on every join, and
+	# /ws/channel plus every other /api/* stay behind the gate.
+	@play-api {
+		path /api/play/*
+	}
+	handle @play-api {
+		reverse_proxy {$WEBCONFERENCE_BRIDGE_ADDR}
+	}
+	@play-ws {
+		path /ws/play
+	}
+	handle @play-ws {
+		rewrite * /ws/channel
+		reverse_proxy {$WEBCONFERENCE_EDGE_WS}
+	}
 	# The browser agent (WASM) may be loaded by the game page on another bunsenbrenner host.
 	@pkg {
 		path /pkg/*
