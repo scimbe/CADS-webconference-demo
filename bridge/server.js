@@ -963,6 +963,10 @@ const playChannels = new Map();              // channel -> { createdAt, register
 const playRateLimited = makeRateLimiter(60, 60_000);         // all new invites and joins together, per minute
 const playPollLimited = makeRateLimiter(400, 15 * 60_000); // per invite token: a waiting inviter polls the status
 let playMinting = 0;                                         // grant processes running at once on the shared host
+// Relay only as a fallback for networks without a direct path (UDP blocked, symmetric NAT): a game needs a few kbit/s,
+// the credential names the game not the player, and the budget keeps games far below the quota the calls need.
+const PLAY_TURN_TTL_SECS = 15 * 60;
+const playTurnLimited = makeRateLimiter(Number(process.env.PLAY_TURN_PER_HOUR || 200), 60 * 60_000);
 
 function playCors(req, res) {
   const o = req.headers.origin;
@@ -1057,15 +1061,20 @@ async function handlePlay(req, res, url) {
     const g = playChannels.get(channel); if (g && call.status.state === 'accepted_and_registered') g.registered = true;
     return json(res, 200, { status: call.status });
   }
-  // TURN under a pseudonym, so the two players do not learn each other's IP address.
+  // STUN first; TURN only as the fallback the browser picks when no direct pair works.
   if (req.method === 'GET' && url.pathname === '/api/play/ice') {
     const channel = url.searchParams.get('channel') || '', role = url.searchParams.get('role'), g1 = playChannels.get(channel);
     if (!HEX64.test(channel) || !g1 || g1.token !== url.searchParams.get('token')) return json(res, 404, { error: 'no such game' });
     if (!g1.registered) return json(res, 409, { error: 'not registered yet', code: 'early' });   // no relay before both seats are in
     if ((role !== 'caller' && role !== 'callee') || g1.ice[role]) return json(res, 429, { error: 'already issued', code: 'rate' });
     g1.ice[role] = true;
-    // Browser to browser over STUN: no relay, nothing on the TURN quota the calls need. Players see each other's address (terms).
-    return json(res, 200, { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }], relayOnly: false });
+    // Players see each other's address (terms). The relay is used only if no direct pair connects.
+    const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+    if (TURN_SHARED_SECRET && !playTurnLimited('turn')) {
+      const username = `${Math.floor(Date.now() / 1000) + PLAY_TURN_TTL_SECS}:play-${channel.slice(0, 16)}`;
+      iceServers.push({ urls: TURN_URLS, username, credential: crypto.createHmac('sha1', TURN_SHARED_SECRET).update(username).digest('base64') });
+    }
+    return json(res, 200, { iceServers });
   }
   if (req.method === 'POST' && url.pathname === '/api/play/done') {
     const { channel, token } = await readBody(req);
