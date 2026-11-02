@@ -62,6 +62,30 @@
 	# /api/whoami call the client already makes right after showing that
 	# screen, see dialer.js's runIdentityScreen) only follows once the app
 	# actually needs to know who you are, not before you've seen anything.
+	# Account-free games (My Daily Idea): only these two paths skip the login gate. The edge still checks grant,
+	# membership and key possession on every join; /ws/channel and every other /api/* stay behind the gate.
+	@play-api {
+		path /api/play/*
+	}
+	handle @play-api {
+		reverse_proxy {$WEBCONFERENCE_BRIDGE_ADDR}
+	}
+	@play-ws {
+		path /ws/play
+	}
+	handle @play-ws {
+		rewrite * /ws/channel
+		reverse_proxy {$WEBCONFERENCE_EDGE_WS}
+	}
+	# The browser agent (WASM) may be loaded by the game page on another bunsenbrenner host.
+	@pkg {
+		path /pkg/*
+	}
+	handle @pkg {
+		header Access-Control-Allow-Origin "*"
+		root * /srv
+		file_server
+	}
 	@gated {
 		path /ws/channel /api/*
 	}
