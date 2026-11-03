@@ -952,7 +952,11 @@ const PLAY_INVITE_TTL_MS = 15 * 60_000;      // an unanswered invite lapses
 const PLAY_GAME_TTL_MS = 5 * 60_000;         // the channel only carries the connection setup; it goes as soon as the peers are direct
 const PLAY_GRANT_TTL_SECS = 30 * 60;
 // Games share the control-plane account (100 channels) and the TURN quota with real calls: games never take more than this.
-const PLAY_MAX_GAMES = Number(process.env.PLAY_MAX_GAMES || 10);   // games setting up at the same moment
+// A card table of three or four is a mesh of two-player links (3 or 6), each set up here like a duel and gone a few
+// seconds after its data channel is open. A newcomer sets up its links to the others at once: up to 3 in flight.
+const PLAY_MAX_GAMES = Number(process.env.PLAY_MAX_GAMES || 10);   // links setting up at the same moment
+const PLAY_SETUPS_PER_MIN = Number(process.env.PLAY_SETUPS_PER_MIN || 60);   // invites and joins together; a full Doppelkopf table uses 12
+const PLAY_MAX_MINTING = Number(process.env.PLAY_MAX_MINTING || 2);          // grant processes at once on the shared host
 const PLAY_MAX_OPEN = 500;                   // invites held in memory at once
 const HEX64 = /^[0-9a-f]{64}$/i;
 const TOKEN_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -960,14 +964,19 @@ const playInvites = new Map();               // token -> { a, createdAt, used, c
 const playChannels = new Map();              // channel -> { createdAt, registered }
 // The tunnel hands the bytes through unchanged, so every request reaches this bridge from the same address: a per-IP
 // limit would be one shared bucket. Budgets are global instead, and every later step is bound to the secret invite token.
-const playRateLimited = makeRateLimiter(60, 60_000);         // all new invites and joins together, per minute
+const playRateLimited = makeRateLimiter(PLAY_SETUPS_PER_MIN, 60_000);   // all new invites and joins together, per minute
 const playPollLimited = makeRateLimiter(400, 15 * 60_000); // per invite token: a waiting inviter polls the status
-let playMinting = 0;                                         // grant processes running at once on the shared host
+let playMinting = 0;                                         // grant processes running at once (PLAY_MAX_MINTING)
 // Relay only as a fallback for networks without a direct path (UDP blocked, symmetric NAT): a game needs a few kbit/s,
 // the credential names the game not the player, and the budget keeps games far below the quota the calls need.
 const PLAY_TURN_TTL_SECS = 15 * 60;
 const playTurnLimited = makeRateLimiter(Number(process.env.PLAY_TURN_PER_HOUR || 200), 60 * 60_000);
 
+// Over budget for the moment: the client may try again after the given seconds (table.js backs off on busy/rate).
+function busy(res, status, code, secs) {
+  res.setHeader('Retry-After', String(secs));
+  return json(res, status, { error: code === 'rate' ? 'too many requests' : 'busy', code, retryAfter: secs });
+}
 function playCors(req, res) {
   const o = req.headers.origin;
   if (o && PLAY_ORIGINS.has(o)) {
@@ -1009,11 +1018,11 @@ async function handlePlay(req, res, url) {
   const polling = req.method === 'GET' && url.pathname === '/api/play/status';
   if (req.method === 'POST' && !/^application\/json/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'json only' });
   const opening = req.method === 'POST' && (url.pathname === '/api/play/open' || url.pathname === '/api/play/join');
-  if (polling ? playPollLimited(url.searchParams.get('token') || '') : opening && playRateLimited('play')) return json(res, 429, { error: 'too many requests', code: 'rate' });
+  if (polling ? playPollLimited(url.searchParams.get('token') || '') : opening && playRateLimited('play')) return busy(res, 429, 'rate', 20);
   if (req.method === 'POST' && url.pathname === '/api/play/open') {
     const { holderPub, noisePub } = await readBody(req);
     if (!HEX64.test(holderPub || '') || !HEX64.test(noisePub || '')) return json(res, 400, { error: 'bad keys' });
-    if (playInvites.size >= PLAY_MAX_OPEN) { sweepPlay(); if (playInvites.size >= PLAY_MAX_OPEN) return json(res, 503, { error: 'busy', code: 'busy' }); }
+    if (playInvites.size >= PLAY_MAX_OPEN) { sweepPlay(); if (playInvites.size >= PLAY_MAX_OPEN) return busy(res, 503, 'busy', 30); }
     const token = crypto.randomBytes(16).toString('base64url');
     playInvites.set(token, { a: { holderPub: holderPub.toLowerCase(), noisePub: noisePub.toLowerCase() }, createdAt: Date.now(), used: false, channel: null });
     return json(res, 200, { token, ttl: PLAY_INVITE_TTL_MS / 1000 });
@@ -1024,7 +1033,7 @@ async function handlePlay(req, res, url) {
     const inv = playInvites.get(token);
     if (!inv || inv.used || Date.now() - inv.createdAt > PLAY_INVITE_TTL_MS) return json(res, 404, { error: 'invite gone', code: 'gone' });
     if (inv.a.holderPub === holderPub.toLowerCase()) return json(res, 409, { error: 'same device', code: 'self' });
-    if (playChannels.size >= PLAY_MAX_GAMES || playMinting >= 2) return json(res, 503, { error: 'busy', code: 'busy' });
+    if (playChannels.size >= PLAY_MAX_GAMES || playMinting >= PLAY_MAX_MINTING) return busy(res, 503, 'busy', 3);
     inv.used = true;                                   // burnt before the slow part, so a second visitor cannot race in
     let minted;
     playMinting++;

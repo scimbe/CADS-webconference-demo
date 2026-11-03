@@ -130,6 +130,12 @@ services:
       - PLAY_OIDC_CLIENT_SECRET=${PLAY_OIDC_CLIENT_SECRET:-}
       - PLAY_OPERATOR_KEY=${PLAY_OPERATOR_KEY:-}
       - PLAY_OPERATOR_KEY_FILE=${PLAY_OPERATOR_KEY_FILE:-}
+      # Budgets for games (card tables are meshes of 3 or 6 two-player links): links setting up at once, invites+joins
+      # per minute, grant processes at once, TURN logins per hour. Defaults as in bridge/server.js.
+      - PLAY_MAX_GAMES=${PLAY_MAX_GAMES:-10}
+      - PLAY_SETUPS_PER_MIN=${PLAY_SETUPS_PER_MIN:-60}
+      - PLAY_MAX_MINTING=${PLAY_MAX_MINTING:-2}
+      - PLAY_TURN_PER_HOUR=${PLAY_TURN_PER_HOUR:-200}
     volumes:
       - webconference_demo_access_requests:/srv/data
     expose:
