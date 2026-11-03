@@ -1,0 +1,89 @@
+/* "daily" look (theme.js sets html[data-look=daily] and --d-a/--d-b/--d-on/--d-onb).
+   Matches My Daily Idea: Anton display type, a cream paper sheet with a thick ink border and a hard
+   shadow on the visitor's own colour. Every rule is scoped to html[data-look="daily"], so without
+   the parameter the page renders exactly as before.
+   Anton, Copyright 2020 The Anton Project Authors (https://github.com/googlefonts/AntonFont.git),
+   SIL Open Font License 1.1 (fonts/Anton-OFL.txt). */
+@font-face{font-family:"Anton";font-style:normal;font-weight:400 900;font-display:swap;src:url(./fonts/anton-latin-400-normal.woff2) format("woff2")}
+
+html[data-look="daily"]{
+  --ink:#111; --paper:#fff6dc;
+  --bg:var(--d-a); --panel:var(--paper); --panel2:#fff; --line:var(--ink); --line-soft:rgba(0,0,0,.18);
+  --text:var(--ink); --muted:#5a5140; --muted2:#2c271d;
+  --accent:var(--d-b); --accent-soft:var(--d-b); --accent2:var(--ink); --danger:#d61f1f;
+  --serif:Anton,Impact,"Avenir Next Condensed","Roboto Condensed","Arial Black",system-ui,sans-serif;
+  color-scheme:light;
+}
+html[data-look="daily"] body{background:var(--d-a);color:var(--ink);font-weight:600}
+
+/* back to the app */
+#look-back{display:none}
+html[data-look="daily"] #look-back{display:block;padding:10px 16px 0}
+html[data-look="daily"] #look-back a{display:inline-flex;align-items:center;min-height:44px;padding:0 14px;border:2px solid var(--d-on);border-radius:22px;color:var(--d-on);font:800 14px/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;text-decoration:none}
+
+/* landing chrome of bunsenbrenner.org: not part of this look (legal links stay in the footer) */
+html[data-look="daily"] #site-hero,
+html[data-look="daily"] .eyebrow,
+html[data-look="daily"] footer.support .support-note,
+html[data-look="daily"] footer.support .support-links,
+html[data-look="daily"] .setup-grid>.panel-card,
+html[data-look="daily"] #id-gate-required>p{display:none}
+html[data-look="daily"] .setup-grid{grid-template-columns:1fr}
+html[data-look="daily"] #id-gate-required,html[data-look="daily"] #id-verify-error{background:transparent!important;border:0!important;padding:0!important}
+html[data-look="daily"] #id-gate-login-btn{width:100%;min-height:64px;font-size:1.6rem}
+html[data-look="daily"] main{padding-top:1.2rem}
+html[data-look="daily"] footer.support{border-top:0;color:var(--d-on)}
+html[data-look="daily"] footer.support a,
+html[data-look="daily"] footer.support .back-brand,
+html[data-look="daily"] footer.support .back-brand .tld{color:var(--d-on)}
+html[data-look="daily"] footer.support .legal-links{border-top-color:transparent}
+
+/* headings: stamped Anton */
+html[data-look="daily"] h1,html[data-look="daily"] h2,html[data-look="daily"] h3,
+html[data-look="daily"] .msg-brand,html[data-look="daily"] .simple-header h1{font-family:var(--serif);font-weight:400;text-transform:uppercase;letter-spacing:.4px}
+html[data-look="daily"] main h1{font-size:clamp(1.9rem,6vw,2.6rem);line-height:1;color:var(--d-on);transform:rotate(-1.5deg);transform-origin:left;margin-bottom:1rem}
+
+/* the sheet */
+html[data-look="daily"] .panel-card,
+html[data-look="daily"] .overlay-panel,
+html[data-look="daily"] .chat-panel,
+html[data-look="daily"] details.tech,
+html[data-look="daily"] .simple-tile{background:var(--paper);border:3px solid var(--ink);border-radius:6px;box-shadow:5px 6px 0 var(--ink)}
+html[data-look="daily"] .badge{color:var(--d-onb);background:var(--d-b);border:2px solid var(--ink);font-weight:800}
+html[data-look="daily"] .trust-strip .dot,html[data-look="daily"] .brand .flame,html[data-look="daily"] .msg-brand .flame{background:var(--d-b);box-shadow:none}
+
+/* inputs and buttons: thick ink, pressed-down shadow in the second colour */
+html[data-look="daily"] input:not([type="checkbox"]):not([type="radio"]),
+html[data-look="daily"] textarea{background:#fff;color:var(--ink);border:2px solid var(--ink);border-radius:6px}
+html[data-look="daily"] .id-form button,html[data-look="daily"] a.btn,html[data-look="daily"] button.btn,
+html[data-look="daily"] .chat-form button,html[data-look="daily"] .access-form button,html[data-look="daily"] .dialer-row button,
+html[data-look="daily"] #id-verify-retry,html[data-look="daily"] button.accept{
+  background:var(--ink);color:var(--d-btn);border:3px solid var(--ink);border-radius:6px;
+  font-family:var(--serif);font-weight:400;text-transform:uppercase;letter-spacing:.6px;
+  box-shadow:0 5px 0 var(--d-b);transition:transform 90ms ease-out,box-shadow 90ms ease-out}
+html[data-look="daily"] .id-form button:active,html[data-look="daily"] a.btn:active,html[data-look="daily"] button.btn:active,
+html[data-look="daily"] button.accept:active{transform:translateY(4px);box-shadow:0 1px 0 var(--d-b)}
+html[data-look="daily"] button.decline{background:transparent;color:var(--ink);border:3px solid var(--ink);border-radius:6px}
+
+/* call controls stay big and round, but in ink */
+html[data-look="daily"] button.ctl{background:var(--paper);color:var(--ink);border:2px solid var(--ink);font-weight:800}
+html[data-look="daily"] button.ctl:hover{border-color:var(--ink);background:#fff}
+html[data-look="daily"] button.ctl.hangup{background:var(--danger);border-color:var(--ink);color:#fff}
+html[data-look="daily"] .video-tile{border:3px solid var(--ink);border-radius:6px}
+html[data-look="daily"] .status-pill{border:2px solid var(--ink);color:var(--ink);background:var(--paper)}
+html[data-look="daily"] .connecting-banner{background:var(--paper);border:2px solid var(--ink);color:var(--ink)}
+html[data-look="daily"] .connecting-banner .spinner{border-color:rgba(0,0,0,.2);border-top-color:var(--d-b)}
+
+/* messenger shell */
+html[data-look="daily"] #messenger-shell{background:var(--d-a)}
+html[data-look="daily"] .msg-topbar{background:var(--d-a);color:var(--d-on);border-bottom:3px solid var(--ink)}
+html[data-look="daily"] .msg-icon-btn{color:var(--d-on)}
+html[data-look="daily"] .msg-list-pane,html[data-look="daily"] .msg-menu{background:var(--paper);border-color:var(--ink)}
+html[data-look="daily"] .msg-tab.active{background:var(--ink);color:var(--d-btn);border-color:var(--ink)}
+html[data-look="daily"] .msg-chat-list li:hover,html[data-look="daily"] .msg-chat-list li.active,
+html[data-look="daily"] .contacts-list li:hover{background:#fff}
+html[data-look="daily"] .contact-avatar{background:var(--d-b);color:var(--d-onb);border:2px solid var(--ink)}
+html[data-look="daily"] .chat-msg.me{background:var(--d-b);color:var(--d-onb)}
+
+html[data-look="daily"] #boot-loading{background:var(--d-a)}
+html[data-look="daily"] #boot-loading span{color:var(--d-on);font-family:var(--serif);text-transform:uppercase;letter-spacing:.6px;font-size:1.1rem}
