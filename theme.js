@@ -52,6 +52,24 @@
   }
   function ink(hex) { return lum(hex) > 0.45 ? '#111111' : '#fffaf0'; }
 
+  // The login page (Keycloak on auth.bunsenbrenner.org) is another origin, so sessionStorage does not reach
+  // it. A short-lived cookie on the parent domain carries only the look and the two colours
+  // ("daily.RRGGBB.RRGGBB", no identifier); the login theme re-validates it with the same strict pattern.
+  // Purely cosmetic and only set after the visitor asked for the look.
+  var COOKIE = 'ct_look';
+  function lookCookie(chosen) {
+    var tail = '; Domain=bunsenbrenner.org; Path=/; Secure; SameSite=Lax';
+    if (!chosen) return COOKIE + '=; Max-Age=0' + tail;
+    return COOKIE + '=daily.' + chosen.a.slice(1) + '.' + chosen.b.slice(1) + '; Max-Age=1800' + tail;
+  }
+  function setCookie(doc, chosen) {
+    try {
+      var host = doc.location && doc.location.hostname;
+      if (!host || !/(^|\.)bunsenbrenner\.org$/.test(host)) return;
+      doc.cookie = lookCookie(chosen);
+    } catch (e) { /* cookies blocked: the login page just keeps its normal look */ }
+  }
+
   function apply(doc, store, search) {
     var asked = parseLook(search), chosen = null;
     try {
@@ -59,7 +77,9 @@
       else if (asked) { store.setItem(KEY, JSON.stringify(asked)); chosen = asked; }
       else chosen = fromStore(store.getItem(KEY));
     } catch (e) { chosen = asked && !asked.off ? asked : null; }
+    if (asked && asked.off) setCookie(doc, null);
     if (!chosen) return null;
+    setCookie(doc, chosen);
     var el = doc.documentElement, s = el.style;
     el.setAttribute('data-look', 'daily');
     s.setProperty('--d-a', chosen.a);
@@ -82,7 +102,7 @@
     doc.body.insertBefore(bar, doc.body.firstChild);
   }
 
-  var api = { parseLook: parseLook, fromStore: fromStore, ink: ink, apply: apply, KEY: KEY, BACK: BACK };
+  var api = { parseLook: parseLook, fromStore: fromStore, ink: ink, apply: apply, lookCookie: lookCookie, KEY: KEY, BACK: BACK };
   if (typeof module !== 'undefined' && module.exports) { module.exports = api; return; }
   var store;
   try { store = root.sessionStorage; } catch (e) { store = { getItem: function () { return null; }, setItem: function () {}, removeItem: function () {} }; }

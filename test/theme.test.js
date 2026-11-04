@@ -78,3 +78,29 @@ test('page and image ship the look; gate, CSP and gated paths unchanged', () => 
   assert.match(caddy, /@gated \{\n\t\tpath \/ws\/channel \/api\/\*\n\t\}/);
   assert.match(caddy, /script-src 'self' 'wasm-unsafe-eval'/);
 });
+
+test('look cookie for the login page: only look and colours, parent domain, short-lived, cleared by look=off', () => {
+  const set = [];
+  const doc = (host) => { const d = fakeDoc(); d.location = { hostname: host }; Object.defineProperty(d, 'cookie', { set(v) { set.push(v); } }); return d; };
+  assert.ok(T.apply(doc('webconference.bunsenbrenner.org'), memStore(), '?look=daily&a=2B59FF&b=ffd400'));
+  assert.equal(set.pop(), 'ct_look=daily.2b59ff.ffd400; Max-Age=1800; Domain=bunsenbrenner.org; Path=/; Secure; SameSite=Lax');
+  // tampered colours never reach the cookie
+  T.apply(doc('webconference.bunsenbrenner.org'), memStore(), '?look=daily&a=' + encodeURIComponent('x;Domain=evil.example'));
+  assert.match(set.pop(), /^ct_look=daily\.[0-9a-f]{6}\.[0-9a-f]{6}; /);
+  // off clears it
+  T.apply(doc('webconference.bunsenbrenner.org'), memStore(), '?look=off');
+  assert.match(set.pop(), /^ct_look=; Max-Age=0; Domain=bunsenbrenner\.org/);
+  // other hosts (localhost, a foreign domain) never get a bunsenbrenner.org cookie attempt
+  T.apply(doc('localhost'), memStore(), '?look=daily');
+  T.apply(doc('bunsenbrenner.org.evil.example'), memStore(), '?look=daily');
+  assert.equal(set.length, 0);
+  // no look asked and nothing stored: no cookie written at all
+  T.apply(doc('webconference.bunsenbrenner.org'), memStore(), '');
+  assert.equal(set.length, 0);
+});
+
+test('buttons on ink never keep the base page\'s dark text', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'theme-daily.css'), 'utf8');
+  assert.match(css, /\.msg-start-call-btn,html\[data-look="daily"\] \.msg-request-actions button\.accept\{background:var\(--ink\);color:var\(--d-btn\)/);
+  assert.match(css, /\.msg-start-call-btn:disabled[^{]*\{background:var\(--paper\);color:var\(--muted\)/);
+});

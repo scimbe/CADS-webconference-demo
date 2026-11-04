@@ -85,5 +85,23 @@ html[data-look="daily"] .contacts-list li:hover{background:#fff}
 html[data-look="daily"] .contact-avatar{background:var(--d-b);color:var(--d-onb);border:2px solid var(--ink)}
 html[data-look="daily"] .chat-msg.me{background:var(--d-b);color:var(--d-onb)}
 
+/* conversation: the sheet again, and every button on ink carries the readable button colour
+   (the base page hardcodes dark green #08211d text for its teal buttons, unreadable on ink) */
+html[data-look="daily"] .msg-conversation,html[data-look="daily"] .msg-conv-placeholder{background:var(--paper);color:var(--ink)}
+html[data-look="daily"] .msg-conv-header{background:var(--paper);border-bottom:3px solid var(--ink)}
+html[data-look="daily"] .msg-conv-header .msg-icon-btn,html[data-look="daily"] .msg-conv-header button{color:var(--ink)}
+html[data-look="daily"] .msg-conv-status,html[data-look="daily"] .msg-conv-note{color:var(--muted)}
+html[data-look="daily"] .msg-conv-status[data-online="1"]{color:var(--ink);font-weight:800}
+html[data-look="daily"] .msg-conv-input{background:var(--paper);border-top:3px solid var(--ink)}
+html[data-look="daily"] #msg-compose-input{background:#fff;color:var(--ink);border:2px solid var(--ink)}
+html[data-look="daily"] #msg-compose-input::placeholder,
+html[data-look="daily"] input::placeholder,html[data-look="daily"] textarea::placeholder{color:var(--muted);opacity:1}
+html[data-look="daily"] #msg-compose-input:focus{border-color:var(--ink);outline:3px solid var(--d-b);outline-offset:1px}
+html[data-look="daily"] .msg-start-call-btn,html[data-look="daily"] .msg-request-actions button.accept{background:var(--ink);color:var(--d-btn);border:3px solid var(--ink);box-shadow:0 4px 0 var(--d-b);font-weight:800}
+html[data-look="daily"] #dial-form .msg-start-call-btn{font-family:var(--serif);font-weight:400;text-transform:uppercase;letter-spacing:.6px;font-size:1.15rem}
+/* disabled: a hollow ink outline on paper instead of a half-transparent black blob */
+html[data-look="daily"] .msg-start-call-btn:disabled,html[data-look="daily"] .id-form button:disabled,
+html[data-look="daily"] button.btn:disabled,html[data-look="daily"] .chat-form button:disabled{background:var(--paper);color:var(--muted);border:3px dashed var(--muted);box-shadow:none;opacity:1;filter:none}
+
 html[data-look="daily"] #boot-loading{background:var(--d-a)}
 html[data-look="daily"] #boot-loading span{color:var(--d-on);font-family:var(--serif);text-transform:uppercase;letter-spacing:.6px;font-size:1.1rem}
