@@ -503,7 +503,14 @@ function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
     if (!localHasCamera) channel.send(NO_CAMERA_SENTINEL);
     flushOutbox(chatStore, peerEmail, (payload) => channel.send(payload), ackWaiter);
   });
+  // Set by the function returned below: the call has moved to the direct
+  // channel. pc.close() then fires this data channel's 'close' asynchronously,
+  // AFTER call-channel.js already enabled the chat for the new transport --
+  // it must not disable it again (E2E: chat stayed greyed out after an
+  // automatic switch).
+  let detached = false;
   channel.addEventListener('close', () => {
+    if (detached) return;
     chatInput.disabled = true;
     chatSend.disabled = true;
   });
@@ -563,7 +570,10 @@ function setupChatChannel(channel, localHasCamera, chatStore, peerEmail) {
     addChatMessage(text, 'me');
     chatInput.value = '';
   });
-  return unsubscribeOnMessage;
+  return () => {
+    detached = true;
+    unsubscribeOnMessage?.();
+  };
 }
 
 // Instantiated once identity is known so the chat list can show last-message

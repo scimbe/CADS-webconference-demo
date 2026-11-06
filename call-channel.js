@@ -55,7 +55,7 @@
 
 import * as wasm from './pkg/ct_agent_wasm.js';
 import {
-  TAG_MEDIA_INIT, TAG_MEDIA_CHUNK, TAG_CHAT, TAG_BYE, TAG_PING, TAG_PONG, NO_CAMERA_SENTINEL, NO_CODEC_SENTINEL,
+  TAG_MEDIA_INIT, TAG_MEDIA_CHUNK, TAG_CHAT, TAG_BYE, TAG_PING, TAG_PONG, TAG_FALLBACK, NO_CAMERA_SENTINEL, NO_CODEC_SENTINEL,
 } from './call-protocol.js';
 import { joinChannel, writeFramed, readFramed, withTimeout, sendTaggedFrame, closeAfterFlush, CHANNEL_OPEN_TIMEOUT_MS } from './call-transport-shared.js';
 import {
@@ -89,7 +89,20 @@ async function establishChannelSession(wsUrl, grantHex, holderPrivHex, noisePriv
   return { stream, noiseTransport: hs.intoTransport() };
 }
 
-async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex) {
+// opts.skipUntilPeerFallback: this side switched from WebRTC on its own
+// (call-webrtc.js attemptChannelFallback, not peer-initiated). Until the
+// peer's own TAG_FALLBACK arrives, frames on this stream are the peer's late
+// WebRTC signaling (trickled ICE candidates, a bye) -- encoded by ct-agent-wasm
+// with first bytes 1-4, i.e. TAG_MEDIA_INIT/MEDIA_CHUNK/CHAT/BYE here: a late
+// candidate would show up as a chat line, a late bye would end the call.
+// They are still decrypted (keeps the Noise nonce in step), then dropped.
+// A peer that never sends the marker (older client, mid-deploy) stops the
+// skipping after PEER_FALLBACK_MARKER_WAIT_MS.
+const PEER_FALLBACK_MARKER_WAIT_MS = 5000;
+
+async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex, opts = {}) {
+  let skipUntilPeerFallback = !!opts.skipUntilPeerFallback;
+  const skipDeadline = Date.now() + PEER_FALLBACK_MARKER_WAIT_MS;
   setStatus('connecting-media');
   routeWebrtc.classList.add('live');
   // Real peer-to-peer connectivity for this transport is already up by the
@@ -121,6 +134,11 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   }
 
   const mediaSource = new MediaSource();
+  // After a WebRTC -> direct-channel switch, remoteVideo still holds the
+  // WebRTC stream from pc.ontrack in srcObject, which takes precedence over
+  // src -- the MediaSource below would never open (no 'sourceopen', every
+  // chunk piling up in pendingChunks, no remote video). Clear it first.
+  remoteVideo.srcObject = null;
   remoteVideo.src = URL.createObjectURL(mediaSource);
   let sourceBuffer = null;
   let sourceBufferMimeType = null; // CADS-webconference-demo#78 -- needed to recreate the sourceBuffer below
@@ -396,6 +414,7 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           }
           byteStream = fresh.stream;
           noiseTransport = fresh.noiseTransport;
+          skipUntilPeerFallback = false; // fresh Noise session: no stale signaling on it
           channelReconnectAttempted = false; // a fresh recovery -- a LATER drop gets its own attempt, same as attemptIceRestart's own reset
           // CADS-webconference-demo#78: recovering the byte stream previously
           // did NOT recover the render if remoteMediaFatal had already
@@ -435,6 +454,19 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
       // wrong with this stream, not safe to just keep reading past.
       try {
         const plain = noiseTransport.decrypt(cipher);
+        if (skipUntilPeerFallback) {
+          if (plain.length === 1 && plain[0] === TAG_FALLBACK) {
+            skipUntilPeerFallback = false;
+            log('peer confirmed the switch to the direct channel');
+            continue;
+          }
+          if (Date.now() < skipDeadline) {
+            log(`dropping a late WebRTC signaling frame from the peer (${plain.length} bytes)`);
+            continue;
+          }
+          skipUntilPeerFallback = false;
+          log('no switch confirmation from the peer -- treating frames as direct-channel traffic');
+        }
         // Any successfully-decrypted frame is real proof this transport is still
         // alive end-to-end -- not just an explicit TAG_PONG reply. Updated here,
         // once, rather than per-branch below.
@@ -449,13 +481,26 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           }
         } else if (tag === TAG_MEDIA_INIT) {
           const mimeType = new TextDecoder().decode(payload);
-          if (mediaSource.readyState === 'open' && MediaSource.isTypeSupported(mimeType)) {
+          const startSourceBuffer = () => {
             sourceBufferMimeType = mimeType; // CADS-webconference-demo#78 -- needed if handleAppendError has to recreate this
             sourceBuffer = mediaSource.addSourceBuffer(mimeType);
             sourceBuffer.mode = 'sequence';
             sourceBuffer.addEventListener('updateend', flushPending);
             remoteEmpty.style.display = 'none';
             log(`remote media stream starting (${mimeType})`);
+            flushPending();
+          };
+          if (MediaSource.isTypeSupported(mimeType) && mediaSource.readyState === 'open') {
+            startSourceBuffer();
+          } else if (MediaSource.isTypeSupported(mimeType) && mediaSource.readyState === 'closed') {
+            // 'sourceopen' fires asynchronously after remoteVideo.src is set
+            // above. A peer that is already streaming -- the normal case after
+            // an automatic WebRTC -> direct-channel switch, where both sides
+            // start within milliseconds -- delivers TAG_MEDIA_INIT before
+            // that, and the stream used to be marked unsupported for good
+            // (E2E: "peer's media type unsupported here: video/webm;codecs=vp8,opus",
+            // no remote video at all). Chunks queue in pendingChunks meanwhile.
+            mediaSource.addEventListener('sourceopen', startSourceBuffer, { once: true });
           } else {
             mediaUnsupported = true;
             log(`peer's media type unsupported here: ${mimeType}`);

@@ -33,6 +33,7 @@ const http = require('http');
 const { execFile } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
+const { mediaFallbackDecision } = require('./media-fallback.js');
 
 // CADS-webconference-demo#30: these three are this bridge's highest-value
 // secrets (the operator key can mint grants for any channel; the OIDC
@@ -110,6 +111,9 @@ const TURN_URLS = (process.env.WEBCONFERENCE_TURN_URLS || 'turn:bunsenbrenner.or
   .map((u) => u.trim())
   .filter(Boolean);
 const TURN_CREDENTIAL_TTL_SECS = 600; // 10 min, per core's recommendation
+// How long a call waits for a nominated ICE pair before switching to the
+// direct channel (see ice-watchdog.js for why 10s). Clamped client-side to 3-60s.
+const ICE_FALLBACK_TIMEOUT_MS = Number(process.env.WEBCONFERENCE_ICE_FALLBACK_TIMEOUT_MS) || 10000;
 
 // CADS-webconference-demo#134 follow-up: aggregate-only ICE outcome telemetry, spec'd
 // by core to feed CADS-Tunnel#517-V2's traffic-offload measurement. Deliberately NO
@@ -1108,6 +1112,16 @@ const server = http.createServer(async (req, res) => {
       // verified identity available", not an error.
       const email = req.headers['x-gate-email'] || null;
       return json(res, 200, { email });
+    }
+
+    // Automatic WebRTC -> direct-channel switch (client: ice-watchdog.js).
+    // Only for a signed-in account: enabled iff the gate verified an identity
+    // for this request (same X-Gate-Email signal as /api/whoami). There is no
+    // subscription claim to prefer paying accounts by -- the gate forwards
+    // only the e-mail -- so every signed-in account gets the same for now;
+    // see media-fallback.js's planTimeoutMs for where a plan signal plugs in.
+    if (req.method === 'GET' && url.pathname === '/api/media-fallback') {
+      return json(res, 200, mediaFallbackDecision({ verifiedEmail: gateVerifiedEmail(req), defaultTimeoutMs: ICE_FALLBACK_TIMEOUT_MS }));
     }
 
     // CADS-webconference-demo#18/#133: short-lived TURN credentials so the WebRTC

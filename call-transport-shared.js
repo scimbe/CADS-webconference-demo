@@ -173,10 +173,38 @@ function withTimeout(promise, ms, message) {
   return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))]);
 }
 
-async function readFramed(stream, timeoutMs) {
-  const lenBytes = await stream.readExact(2, timeoutMs);
-  const len = (lenBytes[0] << 8) | lenBytes[1];
-  return stream.readExact(len, timeoutMs);
+// Atomic: a frame is taken out of the buffer only once its 2-byte length AND
+// its whole body are there, in one synchronous step. Reading the length and
+// the body as two separate readExact() calls let a SECOND reader of the same
+// stream (the direct-channel loop starting while the WebRTC signaling loop
+// still had a read pending, see unreadFramed) take bytes from between them --
+// E2E: both loops desynchronised and the call died with "decrypt error"
+// ~2s after an automatic switch.
+//
+// shouldYield (optional): checked synchronously right before a frame would be
+// taken. The WebRTC signaling loop passes "the call has switched to the
+// direct channel": its read may still be pending when the channel loop
+// starts, and from that moment every frame belongs to the channel loop (in
+// order -- the Noise nonce depends on it). Throws YIELDED instead of taking it.
+const YIELDED = 'yielded to another reader';
+async function readFramed(stream, timeoutMs, shouldYield) {
+  while (true) {
+    if (shouldYield?.()) throw new Error(YIELDED);
+    let need = 2;
+    if (stream.totalLen >= 2) {
+      const buf = stream._concat();
+      need = 2 + ((buf[0] << 8) | buf[1]);
+      if (stream.totalLen >= need) {
+        if (shouldYield?.()) throw new Error(YIELDED);
+        const body = buf.slice(2, need);
+        stream.chunks = [buf.slice(need)];
+        stream.totalLen -= need;
+        return body;
+      }
+    }
+    if (stream.closed) throw new Error(`connection closed while reading ${need} bytes`);
+    await stream._waitForBytes(need, timeoutMs);
+  }
 }
 
 // The join response is either a 2-byte b"NO" refusal or a 32-byte challenge --
