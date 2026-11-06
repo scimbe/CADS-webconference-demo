@@ -1,7 +1,22 @@
-// node --test test/  -- ice-watchdog.js decision logic, no browser needed.
+// node --test test/*.test.mjs  -- ice-watchdog.js decision logic, no browser needed.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createIceWatchdog, resolveFallbackConfig, DEFAULT_TIMEOUT_MS, LOCAL_OVERRIDE_KEY } from '../ice-watchdog.js';
+import { createIceWatchdog, resolveFallbackConfig, fetchFallbackConfig, DEFAULT_TIMEOUT_MS, LOCAL_OVERRIDE_KEY } from '../ice-watchdog.js';
+
+test('fetch: one retry after a 5xx or network error, none after a definite 4xx', async () => {
+  const seq = (...answers) => { const calls = []; return { calls, fn: async (u) => { calls.push(u); const a = answers.shift(); if (a instanceof Error) throw a; return a; } }; };
+  const ok = { ok: true, status: 200, json: async () => ({ enabled: true, timeoutMs: 9000, reason: 'account' }) };
+  let f = seq({ ok: false, status: 502 }, ok);
+  assert.equal((await fetchFallbackConfig(f.fn, null, { retryDelayMs: 0 })).enabled, true);
+  assert.equal(f.calls.length, 2);
+  f = seq(new Error('net'), ok);
+  assert.equal((await fetchFallbackConfig(f.fn, null, { retryDelayMs: 0 })).timeoutMs, 9000);
+  f = seq({ ok: false, status: 401 }, ok);
+  assert.equal((await fetchFallbackConfig(f.fn, null, { retryDelayMs: 0 })).enabled, false);
+  assert.equal(f.calls.length, 1);
+  f = seq(new Error('a'), new Error('b'));
+  assert.equal((await fetchFallbackConfig(f.fn, null, { retryDelayMs: 0 })).enabled, false, 'fails closed');
+});
 
 function fakePc(state = 'new', pairs = []) {
   return {

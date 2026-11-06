@@ -3,7 +3,7 @@
   "private": true,
   "description": "Test tooling only -- the client itself is plain ES modules served as-is.",
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test test/*.test.js test/*.test.mjs",
     "test:e2e": "playwright test"
   },
   "devDependencies": {

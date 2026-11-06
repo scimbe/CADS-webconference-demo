@@ -79,7 +79,7 @@
 
 import * as wasm from './pkg/ct_agent_wasm.js';
 import { TAG_FALLBACK } from './call-protocol.js';
-import { writeFramed, readFramed, unreadFramed, closeAfterFlush, withTimeout } from './call-transport-shared.js';
+import { writeFramed, readFramed, closeAfterFlush, withTimeout } from './call-transport-shared.js';
 import { createIceWatchdog, fetchFallbackConfig } from './ice-watchdog.js';
 import {
   setStatus, hideConnecting, addChatMessage, log, setIceState,
@@ -269,11 +269,10 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
   // endCallDueToPeerLoss, same as before this fix existed.
   let channelFallbackAttempted = false;
   // peerInitiated=true means this side is reacting to the OTHER side's own
-  // TAG_FALLBACK notification (see that constant's comment) -- skip sending
-  // our own notification back in that case, both to avoid a pointless echo
-  // and because sendSignal below assumes pc/the webrtc signaling path is
-  // still the thing in charge of this channel, which is no longer true once
-  // the peer has already announced its own switch.
+  // TAG_FALLBACK notification (see that constant's comment). This side still
+  // sends its own TAG_FALLBACK back: it marks, on the peer's stream, where our
+  // last WebRTC signaling frame ends (see skipUntilPeerFallback below and in
+  // call-channel.js).
   // auto: set when ice-watchdog.js triggered the switch ({cause, elapsedMs}).
   async function attemptChannelFallback(reason, peerInitiated = false, auto = null) {
     if (channelFallbackAttempted) {
@@ -323,7 +322,10 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     // comment for why the notifyPeerFallback callback (passed at session
     // construction below) preserves this exact try/catch/log body, and why
     // `session?.` is defense in depth, not an expected real path.
-    session?.requestFallbackToChannel(reason, peerInitiated);
+    // Always notify, also when following the peer: our TAG_FALLBACK is the
+    // marker after which the peer's channel loop stops dropping our late
+    // WebRTC signaling frames (call-channel.js skipUntilPeerFallback).
+    session?.requestFallbackToChannel(reason, false);
     pc.close();
     setActiveSession(null);
     // Robustness audit finding (round 2 re-read, not yet live-reproduced --
@@ -403,11 +405,16 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     const CHANNEL_FALLBACK_TIMEOUT_MS = 45000;
     try {
       await withTimeout((async () => {
+        // Switched on our own: drop the peer's late signaling until its
+        // TAG_FALLBACK arrives. Following the peer: its marker was already
+        // read by the signaling loop. A fresh session has no stale frames.
+        let skipUntilPeerFallback = !peerInitiated;
         if (stream.ws.readyState !== WebSocket.OPEN) {
           log('fallback: signaling socket already closing/closed -- re-establishing a fresh channel before handing off');
           ({ stream, noiseTransport } = await establishChannelSession(wsUrl, grantHex, holderPrivHex, noisePrivHex, isCaller));
+          skipUntilPeerFallback = false;
         }
-        await runChannelMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex);
+        await runChannelMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex, { skipUntilPeerFallback });
       })(), CHANNEL_FALLBACK_TIMEOUT_MS, `channel fallback timed out after ${CHANNEL_FALLBACK_TIMEOUT_MS / 1000}s`);
     } catch (e) {
       // Fail loudly (#129 fix 2) -- previously a failure here (or deeper
@@ -736,18 +743,13 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
       if (sessionEnded) return;
       let cipher;
       try {
-        cipher = await readFramed(stream, SIGNALING_STREAM_TIMEOUT_MS);
+        // Once the call has switched to the direct channel, every further
+        // frame belongs to call-channel.js's receive loop -- this read (still
+        // pending when the switch starts; both sides switching at the same
+        // moment makes that the normal case) gives up instead of taking one.
+        cipher = await readFramed(stream, SIGNALING_STREAM_TIMEOUT_MS, () => channelFallbackAttempted);
       } catch {
-        return; // connection closed
-      }
-      // The call switched to the direct channel while this read was in
-      // flight: the frame belongs to call-channel.js's receive loop now
-      // (both sides switching at the same moment -- each side's watchdog
-      // firing -- makes this the normal case, not a corner case). Hand it
-      // back undecrypted instead of consuming it.
-      if (sessionEnded && channelFallbackAttempted) {
-        unreadFramed(stream, cipher);
-        return;
+        return; // connection closed, or yielded to the direct-channel loop
       }
       // CADS-webconference-demo#20: readFramed() above is guarded, but
       // decrypt()/decode/dispatch was not -- one malformed or undecryptable

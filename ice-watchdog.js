@@ -49,14 +49,20 @@ function resolveFallbackConfig(server, storage) {
   return { enabled, timeoutMs, reason: enabled ? (server.reason || 'account') : (server?.reason || 'unavailable') };
 }
 
-async function fetchFallbackConfig(fetchFn, storage) {
-  try {
-    const r = await fetchFn('/api/media-fallback', { credentials: 'same-origin' });
-    if (!r.ok) return resolveFallbackConfig(null, storage);
-    return resolveFallbackConfig(await r.json(), storage);
-  } catch (_) {
-    return resolveFallbackConfig(null, storage);
+// One retry: a transient 5xx/network blip must not silently turn the switch
+// off for a signed-in account for the whole call. Still fails closed (off).
+async function fetchFallbackConfig(fetchFn, storage, { retryDelayMs = 500 } = {}) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, retryDelayMs));
+    try {
+      const r = await fetchFn('/api/media-fallback', { credentials: 'same-origin' });
+      if (r.ok) return resolveFallbackConfig(await r.json(), storage);
+      if (r.status < 500) break; // a definite answer (e.g. 401/404): no retry
+    } catch (_) {
+      // network error: retry once
+    }
   }
+  return resolveFallbackConfig(null, storage);
 }
 
 const CONNECTED = new Set(['connected', 'completed']);

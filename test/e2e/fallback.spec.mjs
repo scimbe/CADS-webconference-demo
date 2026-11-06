@@ -74,10 +74,23 @@ function videoLatencies(sender, receiver) {
 }
 const median = (a) => { if (!a.length) return null; const b = [...a].sort((x, y) => x - y); return b[Math.floor(b.length / 2)]; };
 
+const videoState = (p) => p.page.evaluate(() => {
+  const v = document.getElementById('remote-video');
+  const b = v.buffered;
+  return { t: v.currentTime, paused: v.paused, readyState: v.readyState, w: v.videoWidth,
+    buffered: b.length ? [b.start(0), b.end(b.length - 1)] : null, seen: (window.__e2e.seen || []).length };
+});
+
 async function expectMediaAndChat({ caller, callee }, label) {
   // video: both directions show >= 4 colour switches of the other side's palette sequence
-  await expect.poll(async () => videoLatencies(await e2eOf(caller), await e2eOf(callee)).length, { timeout: 30000 }).toBeGreaterThanOrEqual(4);
-  await expect.poll(async () => videoLatencies(await e2eOf(callee), await e2eOf(caller)).length, { timeout: 30000 }).toBeGreaterThanOrEqual(4);
+  for (const [sender, receiver, dir] of [[caller, callee, 'caller->callee'], [callee, caller, 'callee->caller']]) {
+    try {
+      await expect.poll(async () => videoLatencies(await e2eOf(sender), await e2eOf(receiver)).length, { timeout: 30000 }).toBeGreaterThanOrEqual(4);
+    } catch (e) {
+      console.log(`video ${dir} stalled:`, JSON.stringify(await videoState(receiver)));
+      throw e;
+    }
+  }
   // audio: the dominant remote frequency is the OTHER side's tone (bin width ~11.7 Hz at 48 kHz/4096)
   const tone = async (p) => median((await e2eOf(p)).peaks.slice(-6).map((x) => x.hz));
   await expect.poll(() => tone(callee), { timeout: 20000 }).toBeGreaterThan(TONE.caller - 25);
@@ -165,12 +178,16 @@ test('ICE blocked, long limit: ICE "failed" itself triggers the switch, without 
   await c.caller.ctx.close(); await c.callee.ctx.close();
 });
 
-test('ICE blocked, no account: no automatic switch', async ({ browser }) => {
-  test.setTimeout(60000);
+test('ICE blocked, no account: no automatic switch, also not via the late post-restart path', async ({ browser }) => {
+  test.setTimeout(120000);
   h.config.fallback = { enabled: false, timeoutMs: 4000 };
   const c = await call(browser, { blockIce: true });
-  await c.caller.page.waitForTimeout(4000 + 6000);
-  await expect(c.caller.page.locator('#transport-badge')).toHaveText('webrtc');
-  await expect(c.callee.page.locator('#transport-badge')).toHaveText('webrtc');
+  // the old path runs to its end: ICE failed (~16 s) -> restart -> failed again (~33 s) ->
+  // instead of switching, the call ends with a pointer to the manual switch
+  await expect(c.caller.page.locator('.chat-msg.system', { hasText: 'needs a signed-in account' })).toBeVisible({ timeout: 70000 });
+  for (const p of [c.caller, c.callee]) {
+    const badges = await p.page.evaluate(() => window.__e2e.badge.map((b) => b.text)).catch(() => []);
+    expect(badges.some((t) => t.includes('direct-channel'))).toBe(false);
+  }
   await c.caller.ctx.close(); await c.callee.ctx.close();
 });

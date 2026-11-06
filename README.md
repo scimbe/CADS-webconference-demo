@@ -141,7 +141,7 @@ the live production site, not inferred from reading the code.
 cd video-call-grant && cargo run -- <holder_a_hex> <holder_b_hex>
 ```
 
-Tests: `node --test test/` (unit), `npm ci && npx playwright test` (E2E: two real
+Tests: `npm test` (unit), `npm ci && npx playwright test` (E2E: two real
 browser peers, real ct-agent-wasm, edge mocked in `test/e2e/harness.mjs`, ICE
 blocked by rewriting candidates to TEST-NET-1; needs `pkg/` and
 `cargo build --release` in `video-call-grant/`, or `GRANT_CMD` pointing at the

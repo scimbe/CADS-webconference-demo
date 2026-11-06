@@ -1,4 +1,4 @@
-// node --test test/  -- GET /api/media-fallback on the real bridge process:
+// node --test test/*.test.mjs  -- GET /api/media-fallback on the real bridge process:
 // the automatic direct-channel switch is on only for a gate-verified account.
 import test from 'node:test';
 import assert from 'node:assert/strict';

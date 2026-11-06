@@ -1,6 +1,6 @@
 name: Tests
 
-# Unit tests (node --test test/) and the E2E for the automatic WebRTC ->
+# Unit tests (node --test test/*.test.*) and the E2E for the automatic WebRTC ->
 # direct-channel switch (test/e2e/, Playwright + real ct-agent-wasm build +
 # the repo's own ct-video-call-grant CLI; the edge is mocked in harness.mjs).
 on:
@@ -14,16 +14,18 @@ permissions:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    # pinned: Playwright 1.56 has no browser builds for ubuntu 26.04 (ubuntu-latest)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node --test test/
+      - run: node --test test/*.test.js test/*.test.mjs
 
   e2e:
-    runs-on: ubuntu-latest
+    # pinned: Playwright 1.56 has no browser builds for ubuntu 26.04 (ubuntu-latest)
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4

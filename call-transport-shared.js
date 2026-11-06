@@ -148,27 +148,6 @@ class WsByteStream {
   send(bytes) {
     this.ws.send(bytes);
   }
-  // Puts bytes back at the FRONT of the buffer, as if never read -- see
-  // unreadFramed below for the one caller.
-  unread(bytes) {
-    this.chunks.unshift(bytes);
-    this.totalLen += bytes.length;
-    this._wake();
-  }
-}
-
-// The WebRTC signaling loop (call-webrtc.js) and the direct-channel receive
-// loop (call-channel.js) read the SAME stream one after the other when a call
-// switches transport. A signaling read already in flight when the switch
-// starts would otherwise swallow the first frame meant for the channel loop
-// (the peer's TAG_FALLBACK, or its first media/ping frame). Not yet decrypted,
-// so the Noise nonce is untouched: handing it back is lossless.
-function unreadFramed(stream, body) {
-  const framed = new Uint8Array(body.length + 2);
-  framed[0] = (body.length >> 8) & 0xff;
-  framed[1] = body.length & 0xff;
-  framed.set(body, 2);
-  stream.unread(framed);
 }
 
 async function writeFramed(stream, bytes) {
@@ -201,13 +180,22 @@ function withTimeout(promise, ms, message) {
 // still had a read pending, see unreadFramed) take bytes from between them --
 // E2E: both loops desynchronised and the call died with "decrypt error"
 // ~2s after an automatic switch.
-async function readFramed(stream, timeoutMs) {
+//
+// shouldYield (optional): checked synchronously right before a frame would be
+// taken. The WebRTC signaling loop passes "the call has switched to the
+// direct channel": its read may still be pending when the channel loop
+// starts, and from that moment every frame belongs to the channel loop (in
+// order -- the Noise nonce depends on it). Throws YIELDED instead of taking it.
+const YIELDED = 'yielded to another reader';
+async function readFramed(stream, timeoutMs, shouldYield) {
   while (true) {
+    if (shouldYield?.()) throw new Error(YIELDED);
     let need = 2;
     if (stream.totalLen >= 2) {
       const buf = stream._concat();
       need = 2 + ((buf[0] << 8) | buf[1]);
       if (stream.totalLen >= need) {
+        if (shouldYield?.()) throw new Error(YIELDED);
         const body = buf.slice(2, need);
         stream.chunks = [buf.slice(need)];
         stream.totalLen -= need;
@@ -478,7 +466,6 @@ export {
   writeFramed,
   withTimeout,
   readFramed,
-  unreadFramed,
   readChallengeOrRefusal,
   joinChannel,
   sendTaggedFrame,
