@@ -33,6 +33,7 @@ const http = require('http');
 const { execFile } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
+const { mediaFallbackDecision } = require('./media-fallback.js');
 
 // CADS-webconference-demo#30: these three are this bridge's highest-value
 // secrets (the operator key can mint grants for any channel; the OIDC
@@ -1117,10 +1118,10 @@ const server = http.createServer(async (req, res) => {
     // Only for a signed-in account: enabled iff the gate verified an identity
     // for this request (same X-Gate-Email signal as /api/whoami). There is no
     // subscription claim to prefer paying accounts by -- the gate forwards
-    // only the e-mail -- so every signed-in account gets the same.
+    // only the e-mail -- so every signed-in account gets the same for now;
+    // see media-fallback.js's planTimeoutMs for where a plan signal plugs in.
     if (req.method === 'GET' && url.pathname === '/api/media-fallback') {
-      const enabled = !!gateVerifiedEmail(req);
-      return json(res, 200, { enabled, timeoutMs: ICE_FALLBACK_TIMEOUT_MS, reason: enabled ? 'account' : 'no_account' });
+      return json(res, 200, mediaFallbackDecision({ verifiedEmail: gateVerifiedEmail(req), defaultTimeoutMs: ICE_FALLBACK_TIMEOUT_MS }));
     }
 
     // CADS-webconference-demo#18/#133: short-lived TURN credentials so the WebRTC
