@@ -75,6 +75,8 @@ services:
         grant-bin: ./video-call-grant/target/release
     environment:
       - WEBCONFERENCE_BRIDGE_LISTEN=0.0.0.0:8791
+      # ms without a nominated ICE pair before a signed-in call switches to the direct channel (ice-watchdog.js)
+      - WEBCONFERENCE_ICE_FALLBACK_TIMEOUT_MS=${WEBCONFERENCE_ICE_FALLBACK_TIMEOUT_MS:-10000}
       - WEBCONFERENCE_ACCESS_REQUESTS_FILE=/srv/data/access-requests.json
       - CT_AGENT_CP_URL=${WEBCONFERENCE_AGENT_CP_URL:?control-plane URL for onboarding}
       - CT_AGENT_HOSTNAME=webconference.bunsenbrenner.org

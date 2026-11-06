@@ -121,6 +121,11 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   }
 
   const mediaSource = new MediaSource();
+  // After a WebRTC -> direct-channel switch, remoteVideo still holds the
+  // WebRTC stream from pc.ontrack in srcObject, which takes precedence over
+  // src -- the MediaSource below would never open (no 'sourceopen', every
+  // chunk piling up in pendingChunks, no remote video). Clear it first.
+  remoteVideo.srcObject = null;
   remoteVideo.src = URL.createObjectURL(mediaSource);
   let sourceBuffer = null;
   let sourceBufferMimeType = null; // CADS-webconference-demo#78 -- needed to recreate the sourceBuffer below
@@ -449,13 +454,26 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
           }
         } else if (tag === TAG_MEDIA_INIT) {
           const mimeType = new TextDecoder().decode(payload);
-          if (mediaSource.readyState === 'open' && MediaSource.isTypeSupported(mimeType)) {
+          const startSourceBuffer = () => {
             sourceBufferMimeType = mimeType; // CADS-webconference-demo#78 -- needed if handleAppendError has to recreate this
             sourceBuffer = mediaSource.addSourceBuffer(mimeType);
             sourceBuffer.mode = 'sequence';
             sourceBuffer.addEventListener('updateend', flushPending);
             remoteEmpty.style.display = 'none';
             log(`remote media stream starting (${mimeType})`);
+            flushPending();
+          };
+          if (MediaSource.isTypeSupported(mimeType) && mediaSource.readyState === 'open') {
+            startSourceBuffer();
+          } else if (MediaSource.isTypeSupported(mimeType) && mediaSource.readyState === 'closed') {
+            // 'sourceopen' fires asynchronously after remoteVideo.src is set
+            // above. A peer that is already streaming -- the normal case after
+            // an automatic WebRTC -> direct-channel switch, where both sides
+            // start within milliseconds -- delivers TAG_MEDIA_INIT before
+            // that, and the stream used to be marked unsupported for good
+            // (E2E: "peer's media type unsupported here: video/webm;codecs=vp8,opus",
+            // no remote video at all). Chunks queue in pendingChunks meanwhile.
+            mediaSource.addEventListener('sourceopen', startSourceBuffer, { once: true });
           } else {
             mediaUnsupported = true;
             log(`peer's media type unsupported here: ${mimeType}`);

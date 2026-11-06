@@ -41,6 +41,8 @@ services:
         grant-bin: ./video-call-grant/target/release
     environment:
       - WEBCONFERENCE_BRIDGE_LISTEN=0.0.0.0:8791
+      # ms without a nominated ICE pair before a signed-in call switches to the direct channel (ice-watchdog.js)
+      - WEBCONFERENCE_ICE_FALLBACK_TIMEOUT_MS=${WEBCONFERENCE_ICE_FALLBACK_TIMEOUT_MS:-10000}
       # CADS-webconference-demo#41 (finding 3): pending access requests are
       # persisted here (atomic-write JSON, see server.js's own comment) so a
       # container recreate -- not just a same-container process restart --

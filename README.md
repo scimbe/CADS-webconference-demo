@@ -44,36 +44,31 @@ primitives, plus a handful of on-call video filters.
 These are current, not historical — each one was independently reproduced against
 the live production site, not inferred from reading the code.
 
-- **The automatic WebRTC→direct-channel fallback is currently broken on a
-  UDP-blocked network** ([#129](https://github.com/scimbe/CADS-webconference-demo/issues/129),
-  open, reproduced 3/3 under real `tc netem`/`iptables` emulation, not just CDP
-  throttling). On a network where UDP is blocked (STUN/ICE can never complete —
-  the classic locked-down corporate egress policy), the default WebRTC transport
-  never connects, the fallback to the direct-channel transport *does* fire, but it
-  hands off a signaling WebSocket that has already gone stale — the call is
-  silently abandoned roughly 2 seconds later and both users land back on the
-  contact list with **no error shown**. There's also ~14 seconds of complete
-  silence (no banner, no feedback) between the call screen appearing and the first
-  "Reconnecting…" indicator, on every network path, regardless of whether the
-  fallback ultimately works.
-- **The workaround that does work**: manually enable **"Use direct-channel media
-  (experimental)"** in the menu *before* dialing, rather than relying on the
-  automatic fallback. On the identical UDP-blocked network — and even under a much
-  harsher firewall that drops everything except TCP/80, TCP/443, and UDP/53 (a
-  silent black hole, no ICMP rejection) — a call placed with this toggle
-  pre-enabled connects cleanly, chat stays enabled the whole time, and hangup is
-  clean. The transport itself is solid; only the automatic handoff into it is
-  broken. The toggle isn't persisted across sessions (read fresh from the checkbox
-  at dial time), so this has to be re-selected each time on a network you already
-  know needs it.
+- **Automatic WebRTC→direct-channel switch — signed-in accounts only, verified
+  in the E2E harness, not yet re-verified live.** A call that has no nominated
+  ICE candidate pair after 10 s (or whose ICE reports `failed` earlier) switches
+  to the direct-channel transport on its own; the badge then reads
+  `direct-channel (auto)` and the chat shows one line saying so. The limit comes
+  from `/api/media-fallback` (`WEBCONFERENCE_ICE_FALLBACK_TIMEOUT_MS`, clamped
+  3–60 s; see `ice-watchdog.js` for why 10 s). Without a gate-verified login there
+  is no automatic switch. Before this, the old path waited for ICE `failed`
+  (~16 s in Chrome) plus a 20 s restart grace and then lost the call to two
+  races (both reproduced on the old code with the `test/e2e/` harness): the
+  WebRTC signaling loop stealing the first direct-channel frames ("decrypt
+  error"), and the MediaSource never opening because `remoteVideo.srcObject`
+  still held the WebRTC stream.
+- **Manual switch**: **"Use direct-channel media (experimental)"** in the menu,
+  ticked *before* dialing, still works for anyone and skips the wait. It isn't
+  persisted across sessions (read fresh from the checkbox at dial time).
 - **No TURN relay** ([#18](https://github.com/scimbe/CADS-webconference-demo/issues/18),
   closed — the STUN-addition scope of it, not the full gap). `RTCPeerConnection`
   now uses a public STUN server (`iceServers` used to be empty), which resolves
   ordinary NAT — each side discovers its own reflexive address — but STUN alone
   can't traverse symmetric NAT or a locked-down corporate network. That needs a
   real TURN relay, which this demo has no infrastructure/credentials to offer.
-  The direct-channel transport (manually enabled, see above) is the actual
-  fallback for those networks today, not the automatic one.
+  TURN is offered on 3478 (UDP/TCP) only, not on 443: on a network that allows
+  only TCP/443, WebRTC cannot connect at all and the direct-channel transport
+  (one WSS connection to this host, port 443) is the only path.
 - **Identity keys live in browser storage in the clear until you explicitly
   remove them** ([#42](https://github.com/scimbe/CADS-webconference-demo/issues/42),
   closed). Each identity's holder/Noise private keys persist in `localStorage`
@@ -146,6 +141,12 @@ the live production site, not inferred from reading the code.
 cd video-call-grant && cargo run -- <holder_a_hex> <holder_b_hex>
 ```
 
+Tests: `node --test test/` (unit), `npm ci && npx playwright test` (E2E: two real
+browser peers, real ct-agent-wasm, edge mocked in `test/e2e/harness.mjs`, ICE
+blocked by rewriting candidates to TEST-NET-1; needs `pkg/` and
+`cargo build --release` in `video-call-grant/`, or `GRANT_CMD` pointing at the
+grant CLI). Measurements land in `test-results/fallback-metrics.json`.
+
 Deploying live: `./run-demo.sh up` (needs a running CADS-Tunnel plane reachable
 from this host, `WEBCONFERENCE_CERT_DIR` with a real cert, and
 `WEBCONFERENCE_EDGE_WS=<plane host>:<CT_EDGE_WS_CHANNEL_LISTEN port>` — see that
@@ -213,8 +214,8 @@ one, that's the actual first step, not something specific to this repo:
    two grants (`video-call-grant/`), open the page as two browser tabs, and
    confirm both reach `RTCPeerConnection` state `connected` — not just that the
    page loads. If you're on a restrictive network, also check the "Known
-   limitations" section above before assuming the automatic fallback will save
-   you — it currently won't; enable direct-channel media manually instead.
+   limitations" section above: the automatic switch needs a signed-in account;
+   otherwise enable direct-channel media manually.
 
 Once this is confirmed stable and working end-to-end on your own infrastructure,
 the operator's own copy of this demo can be taken down — this repo, your plane,

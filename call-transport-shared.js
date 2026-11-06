@@ -148,6 +148,27 @@ class WsByteStream {
   send(bytes) {
     this.ws.send(bytes);
   }
+  // Puts bytes back at the FRONT of the buffer, as if never read -- see
+  // unreadFramed below for the one caller.
+  unread(bytes) {
+    this.chunks.unshift(bytes);
+    this.totalLen += bytes.length;
+    this._wake();
+  }
+}
+
+// The WebRTC signaling loop (call-webrtc.js) and the direct-channel receive
+// loop (call-channel.js) read the SAME stream one after the other when a call
+// switches transport. A signaling read already in flight when the switch
+// starts would otherwise swallow the first frame meant for the channel loop
+// (the peer's TAG_FALLBACK, or its first media/ping frame). Not yet decrypted,
+// so the Noise nonce is untouched: handing it back is lossless.
+function unreadFramed(stream, body) {
+  const framed = new Uint8Array(body.length + 2);
+  framed[0] = (body.length >> 8) & 0xff;
+  framed[1] = body.length & 0xff;
+  framed.set(body, 2);
+  stream.unread(framed);
 }
 
 async function writeFramed(stream, bytes) {
@@ -173,10 +194,29 @@ function withTimeout(promise, ms, message) {
   return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))]);
 }
 
+// Atomic: a frame is taken out of the buffer only once its 2-byte length AND
+// its whole body are there, in one synchronous step. Reading the length and
+// the body as two separate readExact() calls let a SECOND reader of the same
+// stream (the direct-channel loop starting while the WebRTC signaling loop
+// still had a read pending, see unreadFramed) take bytes from between them --
+// E2E: both loops desynchronised and the call died with "decrypt error"
+// ~2s after an automatic switch.
 async function readFramed(stream, timeoutMs) {
-  const lenBytes = await stream.readExact(2, timeoutMs);
-  const len = (lenBytes[0] << 8) | lenBytes[1];
-  return stream.readExact(len, timeoutMs);
+  while (true) {
+    let need = 2;
+    if (stream.totalLen >= 2) {
+      const buf = stream._concat();
+      need = 2 + ((buf[0] << 8) | buf[1]);
+      if (stream.totalLen >= need) {
+        const body = buf.slice(2, need);
+        stream.chunks = [buf.slice(need)];
+        stream.totalLen -= need;
+        return body;
+      }
+    }
+    if (stream.closed) throw new Error(`connection closed while reading ${need} bytes`);
+    await stream._waitForBytes(need, timeoutMs);
+  }
 }
 
 // The join response is either a 2-byte b"NO" refusal or a 32-byte challenge --
@@ -438,6 +478,7 @@ export {
   writeFramed,
   withTimeout,
   readFramed,
+  unreadFramed,
   readChallengeOrRefusal,
   joinChannel,
   sendTaggedFrame,

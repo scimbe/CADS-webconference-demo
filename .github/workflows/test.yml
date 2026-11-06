@@ -1,0 +1,49 @@
+name: Tests
+
+# Unit tests (node --test test/) and the E2E for the automatic WebRTC ->
+# direct-channel switch (test/e2e/, Playwright + real ct-agent-wasm build +
+# the repo's own ct-video-call-grant CLI; the edge is mocked in harness.mjs).
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test test/
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build ct-agent-wasm (pkg/)
+        run: ./build-wasm.sh
+      - name: Build the grant CLI
+        run: cargo build --release --manifest-path video-call-grant/Cargo.toml
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: E2E
+        run: npx playwright test
+      - name: Measurements
+        if: always()
+        run: cat test-results/fallback-metrics.json || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-results
+          path: test-results/

@@ -79,7 +79,8 @@
 
 import * as wasm from './pkg/ct_agent_wasm.js';
 import { TAG_FALLBACK } from './call-protocol.js';
-import { writeFramed, readFramed, closeAfterFlush, withTimeout } from './call-transport-shared.js';
+import { writeFramed, readFramed, unreadFramed, closeAfterFlush, withTimeout } from './call-transport-shared.js';
+import { createIceWatchdog, fetchFallbackConfig } from './ice-watchdog.js';
 import {
   setStatus, hideConnecting, addChatMessage, log, setIceState,
   localVideo, remoteVideo, localEmpty, remoteEmpty, btnHangup,
@@ -148,7 +149,15 @@ async function reportIceOutcome(pc, iceStartTs, reconnect) {
 
 async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, peerEmail, wsUrl, grantHex, holderPrivHex, noisePrivHex) {
   setStatus('connecting-webrtc');
-  const pc = new RTCPeerConnection({ iceServers: await fetchIceServers() });
+  // Automatic direct-channel switch (ice-watchdog.js): only for a signed-in
+  // account -- /api/media-fallback answers enabled:true only when the request
+  // carries a gate-verified identity (bridge/server.js). Fetched in parallel
+  // with the ICE servers, so it adds no setup time.
+  let safeStorage = null;
+  try { safeStorage = window.localStorage; } catch (_) {}
+  const [iceServers, fallbackConfig] = await Promise.all([fetchIceServers(), fetchFallbackConfig(fetch, safeStorage)]);
+  log(`auto direct-channel switch: ${fallbackConfig.enabled ? `on, after ${fallbackConfig.timeoutMs / 1000}s without a nominated ICE pair` : `off (${fallbackConfig.reason})`}`);
+  const pc = new RTCPeerConnection({ iceServers });
   let iceStartTs = Date.now();
   let iceIsReconnect = false;
 
@@ -265,12 +274,25 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
   // and because sendSignal below assumes pc/the webrtc signaling path is
   // still the thing in charge of this channel, which is no longer true once
   // the peer has already announced its own switch.
-  async function attemptChannelFallback(reason, peerInitiated = false) {
+  // auto: set when ice-watchdog.js triggered the switch ({cause, elapsedMs}).
+  async function attemptChannelFallback(reason, peerInitiated = false, auto = null) {
     if (channelFallbackAttempted) {
       endCallDueToPeerLoss(`${reason} (channel fallback already attempted this call)`);
       return;
     }
+    // Without a signed-in account there is no AUTOMATIC switch (neither the
+    // early watchdog nor the late post-restart path). Following a switch the
+    // PEER already made is not automatic on this side's behalf -- refusing it
+    // would just leave both ends talking different protocols -- so
+    // peerInitiated always proceeds.
+    if (!peerInitiated && !fallbackConfig.enabled) {
+      watchdog?.stop();
+      addChatMessage('No WebRTC connection. Switching to the direct channel automatically needs a signed-in account -- tick "Use direct-channel media" in the menu and call again.', 'system');
+      endCallDueToPeerLoss(`${reason} (no automatic direct-channel switch: ${fallbackConfig.reason})`);
+      return;
+    }
     channelFallbackAttempted = true;
+    watchdog?.stop();
     // Stops every other webrtc-side watchdog (heartbeat close/timeout,
     // onconnectionstatechange) from also firing once pc.close() below runs
     // -- same "already ended, no-op" guard endCallDueToPeerLoss itself
@@ -278,13 +300,18 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     // behind for good, not actually ending the call.
     sessionEnded = true;
     log(`${reason} -- WebRTC never established a working connection, falling back to the direct-channel transport`);
-    addChatMessage('WebRTC connection failed -- falling back to a direct relay…', 'system');
+    // One short line, both sides: why, and what it costs (latency).
+    addChatMessage(auto
+      ? `No WebRTC connection after ${Math.round(auto.elapsedMs / 1000)}s -- switched to the direct channel automatically (works through firewalls, higher latency).`
+      : peerInitiated
+        ? 'Your peer had no WebRTC connection -- switched to the direct channel (higher latency).'
+        : 'WebRTC connection failed -- switched to the direct channel (higher latency).', 'system');
     // Same visibility fix as attemptIceRestart's own comment above -- covers
     // the moment between "ICE gave up" and runChannelMediaCall's own
     // hideConnecting() call (its first few lines) confirming the channel
     // transport is back up, instead of leaving the frozen last video frame
     // on screen with only an invisible-on-mobile chat message.
-    connectingBannerText.textContent = 'Falling back to a direct connection…';
+    connectingBannerText.textContent = 'Switching to the direct channel…';
     connectingBanner.hidden = false;
     setStatus('connecting-media');
     // Tell the peer BEFORE tearing down pc, so it switches into channel
@@ -329,7 +356,7 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     // its own via a fresh getLocalMedia() call, and holding both open at
     // once would leave a dangling capture session for no reason.
     if (capturedMedia) capturedMedia.stream.getTracks().forEach((t) => t.stop());
-    document.getElementById('transport-badge').textContent = 'direct-channel (fallback)';
+    document.getElementById('transport-badge').textContent = auto || peerInitiated ? 'direct-channel (auto)' : 'direct-channel (fallback)';
     document.getElementById('chat-transport-note').textContent =
       '— tunneled through the same Noise_IK channel (fell back from WebRTC after ICE failed)';
     // Robustness audit finding (round 3 spot-check) -- see setupChatChannel's
@@ -392,12 +419,36 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
     }
   }
 
-  pc.oniceconnectionstatechange = () => setIceState(pc.iceConnectionState);
+  // Initial-connection watchdog (ice-watchdog.js): armed once ICE starts
+  // (setLocalDescription below), disarmed by the first nominated pair.
+  // Signed-in accounts only; without one the old behaviour stays, minus the
+  // automatic switch (see attemptChannelFallback's account check).
+  const watchdog = fallbackConfig.enabled
+    ? createIceWatchdog(pc, {
+      timeoutMs: fallbackConfig.timeoutMs,
+      onTrigger: ({ cause, elapsedMs, iceState }) => {
+        if (sessionEnded) return;
+        attemptChannelFallback(`no nominated ICE candidate pair (${cause}, ICE ${iceState}, ${elapsedMs}ms)`, false, { cause, elapsedMs });
+      },
+    })
+    : null;
+
+  pc.oniceconnectionstatechange = () => {
+    setIceState(pc.iceConnectionState);
+    watchdog?.notify();
+  };
   pc.onconnectionstatechange = () => {
     log(`connection state: ${pc.connectionState}`);
     // 'closed' after our own local hang-up is the expected, already-handled
     // case (sessionEnded is already true by then, so endCallDueToPeerLoss
     // below no-ops).
+    // While the watchdog still owns the INITIAL connection, it decides on
+    // 'failed' (straight to the direct channel, no ICE restart first -- a
+    // restart of a path that never worked once only adds ICE_RESTART_GRACE_MS).
+    if (watchdog?.active && pc.connectionState === 'failed') {
+      watchdog.notify();
+      return;
+    }
     if (pc.connectionState === 'failed') {
       if (disconnectedGraceTimer) { clearTimeout(disconnectedGraceTimer); disconnectedGraceTimer = null; }
       attemptIceRestart('ICE failed');
@@ -689,6 +740,15 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
       } catch {
         return; // connection closed
       }
+      // The call switched to the direct channel while this read was in
+      // flight: the frame belongs to call-channel.js's receive loop now
+      // (both sides switching at the same moment -- each side's watchdog
+      // firing -- makes this the normal case, not a corner case). Hand it
+      // back undecrypted instead of consuming it.
+      if (sessionEnded && channelFallbackAttempted) {
+        unreadFramed(stream, cipher);
+        return;
+      }
       // CADS-webconference-demo#20: readFramed() above is guarded, but
       // decrypt()/decode/dispatch was not -- one malformed or undecryptable
       // signaling frame (or an SDP/ICE candidate the browser itself rejects
@@ -712,6 +772,7 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
           await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
+          watchdog?.start(); // callee: ICE starts here (no-op after the first offer)
           sendSignal(wasm.encodeSignalAnswer(answer.sdp));
         } else if (msg.kind === 'answer') {
           await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
@@ -744,6 +805,7 @@ async function runWebrtcMediaCall(stream, noiseTransport, isCaller, chatStore, p
   if (isCaller) {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    watchdog?.start(); // caller: ICE starts here
     sendSignal(wasm.encodeSignalOffer(offer.sdp));
   }
 

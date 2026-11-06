@@ -1,0 +1,13 @@
+{
+  "name": "cads-webconference-demo",
+  "private": true,
+  "description": "Test tooling only -- the client itself is plain ES modules served as-is.",
+  "scripts": {
+    "test": "node --test test/",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "ws": "8.18.3"
+  }
+}
