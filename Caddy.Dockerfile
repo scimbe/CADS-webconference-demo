@@ -32,6 +32,8 @@ COPY practice-mode.js /srv/practice-mode.js
 COPY chatStore.js /srv/chatStore.js
 COPY request-access.html /srv/request-access.html
 COPY request-access.js /srv/request-access.js
+# Live-Rahmen fuer My Daily Idea (erzeugt in CADS-agent-marketplace apps/mdi, siehe Kopfkommentar der Datei)
+COPY play-frame.html /srv/play-frame.html
 COPY theme.js /srv/theme.js
 COPY theme-daily.css /srv/theme-daily.css
 COPY fonts /srv/fonts

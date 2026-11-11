@@ -62,6 +62,27 @@
 	# /api/whoami call the client already makes right after showing that
 	# screen, see dialer.js's runIdentityScreen) only follows once the app
 	# actually needs to know who you are, not before you've seen anything.
+	# My Daily Idea (apps/mdi, CADS-agent-marketplace): Live-Rahmen. Die App bettet /play-frame.html als iframe ein
+	# (sandbox allow-scripts allow-same-origin -> der Rahmen behaelt DIESEN Ursprung, nicht den der App). So spricht er
+	# /api/play und /pkg/* ohne CORS (gleicher Ursprung); ein opaker Rahmen (Origin "null") bekommt von der Bruecke zu
+	# Recht keine CORS-Antwort. Die globalen Kopfzeilen unten verbieten Einbettung (X-Frame-Options DENY,
+	# frame-ancestors 'none') und Inline-Skripte -> hier ersetzt: frame-ancestors nur die App-Ursprunge (= Default von
+	# PLAY_ALLOWED_ORIGINS); die Skript-CSP (Hash, 'self', wasm-unsafe-eval, connect-src 'self') steht als Meta-CSP in
+	# der Datei. "-X-Frame-Options" schaltet defer ein, die Werte hier gelten also nach den globalen.
+	@play-frame {
+		method GET HEAD
+		path /play-frame.html
+	}
+	handle @play-frame {
+		header {
+			-X-Frame-Options
+			Content-Security-Policy "frame-ancestors https://demos-34a13a96.bunsenbrenner.org https://bunsenbrenner.org; base-uri 'none'"
+			Cache-Control "no-cache"
+		}
+		root * /srv
+		file_server
+	}
+
 	# Account-free games (My Daily Idea): only these two paths skip the login gate. The bridge answers 503 "off" without
 	# the games' own service account; the edge still checks grant, membership and key possession on every join, and
 	# /ws/channel plus every other /api/* stay behind the gate.
