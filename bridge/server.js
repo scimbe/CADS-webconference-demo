@@ -34,6 +34,7 @@ const { execFile } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const { mediaFallbackDecision } = require('./media-fallback.js');
+const { verifyRelayGrant } = require('./relay-grant.js');
 
 // CADS-webconference-demo#30: these three are this bridge's highest-value
 // secrets (the operator key can mint grants for any channel; the OIDC
@@ -975,6 +976,22 @@ let playMinting = 0;                                         // grant processes 
 // the credential names the game not the player, and the budget keeps games far below the quota the calls need.
 const PLAY_TURN_TTL_SECS = 15 * 60;
 const playTurnLimited = makeRateLimiter(Number(process.env.PLAY_TURN_PER_HOUR || 200), 60 * 60_000);
+// The file tool of My Daily Idea ("Datei rueber", purpose "file") gets the relay only for paying accounts: the wrapper
+// (CADS-DEMO-wrapper POST /api/duell/relay-grant) checks the credit and signs a grant bound to this channel, sent here as
+// the header X-Relay-Grant on /api/play/ice (relay-grant.js). Without a valid grant a file channel gets STUN only (fail
+// closed); the other side may still reach a paying partner over the partner's relay. Game channels are unchanged.
+// PLAY_FILE_RELAY: "grant" (default), "open" (relay for every file channel, the server side of DailyFlags.toolRelay=true),
+// "off" (never). DUELL_RELAY_GRANT_SECRET (or _FILE): shared with the wrapper; missing means no file relay at all.
+const RELAY_GRANT_SECRET = readSecret('DUELL_RELAY_GRANT_SECRET');
+const PLAY_FILE_RELAY = ['grant', 'open', 'off'].includes(process.env.PLAY_FILE_RELAY) ? process.env.PLAY_FILE_RELAY : 'grant';
+const fileTurnLimited = makeRateLimiter(Number(process.env.PLAY_FILE_TURN_PER_HOUR || 30), 60 * 60_000);   // per grant subject
+const PLAY_PURPOSES = ['game', 'file'];
+function fileRelay(req, channel) {
+  if (PLAY_FILE_RELAY === 'open') return true;
+  if (PLAY_FILE_RELAY === 'off') return false;
+  const v = verifyRelayGrant(req.headers['x-relay-grant'], RELAY_GRANT_SECRET, { channel });
+  return v.ok && !fileTurnLimited(v.sub);
+}
 
 // Over budget for the moment: the client may try again after the given seconds (table.js backs off on busy/rate).
 function busy(res, status, code, secs) {
@@ -987,7 +1004,7 @@ function playCors(req, res) {
     res.setHeader('Access-Control-Allow-Origin', o);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'content-type');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type, x-relay-grant');
     res.setHeader('Access-Control-Max-Age', '600');
   }
 }
@@ -1024,18 +1041,21 @@ async function handlePlay(req, res, url) {
   const opening = req.method === 'POST' && (url.pathname === '/api/play/open' || url.pathname === '/api/play/join');
   if (polling ? playPollLimited(url.searchParams.get('token') || '') : opening && playRateLimited('play')) return busy(res, 429, 'rate', 20);
   if (req.method === 'POST' && url.pathname === '/api/play/open') {
-    const { holderPub, noisePub } = await readBody(req);
+    const { holderPub, noisePub, purpose } = await readBody(req);
     if (!HEX64.test(holderPub || '') || !HEX64.test(noisePub || '')) return json(res, 400, { error: 'bad keys' });
+    if (purpose !== undefined && !PLAY_PURPOSES.includes(purpose)) return json(res, 400, { error: 'bad purpose' });
     if (playInvites.size >= PLAY_MAX_OPEN) { sweepPlay(); if (playInvites.size >= PLAY_MAX_OPEN) return busy(res, 503, 'busy', 30); }
     const token = crypto.randomBytes(16).toString('base64url');
-    playInvites.set(token, { a: { holderPub: holderPub.toLowerCase(), noisePub: noisePub.toLowerCase() }, createdAt: Date.now(), used: false, channel: null });
+    playInvites.set(token, { a: { holderPub: holderPub.toLowerCase(), noisePub: noisePub.toLowerCase() }, createdAt: Date.now(), used: false, channel: null, purpose: purpose || 'game' });
     return json(res, 200, { token, ttl: PLAY_INVITE_TTL_MS / 1000 });
   }
   if (req.method === 'POST' && url.pathname === '/api/play/join') {
-    const { token, holderPub, noisePub } = await readBody(req);
+    const { token, holderPub, noisePub, purpose } = await readBody(req);
     if (!TOKEN_RE.test(token || '') || !HEX64.test(holderPub || '') || !HEX64.test(noisePub || '')) return json(res, 400, { error: 'bad request' });
     const inv = playInvites.get(token);
     if (!inv || inv.used || Date.now() - inv.createdAt > PLAY_INVITE_TTL_MS) return json(res, 404, { error: 'invite gone', code: 'gone' });
+    // the inviter set the purpose; a joiner that names another one opened the wrong kind of link (a game link in the file tool)
+    if (purpose !== undefined && purpose !== inv.purpose) return json(res, 409, { error: 'other purpose', code: 'purpose' });
     if (inv.a.holderPub === holderPub.toLowerCase()) return json(res, 409, { error: 'same device', code: 'self' });
     if (playChannels.size >= PLAY_MAX_GAMES || playMinting >= PLAY_MAX_MINTING) return busy(res, 503, 'busy', 3);
     inv.used = true;                                   // burnt before the slow part, so a second visitor cannot race in
@@ -1047,7 +1067,7 @@ async function handlePlay(req, res, url) {
     const call = { channel: minted.channel, operatorPub: minted.operatorPub, callerEmail: null, calleeEmail: null, grantForCaller: minted.grantA, grantForCallee: minted.grantB,
       transport: 'webrtc', kind: 'play', createdAt: Date.now(), callerAttest: null, calleeAttest: null, status: { state: 'ringing' } };
     pendingCalls.set(call.channel, call);
-    playChannels.set(call.channel, { createdAt: Date.now(), registered: false, token: token, holders: { caller: inv.a.holderPub, callee: holderPub.toLowerCase() }, attested: {}, ice: {} });
+    playChannels.set(call.channel, { createdAt: Date.now(), registered: false, token: token, holders: { caller: inv.a.holderPub, callee: holderPub.toLowerCase() }, attested: {}, ice: {}, purpose: inv.purpose || 'game' });
     inv.channel = call.channel;
     return json(res, 200, { channel: call.channel, grant: call.grantForCallee, ws: PLAY_WS_URL, role: 'callee' });
   }
@@ -1083,11 +1103,12 @@ async function handlePlay(req, res, url) {
     g1.ice[role] = true;
     // Players see each other's address (terms). The relay is used only if no direct pair connects.
     const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
-    if (TURN_SHARED_SECRET && !playTurnLimited('turn')) {
-      const username = `${Math.floor(Date.now() / 1000) + PLAY_TURN_TTL_SECS}:play-${channel.slice(0, 16)}`;
+    const file = g1.purpose === 'file';
+    if (TURN_SHARED_SECRET && (!file || fileRelay(req, channel)) && !playTurnLimited('turn')) {
+      const username = `${Math.floor(Date.now() / 1000) + PLAY_TURN_TTL_SECS}:${file ? 'file' : 'play'}-${channel.slice(0, 16)}`;
       iceServers.push({ urls: TURN_URLS, username, credential: crypto.createHmac('sha1', TURN_SHARED_SECRET).update(username).digest('base64') });
     }
-    return json(res, 200, { iceServers });
+    return json(res, 200, file ? { iceServers, relay: iceServers.length > 1 } : { iceServers });
   }
   if (req.method === 'POST' && url.pathname === '/api/play/done') {
     const { channel, token } = await readBody(req);

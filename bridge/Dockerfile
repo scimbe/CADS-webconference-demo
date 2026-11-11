@@ -7,6 +7,7 @@ FROM node:20-bookworm-slim
 WORKDIR /srv
 COPY server.js ./
 COPY media-fallback.js ./
+COPY relay-grant.js ./
 COPY --from=grant-bin ct-video-call-grant /usr/local/bin/ct-video-call-grant
 RUN chmod +x /usr/local/bin/ct-video-call-grant
 EXPOSE 8791

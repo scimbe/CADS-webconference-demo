@@ -138,6 +138,13 @@ services:
       - PLAY_SETUPS_PER_MIN=${PLAY_SETUPS_PER_MIN:-60}
       - PLAY_MAX_MINTING=${PLAY_MAX_MINTING:-2}
       - PLAY_TURN_PER_HOUR=${PLAY_TURN_PER_HOUR:-200}
+      # File tool ("Datei rueber"): TURN only with a relay grant from the wrapper (paying accounts). The secret is the
+      # same value as the wrapper's DUELL_RELAY_GRANT_SECRET (at least 32 characters); empty means STUN only for files.
+      # PLAY_FILE_RELAY: grant (default) | open | off. PLAY_FILE_TURN_PER_HOUR: relay logins per grant subject and hour.
+      - DUELL_RELAY_GRANT_SECRET=${DUELL_RELAY_GRANT_SECRET:-}
+      - DUELL_RELAY_GRANT_SECRET_FILE=${DUELL_RELAY_GRANT_SECRET_FILE:-}
+      - PLAY_FILE_RELAY=${PLAY_FILE_RELAY:-grant}
+      - PLAY_FILE_TURN_PER_HOUR=${PLAY_FILE_TURN_PER_HOUR:-30}
     volumes:
       - webconference_demo_access_requests:/srv/data
     expose:
