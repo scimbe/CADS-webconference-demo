@@ -12,7 +12,7 @@
 # Keep CT_AGENT_REF equal to the commit the tag points to, and in sync with build-wasm.sh and both compose files.
 FROM debian:bookworm-slim AS fetch
 ARG CT_AGENT_VERSION=v0.8.0
-ARG CT_AGENT_REF=09ac2eefb9500ee0122d7afb7ff7321bd8b4c3a6
+ARG CT_AGENT_REF=92f87dfd259eb283f1de26399d5255d43aadf0a1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
