@@ -1736,6 +1736,21 @@ const server = http.createServer(async (req, res) => {
       if (!code || !PAIRING_CODE_RE.test(code)) return json(res, 400, { error: 'invalid pairing code' });
       if (!tempPubKeyJwk || typeof tempPubKeyJwk !== 'object') return json(res, 400, { error: 'tempPubKeyJwk required' });
       if (!identityAllowed(req, email)) return json(res, 403, { error: 'email does not match your verified identity', code: 'identity_mismatch' });
+      // CADS-webconference-demo#173: this used to overwrite any existing
+      // offer for the same code unconditionally -- the 8-char code space
+      // (~37 bits, per PAIRING_CODE_RE's own comment) makes a genuine
+      // collision within the 5-minute window astronomically unlikely, but
+      // nothing stopped a second, different tempPubKeyJwk from landing for
+      // a code already in use (a race, or a deliberate second offer) and
+      // silently replacing it -- the delivering (already-paired) device
+      // would then encrypt the real identity to whichever key won the
+      // race, with no way to tell. Refuse a second DIFFERENT key for a
+      // still-unexpired code; the SAME key resubmitting (e.g. a retried
+      // request) is allowed and just refreshes offeredAt.
+      const existingOffer = pairingOffers.get(code);
+      if (existingOffer && (existingOffer.tempPubKeyJwk?.x !== tempPubKeyJwk.x || existingOffer.tempPubKeyJwk?.y !== tempPubKeyJwk.y)) {
+        return json(res, 409, { error: 'this pairing code is already in use' });
+      }
       pairingOffers.set(code, { email: email.toLowerCase(), tempPubKeyJwk, offeredAt: Date.now(), result: null });
       return json(res, 200, { ok: true });
     }
