@@ -78,6 +78,14 @@ services:
       # ms without a nominated ICE pair before a signed-in call switches to the direct channel (ice-watchdog.js)
       - WEBCONFERENCE_ICE_FALLBACK_TIMEOUT_MS=${WEBCONFERENCE_ICE_FALLBACK_TIMEOUT_MS:-10000}
       - WEBCONFERENCE_ACCESS_REQUESTS_FILE=/srv/data/access-requests.json
+      # CADS-webconference-demo#177: this was missing here (though already set
+      # in compose.webconference-demo.selfservice.yml) -- server.js defaults
+      # WEBCONFERENCE_SYNC_STORE_FILE to './sync-store.json', relative to the
+      # bridge's WORKDIR (/srv), which is NOT inside the mounted
+      # webconference_demo_access_requests volume below. Every cross-device
+      # sync message was silently lost on every container recreate
+      # (start-webconference-on-boot.sh's own force-recreate-on-every-boot).
+      - WEBCONFERENCE_SYNC_STORE_FILE=/srv/data/sync-store.json
       - CT_AGENT_CP_URL=${WEBCONFERENCE_AGENT_CP_URL:?control-plane URL for onboarding}
       - CT_AGENT_HOSTNAME=webconference.bunsenbrenner.org
       - WEBCONFERENCE_TUNNEL_ID=${WEBCONFERENCE_TUNNEL_ID:-}
