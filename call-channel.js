@@ -357,6 +357,16 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   // which side reconnects first not matter.
   const CHANNEL_RECONNECT_GRACE_MS = 20000; // matches ICE_RESTART_GRACE_MS
   let channelReconnectAttempted = false;
+  // CADS-webconference-demo#164: hoisted above this receive-loop IIFE (it used
+  // to be declared only after `await getLocalMedia()`, well below). The IIFE
+  // starts running immediately, concurrently with that await -- if the call
+  // ends (TAG_BYE) or a bad frame arrives while getLocalMedia() is still
+  // pending (e.g. the camera permission prompt), its teardown referenced
+  // these two `let`s before the line that declared them had ever executed,
+  // throwing a TDZ ReferenceError that killed this whole async IIFE before
+  // ws.close()/setActiveSession(null)/returnToDialerAfterHangup() could run.
+  let recorder = null;
+  let activeMediaBackpressureInterval = null; // CADS-webconference-demo#70 -- cleared in onHangup below
   (async () => {
     while (true) {
       let cipher;
@@ -577,8 +587,6 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
   // a true no-op session, registered so camera.js/video-filters.js resolve
   // to a real (inert) session during a channel call instead of finding none.
   setActiveSession(createChannelCallSession(media));
-  let recorder = null;
-  let activeMediaBackpressureInterval = null; // CADS-webconference-demo#70 -- cleared in onHangup below
   if (media.kind === 'media') {
     localVideo.srcObject = media.stream;
     localEmpty.style.display = 'none';
