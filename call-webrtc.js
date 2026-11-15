@@ -68,10 +68,10 @@
 // attachment and this construction point) window, never a hard dependency
 // on the timing being exactly right.
 //
-// setupControls/returnToDialerAfterHangup/setActiveCallBye stay imported
-// back from app.js as a stopgap (same pattern call-channel.js's cycle 15
-// already established) -- they're shared plumbing between both transports,
-// genuinely owned by app.js, not something this cycle's scope redesigns.
+// CADS-webconference-demo#176: setupControls/returnToDialerAfterHangup/
+// setActiveCallBye now live in call-controls.js -- shared plumbing between
+// both transports, previously imported back from app.js as a circular-
+// import stopgap (app.js imports runWebrtcMediaCall from this file).
 // runChannelMediaCall is imported directly from call-channel.js (not
 // through app.js) for the fallback hand-off -- a real, permanent
 // cross-module dependency between the two transport siblings, not a
@@ -90,7 +90,7 @@ import { setupChatChannel } from './chat-glue.js';
 import { getLocalMedia } from './camera.js';
 import { runChannelMediaCall, establishChannelSession } from './call-channel.js';
 import { createWebrtcCallSession, setActiveSession } from './call-session.js';
-import { setupControls, returnToDialerAfterHangup, setActiveCallBye } from './app.js';
+import { setupControls, returnToDialerAfterHangup, setActiveCallBye } from './call-controls.js';
 
 // CADS-webconference-demo#18/#133 follow-up: short-lived TURN credentials from
 // the bridge's /api/ice-config (gate-authenticated, HMAC-signed, ~10min TTL --

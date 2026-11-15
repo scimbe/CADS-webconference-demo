@@ -26,16 +26,15 @@
 // a subtle behavior change for a purely cosmetic win, so it stays
 // duplicated, same "prefer duplication over risk" call as before.
 //
-// CADS-webconference-demo#91 (temporary, per the consolidation plan): same
-// circular-import stopgap camera.js/video-filters.js already use, for
-// setupControls/returnToDialerAfterHangup (shared plumbing still owned by
-// app.js -- see its own header comment there) and activeCallBye (shared
-// mutable state between this transport and the webrtc one; setActiveCallBye
-// is a real setter, not a read-only stopgap, since this module genuinely
-// reassigns it, not just reads it -- see the cycle 9 lesson on why that
-// needs a setter rather than a plain import). To be repointed if
-// setupControls/returnToDialerAfterHangup/activeCallBye ever move out of
-// app.js.
+// CADS-webconference-demo#176: setupControls/returnToDialerAfterHangup/
+// setActiveCallBye live in call-controls.js, shared plumbing between this
+// transport and the webrtc one (setActiveCallBye is a real setter, not a
+// read-only import, since this module genuinely reassigns activeCallBye,
+// not just reads it -- see the cycle 9 lesson on why that needs a setter).
+// Previously imported back from app.js (a real circular import -- app.js
+// imports runChannelMediaCall from this file) as a temporary stopgap;
+// importing from call-controls.js instead means this module no longer
+// depends on app.js at all.
 //
 // CADS-webconference-demo#91 (cycle 17): constructs its own
 // createChannelCallSession(media) and registers it via setActiveSession,
@@ -65,7 +64,7 @@ import {
 import { createAckWaiter, flushOutbox } from './chat-glue.js';
 import { getLocalMedia } from './camera.js';
 import { createChannelCallSession, setActiveSession } from './call-session.js';
-import { setupControls, returnToDialerAfterHangup, setActiveCallBye } from './app.js';
+import { setupControls, returnToDialerAfterHangup, setActiveCallBye } from './call-controls.js';
 
 // Live-reported (call-transport-shared.js's joinChannel own comment has
 // the full root-cause detail): the Noise handshake's own readFramed calls

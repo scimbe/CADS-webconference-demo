@@ -25,6 +25,7 @@ COPY dialer.js /srv/dialer.js
 COPY camera.js /srv/camera.js
 COPY video-filters.js /srv/video-filters.js
 COPY call-session.js /srv/call-session.js
+COPY call-controls.js /srv/call-controls.js
 COPY call-channel.js /srv/call-channel.js
 COPY call-webrtc.js /srv/call-webrtc.js
 COPY ice-watchdog.js /srv/ice-watchdog.js
