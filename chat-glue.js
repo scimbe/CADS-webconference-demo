@@ -19,6 +19,7 @@ import {
 } from './ui-dom.js';
 import { currentConversationEmail, appendConvMessage, markConvMessageDelivered } from './messenger-ui.js';
 import { api, refreshContacts, pollCallStatus, blockedEmails } from './contacts.js';
+import { isValidSeq } from './chatStore.js';
 
 // CADS-webconference-demo#21: markDelivered() used to run immediately after
 // send(), with nothing confirming the peer actually got the frame -- a
@@ -276,6 +277,15 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
         // regardless of how the peer chunks the transfer: resident memory
         // is capped at declaredSize (one allocation, not N), and there's no
         // spread left to blow up.
+        // CADS-webconference-demo#167: header.seq is as peer-controlled as
+        // size/name/mimeType above -- refuse the whole transfer up front
+        // rather than let a bad seq reach chatStore.record() (an IndexedDB
+        // key component) or a later rendered data-seq attribute selector.
+        if (!isValidSeq(header.seq)) {
+          log(`incoming file from ${peerEmail} has an invalid seq (${header.seq}) -- refusing to buffer it`);
+          incomingFile = null;
+          continue;
+        }
         incomingFile = { seq: header.seq, name: header.name, mimeType: header.mimeType, size: declaredSize, buf: new Uint8Array(declaredSize), received: 0 };
         deadline = Math.max(deadline, Date.now() + fileTransferWindowMs(declaredSize));
         continue;
@@ -333,7 +343,12 @@ async function backgroundChatSession(stream, noiseTransport, isCaller, chatStore
         continue;
       }
       const { seq, text } = parsed;
-      if (chatStore && peerEmail && seq != null && text != null) {
+      // CADS-webconference-demo#167: seq is peer-controlled -- `!= null` let
+      // through non-integer/negative/unsafe values that poison the
+      // numeric sync cursor and, worse, a string with quote/bracket
+      // characters that makes messenger-ui.js's querySelector throw on
+      // every later render of this conversation.
+      if (chatStore && peerEmail && isValidSeq(seq) && typeof text === 'string') {
         // CADS-webconference-demo#43 (finding 2): used to send the ack
         // BEFORE persisting -- if record() ever threw, the sender would
         // already have its ack and mark the message delivered even though

@@ -63,6 +63,7 @@ import {
   remoteVideo, remoteEmpty, localVideo, localEmpty, log, setIceState,
 } from './ui-dom.js';
 import { createAckWaiter, flushOutbox } from './chat-glue.js';
+import { isValidSeq } from './chatStore.js';
 import { getLocalMedia } from './camera.js';
 import { createChannelCallSession, setActiveSession } from './call-session.js';
 import { setupControls, returnToDialerAfterHangup, setActiveCallBye } from './app.js';
@@ -530,7 +531,12 @@ async function runChannelMediaCall(byteStream, noiseTransport, isCaller, chatSto
             } else if (parsed) {
               const { seq, text } = parsed;
               addChatMessage(text, 'peer');
-              if (chatStore && peerEmail && seq != null) {
+              // CADS-webconference-demo#167: seq is peer-controlled -- see
+              // chat-glue.js's matching backgroundChatSession comment for why
+              // `!= null` wasn't enough (poisons the sync cursor, and a
+              // string with quote/bracket characters crashes messenger-ui.js's
+              // querySelector on every later render of this conversation).
+              if (chatStore && peerEmail && isValidSeq(seq)) {
                 // CADS-webconference-demo#43 (finding 2) -- see
                 // backgroundChatSession's matching comment. Persist before
                 // acking, not after (or not at all, as before).
