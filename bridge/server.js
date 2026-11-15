@@ -914,6 +914,24 @@ function identityAllowed(req, claimedEmail) {
   return verified === (claimedEmail || '').trim().toLowerCase();
 }
 
+// CADS-webconference-demo#172: none of /api/attest, /api/cancel,
+// /api/decline, or /api/call-status checked that the gate-verified caller
+// is actually a participant on the channel they're acting on or polling --
+// any gate-verified caller could act on (or read the status of) ANY call
+// by guessing/observing its channel id, not just one of their own. Same
+// fail-open default as identityAllowed above when there's no gate-verified
+// identity to check against at all (ungated deployment, or the free-text/
+// no-login identity path) -- returns null in that case rather than
+// restricting anything. Otherwise returns the caller's actual role on
+// this call ('caller'/'callee'), or 'none' if they're neither.
+function participantRole(req, call) {
+  const verified = gateVerifiedEmail(req);
+  if (!verified) return null;
+  if (verified === (call.callerEmail || '').toLowerCase()) return 'caller';
+  if (verified === (call.calleeEmail || '').toLowerCase()) return 'callee';
+  return 'none';
+}
+
 // ---------- Play without an account (My Daily Idea live games) ----------
 // Two browsers meet in a ct-agent channel through a one-time invite token carried in a shared link (WhatsApp and the
 // like). No email, no login: the token is the only thing that ties the pair together, it is burnt on first use, and
@@ -1548,6 +1566,12 @@ const server = http.createServer(async (req, res) => {
       const { channel, role, holderPub, noisePub, attestation } = await readBody(req);
       const call = pendingCalls.get(channel);
       if (!call) return json(res, 404, { error: 'no such pending call' });
+      // CADS-webconference-demo#172: play channels share this map but are
+      // registered through their own control-plane account (registerPlay,
+      // /api/play/attest) -- never let the two credential domains mix.
+      if (call.kind === 'play') return json(res, 404, { error: 'no such pending call' });
+      const actualRole = participantRole(req, call);
+      if (actualRole && actualRole !== role) return json(res, 403, { error: 'not a participant on this call in that role' });
       const rec = { holder: holderPub, noise_pubkey: noisePub, noise_attestation: attestation };
       if (role === 'caller') call.callerAttest = rec;
       else if (role === 'callee') call.calleeAttest = rec;
@@ -1566,6 +1590,11 @@ const server = http.createServer(async (req, res) => {
       const { channel } = await readBody(req);
       const call = pendingCalls.get(channel);
       if (!call) return json(res, 404, { error: 'no such pending call' });
+      if (call.kind === 'play') return json(res, 404, { error: 'no such pending call' });
+      // CADS-webconference-demo#172: only the caller can cancel their own
+      // call -- see participantRole's own comment.
+      const cancelRole = participantRole(req, call);
+      if (cancelRole && cancelRole !== 'caller') return json(res, 403, { error: 'only the caller can cancel this call' });
       // #69-follow: same clobber-guard as /api/decline below -- see that
       // comment for the full race. A stale cancel arriving after the call
       // already registered must not silently revert a genuine connection.
@@ -1587,6 +1616,11 @@ const server = http.createServer(async (req, res) => {
       const { channel } = await readBody(req);
       const call = pendingCalls.get(channel);
       if (!call) return json(res, 404, { error: 'no such pending call' });
+      if (call.kind === 'play') return json(res, 404, { error: 'no such pending call' });
+      // CADS-webconference-demo#172: only the callee can decline their own
+      // call -- see participantRole's own comment.
+      const declineRole = participantRole(req, call);
+      if (declineRole && declineRole !== 'callee') return json(res, 403, { error: 'only the callee can decline this call' });
       // #69-follow: call.status is a single value keyed only by channel, but
       // a callee can have more than one tab/window open under the same
       // identity, each independently running its own 45s ring-timeout /
@@ -1614,6 +1648,10 @@ const server = http.createServer(async (req, res) => {
       const channel = url.searchParams.get('channel');
       const call = pendingCalls.get(channel);
       if (!call) return json(res, 404, { error: 'no such pending call' });
+      if (call.kind === 'play') return json(res, 404, { error: 'no such pending call' });
+      // CADS-webconference-demo#172: either participant may poll status,
+      // but nobody else -- see participantRole's own comment.
+      if (participantRole(req, call) === 'none') return json(res, 403, { error: 'not a participant on this call' });
       return json(res, 200, { status: call.status });
     }
 
