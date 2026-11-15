@@ -30,9 +30,18 @@ function syncCursorKeyFor(email) {
 function loadSyncCursor(email) {
   try {
     const parsed = JSON.parse(localStorage.getItem(syncCursorKeyFor(email)) || '{}');
-    return { pushedSeq: parsed.pushedSeq || {}, pulledRevision: parsed.pulledRevision || 0 };
+    // CADS-webconference-demo#166: this used to be keyed by Lamport seq
+    // (pushedSeq), which isn't insertion order -- a message queued offline
+    // and delivered after newer rows were already pushed, or a concurrent
+    // peer message with a lower seq, fell below the cursor and was never
+    // pushed. Now keyed by the store's own auto-increment id instead (see
+    // chatStore.js's rowsSince). A pre-existing pushedSeq cursor from
+    // before this fix is simply dropped rather than misread as pushedId --
+    // the one-time cost is re-pushing already-synced history, which the
+    // bridge already dedupes by (conversation, seq, from).
+    return { pushedId: parsed.pushedId || {}, pulledRevision: parsed.pulledRevision || 0 };
   } catch (_) {
-    return { pushedSeq: {}, pulledRevision: 0 };
+    return { pushedId: {}, pulledRevision: 0 };
   }
 }
 function saveSyncCursor(email, cursor) {
@@ -116,19 +125,21 @@ async function doSyncNow() {
     return true;
   }
   for (const peerEmail of myContacts.all()) {
-    const sinceSeq = cursor.pushedSeq[peerEmail] || 0;
-    const rows = await dialerChatStore.rowsSince(peerEmail, sinceSeq);
+    const sinceId = cursor.pushedId[peerEmail] || 0;
+    const rows = await dialerChatStore.rowsSince(peerEmail, sinceId);
     if (!rows.length) continue;
     let batch = [];
     let batchBytes = 0;
-    let pushedThrough = sinceSeq;
+    let batchMaxId = 0;
+    let pushedThrough = sinceId;
     const flushBatch = async () => {
       if (!batch.length) return true;
       const resp = await api('/sync/push', { body: { email: myEmail, messages: batch } });
       if (resp.error) return false;
-      pushedThrough = Math.max(pushedThrough, ...batch.map((m) => m.seq));
+      pushedThrough = Math.max(pushedThrough, batchMaxId);
       batch = [];
       batchBytes = 0;
+      batchMaxId = 0;
       return true;
     };
     let stopped = false;
@@ -147,7 +158,7 @@ async function doSyncNow() {
       if (msgBytes > SYNC_PUSH_BATCH_BUDGET_BYTES) {
         if (!(await flushBatch())) { stopped = true; break; }
         if (!(await pushChunkedRow(r))) { stopped = true; break; }
-        pushedThrough = Math.max(pushedThrough, r.seq);
+        pushedThrough = Math.max(pushedThrough, r.id);
         continue;
       }
       if (batch.length && batchBytes + msgBytes > SYNC_PUSH_BATCH_BUDGET_BYTES) {
@@ -155,9 +166,10 @@ async function doSyncNow() {
       }
       batch.push(msg);
       batchBytes += msgBytes;
+      batchMaxId = Math.max(batchMaxId, r.id);
     }
     if (!stopped) await flushBatch();
-    cursor.pushedSeq[peerEmail] = pushedThrough;
+    cursor.pushedId[peerEmail] = pushedThrough;
     // Robustness audit finding (proactive review, not yet live-reproduced
     // -- needs a real IndexedDB failure, e.g. under real storage pressure,
     // mid-loop): saveSyncCursor used to only ever be called once, at the
