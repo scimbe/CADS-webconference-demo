@@ -729,6 +729,51 @@ async function cpFetchForm(path, fields) {
   return { status, text: await resp.text().catch(() => '') };
 }
 
+// CADS-webconference-demo#169: five routes each re-implemented this same
+// check two different ways (gateVerifiedEmail(req) || '' here now, vs the
+// equivalent-in-practice-but-drift-prone raw
+// (req.headers['x-gate-email'] || '').trim().toLowerCase() some of them
+// used before this) and two different policies -- fail-closed (503) for
+// the two GRANT-capability routes (#76's own reasoning: granting tunnel
+// access is worth requiring real admin config for), fail-open on an empty
+// ADMIN_EMAILS for the three read/revoke ones (kept permissive for the
+// same demo-ergonomics reason #10's own fix originally allowed). One place
+// to change either policy now; sends the response itself and returns null
+// on failure so a call site's own `if (!requireAdmin(...)) return;` reads
+// the same as every other early-return guard in this file.
+function requireAdmin(req, res, { failClosed = false } = {}) {
+  const caller = gateVerifiedEmail(req) || '';
+  if (ADMIN_EMAILS.size === 0) {
+    if (failClosed) {
+      json(res, 503, { error: 'admin not configured (WEBCONFERENCE_ADMIN_EMAILS unset) -- cannot grant tunnel access without a configured admin' });
+      return null;
+    }
+    return caller;
+  }
+  if (!ADMIN_EMAILS.has(caller)) {
+    json(res, 403, { error: 'admin only' });
+    return null;
+  }
+  return caller;
+}
+
+// CADS-webconference-demo#169: /api/allowlist/add and
+// /api/access-requests/approve duplicated this exact cpFetchForm call and
+// its 502 mapping; /api/allowlist/remove duplicated the mapping a third
+// time. CADS-webconference-demo#134 follow-up's own fix (surfacing
+// cpFetchForm's `text` diagnosis instead of a bare status code) now only
+// has to exist once.
+function mapAllowlistError(resp) {
+  if (resp.status < 400) return null;
+  return { error: `control plane -> ${resp.status}${resp.text ? `: ${resp.text}` : ''}` };
+}
+async function allowlistAdd(email) {
+  return mapAllowlistError(await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email }));
+}
+async function allowlistRemove(email) {
+  return mapAllowlistError(await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist/${encodeURIComponent(email)}/remove`, {}));
+}
+
 // Attempts real control-plane registration for a pending call once both
 // sides' attestations are in. Never fabricates success: reports the exact
 // failure (almost always 401 today, see header comment) rather than
@@ -1292,31 +1337,13 @@ const server = http.createServer(async (req, res) => {
       if (!TUNNEL_ID) return json(res, 503, { error: 'WEBCONFERENCE_TUNNEL_ID not configured' });
       const { email } = await readBody(req);
       if (!email) return json(res, 400, { error: 'email required' });
-      const caller = gateVerifiedEmail(req) || '';
-      // CADS-webconference-demo#76: this GRANTS tunnel access to an
-      // arbitrary account -- the ADMIN_EMAILS.size>0 short-circuit that
-      // every admin guard here uses meant an unconfigured admin list made
-      // this a no-op check, open to any gate-admitted caller, reopening
-      // exactly the #10 escalation this comment block already describes.
-      // Fails closed instead when unconfigured, unlike the read/revoke
-      // endpoints below (GET access-requests, decline, allowlist/remove),
-      // which stay permissive on an empty ADMIN_EMAILS for the same demo-
-      // ergonomics reason #10's own fix originally allowed -- granting
-      // access is the one action worth requiring real admin config for.
-      if (ADMIN_EMAILS.size === 0) {
-        return json(res, 503, { error: 'admin not configured (WEBCONFERENCE_ADMIN_EMAILS unset) -- cannot grant tunnel access without a configured admin' });
-      }
-      if (!ADMIN_EMAILS.has(caller)) {
-        return json(res, 403, { error: 'admin only' });
-      }
-      const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email });
-      // CADS-webconference-demo#134 follow-up hardening: used to discard cpFetchForm's
-      // own `text` field, surfacing only a bare status code -- exactly the difference
-      // between "control plane -> 401" (useless for anyone debugging this) and
-      // cpFetchForm's actual diagnosis ("CT_PORTAL_SESSION_COOKIE not configured" or
-      // "...is likely expired or invalid", live-hit while investigating CADS-Tunnel#525).
-      // That detail was already computed, just never reached the caller.
-      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}${resp.text ? `: ${resp.text}` : ''}` });
+      // CADS-webconference-demo#76/#169: this GRANTS tunnel access to an
+      // arbitrary account, so it fails closed on an unconfigured admin list
+      // instead of the read/revoke routes' own permissive-when-unconfigured
+      // policy -- see requireAdmin's own comment.
+      if (!requireAdmin(req, res, { failClosed: true })) return;
+      const err = await allowlistAdd(email);
+      if (err) return json(res, 502, err);
       return json(res, 200, { ok: true });
     }
     // Contact requests: "I added you" shows up in the OTHER person's
@@ -1375,22 +1402,13 @@ const server = http.createServer(async (req, res) => {
       if (!TUNNEL_ID) return json(res, 503, { error: 'WEBCONFERENCE_TUNNEL_ID not configured' });
       const { email } = await readBody(req);
       if (!email) return json(res, 400, { error: 'email required' });
-      // CADS-webconference-demo#9/#10: same fix as /api/is-admin (#46) and
-      // approve/decline (#41) -- was checking the client-supplied
+      // CADS-webconference-demo#9/#10/#169: same fix as /api/is-admin (#46)
+      // and approve/decline (#41) -- was checking the client-supplied
       // callerEmail body field, letting any gate-admitted non-admin spoof
       // it to a real admin's address and revoke anyone's access.
-      const caller = gateVerifiedEmail(req) || '';
-      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has(caller)) {
-        return json(res, 403, { error: 'admin only' });
-      }
-      const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist/${encodeURIComponent(email)}/remove`, {});
-      // CADS-webconference-demo#134 follow-up hardening: used to discard cpFetchForm's
-      // own `text` field, surfacing only a bare status code -- exactly the difference
-      // between "control plane -> 401" (useless for anyone debugging this) and
-      // cpFetchForm's actual diagnosis ("CT_PORTAL_SESSION_COOKIE not configured" or
-      // "...is likely expired or invalid", live-hit while investigating CADS-Tunnel#525).
-      // That detail was already computed, just never reached the caller.
-      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}${resp.text ? `: ${resp.text}` : ''}` });
+      if (!requireAdmin(req, res)) return;
+      const err = await allowlistRemove(email);
+      if (err) return json(res, 502, err);
       return json(res, 200, { ok: true });
     }
 
@@ -1432,10 +1450,7 @@ const server = http.createServer(async (req, res) => {
       // X-Gate-Email / ADMIN_EMAILS check as approve/decline, so the
       // "admin-only" claim is actually true at the server, not just in
       // the client.
-      const caller = (req.headers['x-gate-email'] || '').trim().toLowerCase();
-      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has(caller)) {
-        return json(res, 403, { error: 'admin only' });
-      }
+      if (!requireAdmin(req, res)) return;
       return json(res, 200, { requests: [...accessRequests.values()].sort((a, b) => a.createdAt - b.createdAt) });
     }
     if (req.method === 'POST' && url.pathname === '/api/access-requests/approve') {
@@ -1450,26 +1465,13 @@ const server = http.createServer(async (req, res) => {
       // gate-verified signal /api/whoami and (#46) /api/is-admin already
       // trust -- never client-supplied, set by Caddy's forward_auth only
       // after a real verified session.
-      const caller = (req.headers['x-gate-email'] || '').trim().toLowerCase();
-      // CADS-webconference-demo#76: same GRANT-capability reasoning as
+      // CADS-webconference-demo#76/#169: same GRANT-capability reasoning as
       // allowlist/add's matching comment -- this also adds an arbitrary
       // account to the tunnel's login allow-list, so it fails closed on an
-      // unconfigured admin list instead of the size>0 short-circuit making
-      // the check a no-op.
-      if (ADMIN_EMAILS.size === 0) {
-        return json(res, 503, { error: 'admin not configured (WEBCONFERENCE_ADMIN_EMAILS unset) -- cannot grant tunnel access without a configured admin' });
-      }
-      if (!ADMIN_EMAILS.has(caller)) {
-        return json(res, 403, { error: 'admin only' });
-      }
-      const resp = await cpFetchForm(`/portal/tunnels/${TUNNEL_ID}/login-allowlist`, { email });
-      // CADS-webconference-demo#134 follow-up hardening: used to discard cpFetchForm's
-      // own `text` field, surfacing only a bare status code -- exactly the difference
-      // between "control plane -> 401" (useless for anyone debugging this) and
-      // cpFetchForm's actual diagnosis ("CT_PORTAL_SESSION_COOKIE not configured" or
-      // "...is likely expired or invalid", live-hit while investigating CADS-Tunnel#525).
-      // That detail was already computed, just never reached the caller.
-      if (resp.status >= 400) return json(res, 502, { error: `control plane -> ${resp.status}${resp.text ? `: ${resp.text}` : ''}` });
+      // unconfigured admin list -- see requireAdmin's own comment.
+      if (!requireAdmin(req, res, { failClosed: true })) return;
+      const err = await allowlistAdd(email);
+      if (err) return json(res, 502, err);
       accessRequests.delete(email.trim().toLowerCase());
       persistAccessRequests();
       return json(res, 200, { ok: true });
@@ -1478,10 +1480,7 @@ const server = http.createServer(async (req, res) => {
       const { email } = await readBody(req);
       if (!email) return json(res, 400, { error: 'email required' });
       // CADS-webconference-demo#41 (finding 1) -- see approve's matching comment.
-      const caller = (req.headers['x-gate-email'] || '').trim().toLowerCase();
-      if (ADMIN_EMAILS.size > 0 && !ADMIN_EMAILS.has(caller)) {
-        return json(res, 403, { error: 'admin only' });
-      }
+      if (!requireAdmin(req, res)) return;
       accessRequests.delete(email.trim().toLowerCase());
       persistAccessRequests();
       return json(res, 200, { ok: true });
