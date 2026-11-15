@@ -1503,7 +1503,16 @@ const server = http.createServer(async (req, res) => {
       const caller = directory.get(from);
       const callee = directory.get(to);
       if (!caller) return json(res, 400, { error: 'caller not registered' });
-      if (!isOnline(callee, to)) return json(res, 200, { status: 'offline' });
+      // CADS-webconference-demo#157: isOnline(entry, email) can return true from
+      // the WS-socket check alone even when `entry` (directory.get(to)) is
+      // undefined -- a callee whose WS reconnected without re-registering in
+      // the directory (e.g. after a bridge restart wiped it). Falling through
+      // to `callee.holderPub` below then threw a TypeError evaluated inside
+      // the mintGrants try/catch, surfacing as a generic 500 "grant minting
+      // failed" instead of the honest 'offline' this caller actually needs
+      // (prompting their own re-register, see the heartbeat-retry fix
+      // alongside this one).
+      if (!callee || !isOnline(callee, to)) return json(res, 200, { status: 'offline' });
       let minted;
       try {
         minted = await mintGrants(caller.holderPub, callee.holderPub);
