@@ -1514,6 +1514,33 @@ const server = http.createServer(async (req, res) => {
         console.error('bridge: grant minting failed:', e);
         return json(res, 500, { error: 'grant minting failed' });
       }
+      const requestedKind = kind === 'chat-delivery' ? 'chat-delivery' : 'call';
+      // CADS-webconference-demo#158: the channel id is deterministic per
+      // holder-pubkey pair (channel_id_for_link(operator, holder_a,
+      // holder_b)), so a silent chat-delivery call (sent right after
+      // composing a message, and by the periodic background-delivery
+      // sweep) and a real call between the SAME two people land on the
+      // exact same channel -- and pendingCalls.set() below used to
+      // overwrite whichever entry was already there unconditionally. The
+      // callee auto-accepts a chat-delivery session with no user action, so
+      // a chat-delivery request arriving while a real call is still ringing
+      // (or already accepted) silently replaced it -- the caller's own
+      // pollCallStatus then saw 'accepted_and_registered' from the
+      // chat-delivery session's own attest flow, even though the callee
+      // never actually answered anything. Refuse the chat-delivery instead
+      // of clobbering a live call-kind entry for this exact channel; a real
+      // call is still allowed to proceed over a leftover chat-delivery
+      // entry (those are ephemeral and never shown to either user, so
+      // nothing is lost by superseding one).
+      const existingForChannel = pendingCalls.get(minted.channel);
+      const existingStillLive = existingForChannel && (
+        existingForChannel.status?.state === 'accepted_and_registered'
+          ? Date.now() - existingForChannel.createdAt <= ACCEPTED_CALL_STALE_MS
+          : Date.now() - existingForChannel.createdAt <= CALL_TTL_MS
+      );
+      if (requestedKind === 'chat-delivery' && existingStillLive && existingForChannel.kind !== 'chat-delivery') {
+        return json(res, 200, { status: 'busy' });
+      }
       const call = {
         channel: minted.channel,
         operatorPub: minted.operatorPub,
@@ -1529,7 +1556,7 @@ const server = http.createServer(async (req, res) => {
         // all, see showIncoming's branch in app.js). Threaded through so a
         // background message flush never surfaces a ringing card for
         // something the recipient never asked to be interrupted for.
-        kind: kind === 'chat-delivery' ? 'chat-delivery' : 'call',
+        kind: requestedKind,
         createdAt: Date.now(),
         callerAttest: null,
         calleeAttest: null,

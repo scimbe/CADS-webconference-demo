@@ -393,7 +393,12 @@ async function tryBackgroundDeliver(identity, peerEmail) {
     if (!presence.online) return;
     await ensureWasmInit();
     const resp = await api('/call', { body: { fromEmail: identity.email, toEmail: peerEmail, transport: 'channel', kind: 'chat-delivery' } });
-    if (resp.error || resp.status === 'offline') return;
+    // CADS-webconference-demo#158: 'busy' means the bridge found a real,
+    // still-live call already occupying this pair's (deterministic)
+    // channel and refused to let this chat-delivery session clobber it --
+    // same quiet "try again next sweep" outcome as 'offline', not a retry
+    // worth logging as a failure.
+    if (resp.error || resp.status === 'offline' || resp.status === 'busy') return;
     const attestation = computeAttestation(resp.channel, identity.holderPriv, identity.holderPub, identity.noisePub);
     const attestResp = await api('/attest', {
       body: { channel: resp.channel, role: 'caller', holderPub: identity.holderPub, noisePub: identity.noisePub, attestation },
