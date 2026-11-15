@@ -438,6 +438,26 @@ function startVideoFilterCompositor(media) {
   if (session) session.replaceOutgoingVideoTrack(filteredTrack).catch((e) => log(`filter track swap failed: ${e.message || e}`));
 }
 
+// Called by camera.js's switchCamera when a filter compositor is active, so
+// switching cameras doesn't desync it (CADS-webconference-demo#168): the
+// compositor's sourceVideo is still bound to the OLD raw camera track, so
+// swapping media.stream's video track directly (as switchCamera does when no
+// filter is active) would leave the compositor drawing from a stale/stopped
+// source while the stream suddenly carries the raw new-camera track
+// unfiltered -- and a later "no filter" selection would then restore that
+// stale old track instead of the one the user actually switched to. Returns
+// true when a compositor was active (so the caller knows not to also touch
+// media.stream itself), false otherwise.
+function replaceFilterSource(newTrack) {
+  const state = videoFilterState;
+  if (!state) return false;
+  const oldRawTrack = state.rawTrack;
+  state.rawTrack = newTrack;
+  state.sourceVideo.srcObject = new MediaStream([newTrack]);
+  if (oldRawTrack && oldRawTrack.readyState !== 'ended') oldRawTrack.stop();
+  return true;
+}
+
 function disableVideoFilterAndRestoreCamera(media) {
   const state = videoFilterState;
   if (!state) return;
@@ -618,4 +638,5 @@ export {
   toggleFilterMenu,
   closeFilterMenu,
   stopVideoFilterCompositor,
+  replaceFilterSource,
 };
