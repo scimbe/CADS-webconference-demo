@@ -139,8 +139,26 @@ async function runDialer(identity, { verified = false } = {}) {
   // free-text identity was never actually logged in anywhere to log out of.
   logoutLink.hidden = !verified;
 
-  await api('/register', { body: { email: identity.email, holderPub: identity.holderPub, noisePub: identity.noisePub } });
-  pollEvery(() => api('/heartbeat', { body: { email: identity.email } }), 15000);
+  // CADS-webconference-demo#157: this bridge's directory is in-memory only
+  // (wiped on every restart/redeploy -- start-webconference-on-boot.sh
+  // force-recreates the container on every boot), but this tab registers
+  // exactly once per page load and never checks either call's own result.
+  // A failed initial /register, or a directory wiped out from under an
+  // already-open tab later, used to mean every subsequent heartbeat (and
+  // every call to/from this identity) kept failing silently until the user
+  // thought to reload. Retry /register on an initial failure, and
+  // re-register automatically the moment the heartbeat sees the 404 that
+  // means "the bridge doesn't know this email anymore".
+  const registerWithBridge = () => api('/register', { body: { email: identity.email, holderPub: identity.holderPub, noisePub: identity.noisePub } });
+  const initialRegister = await registerWithBridge();
+  if (initialRegister.error) log(`initial /register failed (${initialRegister.error}) -- will retry automatically`);
+  pollEvery(async () => {
+    const hb = await api('/heartbeat', { body: { email: identity.email } });
+    if (hb._status === 404) {
+      log('bridge heartbeat says this identity is not registered -- re-registering');
+      await registerWithBridge();
+    }
+  }, 15000);
   ensureNotificationPermission(); // CADS-webconference-demo#55
 
   dialForm.addEventListener('submit', async (ev) => {
