@@ -163,10 +163,24 @@ async function decryptFromStorage(raw) {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
+// CADS-webconference-demo#162: a read/decrypt failure here is NOT the same
+// as "nothing stored" -- every caller used to treat this function's null
+// return either way, and loadOrCreateIdentity in particular would then
+// silently mint and persist a BRAND NEW identity over the still-present
+// (just currently unreadable) blob, permanently destroying the real
+// holder/noise private keys -- and with them every locally-stored chat row
+// they could ever decrypt -- all for what could just as easily be a
+// transient IndexedDB/WebCrypto failure, not real corruption. Thrown so a
+// caller can't accidentally fall through the same "doesn't exist" branch a
+// genuinely-absent identity would take.
+class StoredIdentityUnreadableError extends Error {}
+
 // Reads (and transparently, silently migrates) whatever identity is stored at `key` --
-// null if nothing is there yet. A pre-#133 plaintext blob decodes as plain JSON (no
-// ENCRYPTED_MARKER prefix) and is re-saved encrypted immediately, a one-time upgrade
-// that never discards or changes an existing real identity, just its at-rest form.
+// null if nothing is there yet, throws StoredIdentityUnreadableError if something IS
+// there but couldn't be read (see that error's own comment for why that's not the same
+// thing). A pre-#133 plaintext blob decodes as plain JSON (no ENCRYPTED_MARKER prefix)
+// and is re-saved encrypted immediately, a one-time upgrade that never discards or
+// changes an existing real identity, just its at-rest form.
 async function loadStoredIdentity(key) {
   const raw = localStorage.getItem(key);
   if (!raw) return null;
@@ -178,8 +192,8 @@ async function loadStoredIdentity(key) {
     }
     return await decryptFromStorage(raw);
   } catch (e) {
-    console.error(`identity.js: failed to read stored identity at ${key} -- treating as absent:`, e.message);
-    return null;
+    console.error(`identity.js: failed to read stored identity at ${key} -- NOT treating as absent:`, e.message);
+    throw new StoredIdentityUnreadableError(`stored identity at ${key} could not be read: ${e.message}`);
   }
 }
 
@@ -314,4 +328,5 @@ export {
   identityCreatedAt,
   ensureWasmInit,
   SUPPRESS_AUTO_IDENTITY_KEY,
+  StoredIdentityUnreadableError,
 };

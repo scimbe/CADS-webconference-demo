@@ -25,7 +25,7 @@ import {
   simpleModeEnterBtn, simpleExitBtn, simplePracticeBtn, showSimpleScreen, showMessengerShell,
   showAlertOverlay,
 } from './ui-dom.js';
-import { computeAttestation, loadStoredIdentity, SUPPRESS_AUTO_IDENTITY_KEY } from './identity.js';
+import { computeAttestation, loadStoredIdentity, StoredIdentityUnreadableError, SUPPRESS_AUTO_IDENTITY_KEY } from './identity.js';
 import { loadOrPairIdentity } from './pairing.js';
 import { withTimeout, WASM_INIT_TIMEOUT_MS } from './call-transport-shared.js';
 import { syncNow } from './sync.js';
@@ -738,19 +738,26 @@ async function runIdentityScreen() {
     // CADS-webconference-demo#133: goes through identity.js's loadStoredIdentity
     // now, not a raw JSON.parse -- the stored value is AES-GCM-encrypted since
     // #133 (or transparently migrated from a pre-#133 plaintext blob on read),
-    // no longer plain JSON a direct parse can read. loadStoredIdentity already
-    // has its own try/catch (returns null on a decrypt failure, logged there);
-    // this call site's own #32 "drop the corrupted entry" behavior is preserved
-    // for a genuine failure -- loadStoredIdentity returning null after logging
-    // an error is exactly that case, not a *different* failure mode to handle.
+    // no longer plain JSON a direct parse can read.
+    //
+    // CADS-webconference-demo#162: this used to treat ANY read failure as "the
+    // #32 corrupted-entry case" -- deleting lastKey outright and falling
+    // through to the identity form, where typing the same email back in would
+    // mint (via loadOrCreateIdentity) and persist a BRAND NEW identity,
+    // permanently destroying the real holder/noise private keys (and every
+    // local chat row they could decrypt) over what could just as easily be a
+    // transient failure, not real corruption. loadStoredIdentity now throws
+    // StoredIdentityUnreadableError instead of returning null for exactly this
+    // case, so it can't be confused with "genuinely nothing stored here" --
+    // leave the blob in place and surface the failure instead of erasing it.
     const lastKey = existingKeys[existingKeys.length - 1];
-    const identity = await loadStoredIdentity(lastKey);
-    if (!identity) {
-      log('stored identity was unreadable, ignoring it');
-      localStorage.removeItem(lastKey);
-    } else {
+    try {
+      const identity = await loadStoredIdentity(lastKey);
       await runDialer(identity);
       return;
+    } catch (e) {
+      if (!(e instanceof StoredIdentityUnreadableError)) throw e;
+      log(`stored identity was unreadable (${e.message}) -- left in place, not deleted; reload to retry`);
     }
   }
 
@@ -791,6 +798,13 @@ async function runIdentityScreen() {
     try {
       const identity = await loadOrPairIdentity(email);
       await runDialer(identity);
+    } catch (e) {
+      // CADS-webconference-demo#162: same reasoning as runIdentityScreen's own
+      // auto-login catch above -- surface this instead of letting
+      // loadOrCreateIdentity (inside loadOrPairIdentity) overwrite the
+      // still-present, just-unreadable blob with a brand-new identity.
+      if (!(e instanceof StoredIdentityUnreadableError)) throw e;
+      log(`stored identity was unreadable (${e.message}) -- left in place, not replaced; reload to retry`);
     } finally {
       if (submitBtn) submitBtn.disabled = false;
     }
