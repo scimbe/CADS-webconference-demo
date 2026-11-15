@@ -594,6 +594,39 @@ export class ChatStore {
     );
   }
 
+  // CADS-webconference-demo#159: the single most recent row for a
+  // conversation, for the contact-list preview -- history() decrypts and
+  // returns EVERY row (up to MAX_MESSAGES_PER_CONVERSATION), including full
+  // file bodies, just so the caller can pick the last one. renderContacts
+  // called this on every contact on a 5s poll (and after most user
+  // actions), so a conversation with a real file/image attachment got
+  // re-read and re-decrypted in full, repeatedly, forever. Opens the
+  // byConversation index with a REVERSE cursor instead, so this never
+  // touches more than exactly one row no matter how long the conversation
+  // is. A file row's body is never decrypted here at all --
+  // fileName/fileMimeType/fileSize are already in-the-clear metadata (see
+  // this class's own header comment), enough for a preview on their own.
+  async lastMessage(peerEmail) {
+    const db = await this._getDb();
+    const conversation = conversationKey(this.identity.email, peerEmail);
+    const row = await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readonly');
+      const idx = tx.objectStore(STORE).index('byConversation');
+      const range = IDBKeyRange.bound([conversation, -Infinity], [conversation, Infinity]);
+      const req = idx.openCursor(range, 'prev');
+      req.onsuccess = (ev) => resolve(ev.target.result ? ev.target.result.value : null);
+      tx.onerror = () => reject(tx.error);
+    });
+    if (!row) return null;
+    const base = { peerEmail: row.peerEmail, seq: row.seq, from: row.from, ts: row.ts, pending: !!row.pending, kind: row.kind || 'text' };
+    if (row.kind === 'file') return { ...base, fileName: row.fileName, fileMimeType: row.fileMimeType, fileSize: row.fileSize };
+    try {
+      return { ...base, text: await this._decrypt(row.iv, row.ciphertext, row) };
+    } catch {
+      return { ...base, text: '', corrupted: true };
+    }
+  }
+
   // Outbox: every not-yet-delivered outgoing message for one peer, oldest
   // first -- what setupChatChannel's 'open' handler flushes the moment a
   // live channel to that peer actually exists. CADS-webconference-demo#24:
