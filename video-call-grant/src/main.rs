@@ -65,6 +65,19 @@ fn from_hex32(s: &str) -> Result<[u8; 32], String> {
     if s.len() != 64 {
         return Err(format!("expected 64 hex chars (32 bytes), got {}", s.len()));
     }
+    // CADS-webconference-demo#171: `s.len()` is the UTF-8 BYTE length, not a
+    // character count -- a 64-BYTE string containing any multi-byte UTF-8
+    // character has fewer than 64 actual characters, and the byte-offset
+    // slicing below (`&s[2*i..2*i+2]`) panics the moment one of those
+    // offsets doesn't land on a char boundary. Rejecting anything that
+    // isn't a pure ASCII hex digit up front guarantees every byte IS its
+    // own character, so every slice below is safe. This also closes a
+    // second gap for free: `u8::from_str_radix` accepts a leading '+',
+    // which isn't a hex digit either, so it's rejected here before ever
+    // reaching that call.
+    if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("invalid hex character".to_string());
+    }
     let mut out = [0u8; 32];
     for (i, b) in out.iter_mut().enumerate() {
         *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| "invalid hex character".to_string())?;
