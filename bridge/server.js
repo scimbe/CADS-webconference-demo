@@ -1752,7 +1752,18 @@ const server = http.createServer(async (req, res) => {
           // upload (sync.js's own SYNC_CIPHERTEXT_CHUNK_BYTES means even
           // MAX_FILE_BYTES's largest legitimate attachment needs well under
           // this many chunks).
-          if (Number.isInteger(row.chunkIndex) && row.chunkIndex >= 0 && Number.isInteger(row.chunkCount) && row.chunkCount > 0 && row.chunkCount <= MAX_SYNC_CHUNK_COUNT) {
+          // CADS-webconference-demo#160 (fixed up after the bounds check
+          // below was added): a row carrying EITHER chunk field at all is
+          // unambiguously meant as a chunk, never a complete row -- falling
+          // through to the plain `pushSyncMessageRow(state, { ...row, ... })`
+          // below for one that FAILS the bounds check would store it as a
+          // bogus "complete" row anyway (chunkIndex/chunkCount/
+          // ciphertextChunk dangling, no real `ciphertext` field at all),
+          // not drop it as intended. Reject the whole row up front instead.
+          if (row.chunkIndex !== undefined || row.chunkCount !== undefined) {
+            if (!(Number.isInteger(row.chunkIndex) && row.chunkIndex >= 0 && Number.isInteger(row.chunkCount) && row.chunkCount > 0 && row.chunkCount <= MAX_SYNC_CHUNK_COUNT)) {
+              continue;
+            }
             const chunkKey = `${emailKey}:${row.conversation}:${row.seq}:${row.from}`;
             let pending = pendingChunkedMessages.get(chunkKey);
             if (row.chunkIndex === 0) {
