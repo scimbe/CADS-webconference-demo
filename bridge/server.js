@@ -748,13 +748,18 @@ function requireAdmin(req, res, { failClosed = false } = {}) {
       json(res, 503, { error: 'admin not configured (WEBCONFERENCE_ADMIN_EMAILS unset) -- cannot grant tunnel access without a configured admin' });
       return null;
     }
-    return caller;
+    // Permissive-when-unconfigured: a truthy sentinel, NOT `caller` itself
+    // -- `caller` is '' (falsy) whenever there's no gate-verified identity
+    // at all, which every call site's own `if (!requireAdmin(...)) return;`
+    // would then misread as failure, early-returning without this function
+    // having sent any response -- the request would simply hang forever.
+    return true;
   }
   if (!ADMIN_EMAILS.has(caller)) {
     json(res, 403, { error: 'admin only' });
     return null;
   }
-  return caller;
+  return true;
 }
 
 // CADS-webconference-demo#169: /api/allowlist/add and
