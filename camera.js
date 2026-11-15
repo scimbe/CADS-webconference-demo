@@ -13,6 +13,7 @@
 
 import { btnSwitchCamera, log } from './ui-dom.js';
 import { getActiveSession } from './call-session.js';
+import { replaceFilterSource } from './video-filters.js';
 
 // CADS-webconference-demo (user feedback): this used to be acquired as soon
 // as the dialer/messenger screen came up (preloadLocalMedia, called from
@@ -95,15 +96,22 @@ async function switchCamera(media) {
     const nextFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
     const newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: nextFacingMode } });
     const newTrack = newStream.getVideoTracks()[0];
-    const oldTrack = media.stream.getVideoTracks()[0];
-    if (oldTrack) {
-      media.stream.removeTrack(oldTrack);
-      oldTrack.stop();
+    // CADS-webconference-demo#168: when a video filter compositor is active,
+    // media.stream's video track is the compositor's canvas-capture output,
+    // not a raw camera track -- the compositor itself owns swapping that
+    // into media.stream and pushing it to the peer. Swap only its camera
+    // source here; otherwise fall back to the old direct-stream swap.
+    if (!replaceFilterSource(newTrack)) {
+      const oldTrack = media.stream.getVideoTracks()[0];
+      if (oldTrack) {
+        media.stream.removeTrack(oldTrack);
+        oldTrack.stop();
+      }
+      media.stream.addTrack(newTrack);
+      const session = getActiveSession();
+      if (session) await session.replaceOutgoingVideoTrack(newTrack);
     }
-    media.stream.addTrack(newTrack);
     currentFacingMode = nextFacingMode;
-    const session = getActiveSession();
-    if (session) await session.replaceOutgoingVideoTrack(newTrack);
   } catch (e) {
     log(`camera switch failed: ${e.message || e}`);
   } finally {
