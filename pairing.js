@@ -28,11 +28,40 @@ function generatePairingCode() {
   return code;
 }
 async function pairingKeyPair() {
-  return crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']);
+  // CADS-webconference-demo#173: 'deriveBits' is required now too --
+  // pairingSharedKey derives the raw ECDH bits first (then runs them
+  // through HKDF) rather than deriving an AES key directly from ECDH.
+  return crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']);
 }
-async function pairingSharedKey(myPrivateKey, theirPubJwk, usage) {
+// CADS-webconference-demo#173: the AES key used to be the raw ECDH shared
+// secret directly -- the 8-char pairing code (PAIRING_CODE_RE's own ~37-bit
+// estimate) only ever selected WHICH offer to look up; nothing bound the
+// derived key itself to the code or to the specific pair of public keys
+// involved, so a relay that could substitute a public key in transit (the
+// bridge itself only ever sees public keys and an opaque ciphertext -- see
+// this file's header comment -- but a compromised relay or client bug is
+// exactly the threat model worth hardening against here) left the comment's
+// claim ("an opaque ciphertext it cannot decrypt") true only against a
+// passive observer. Deriving through HKDF with both public keys' coordinates
+// AND the code as `info` binds the result to this exact pairing session --
+// a substituted key or a different code changes the derived key outright
+// instead of silently succeeding.
+async function pairingSharedKey(myPrivateKey, myPubJwk, theirPubJwk, code, usage) {
   const theirPublicKey = await crypto.subtle.importKey('jwk', theirPubJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
-  return crypto.subtle.deriveKey({ name: 'ECDH', public: theirPublicKey }, myPrivateKey, { name: 'AES-GCM', length: 256 }, false, [usage]);
+  const sharedBits = await crypto.subtle.deriveBits({ name: 'ECDH', public: theirPublicKey }, myPrivateKey, 256);
+  const baseKey = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey']);
+  // Order-independent (sorted) so both sides -- which each call this with
+  // "my"/"their" swapped -- compute the identical info string.
+  const a = `${myPubJwk.x}.${myPubJwk.y}`;
+  const b = `${theirPubJwk.x}.${theirPubJwk.y}`;
+  const info = new TextEncoder().encode(`ct-webconference-pairing-v1:${[a, b].sort().join(':')}:${code}`);
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    [usage],
+  );
 }
 async function pairingEncrypt(sharedKey, obj) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -70,7 +99,7 @@ async function pairAsNewDevice(email) {
   while (Date.now() < deadline) {
     const poll = await api(`/pair/poll?code=${encodeURIComponent(code)}`);
     if (poll.ready) {
-      const sharedKey = await pairingSharedKey(keyPair.privateKey, poll.oldDevicePubKeyJwk, 'decrypt');
+      const sharedKey = await pairingSharedKey(keyPair.privateKey, pubJwk, poll.oldDevicePubKeyJwk, code, 'decrypt');
       const receivedIdentity = await pairingDecrypt(sharedKey, poll.iv, poll.ciphertext);
       const key = storageKeyFor(email);
       // CADS-webconference-demo#119 follow-up: this reads-then-writes the

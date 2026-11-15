@@ -430,7 +430,7 @@ document.getElementById('pair-device-btn')?.addEventListener('click', async () =
     }
     const keyPair = await pairingKeyPair();
     const myPubJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
-    const sharedKey = await pairingSharedKey(keyPair.privateKey, lookup.tempPubKeyJwk, 'encrypt');
+    const sharedKey = await pairingSharedKey(keyPair.privateKey, myPubJwk, lookup.tempPubKeyJwk, code, 'encrypt');
     const { iv, ciphertext } = await pairingEncrypt(sharedKey, myIdentity);
     const resp = await api('/pair/deliver', { body: { code, oldDevicePubKeyJwk: myPubJwk, iv, ciphertext } });
     if (resp.error) {
