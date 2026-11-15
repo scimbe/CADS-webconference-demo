@@ -345,6 +345,22 @@ function prunePairingOffers() {
     if (offer.offeredAt < cutoff) pairingOffers.delete(code);
   }
 }
+// CADS-webconference-demo#163: declared before the FIRST makeRateLimiter()
+// call below (pairingRateLimited) -- makeRateLimiter itself is a hoisted
+// function declaration so calling it early is fine, but it closes over
+// this array, which is not; declaring it any later (even just above the
+// function itself, textually closer) would TDZ-throw on this exact call.
+const allRateLimiters = [];
+function pruneRateLimiters() {
+  const now = Date.now();
+  for (const { hits, windowMs } of allRateLimiters) {
+    for (const [key, entry] of hits) {
+      if (now - entry.windowStart > windowMs) hits.delete(key);
+    }
+  }
+}
+setInterval(pruneRateLimiters, 5 * 60_000).unref();
+
 // Same fixed-window-per-IP shape as accessRequestRateLimited/callRateLimited
 // above -- bounds both a brute-force guess sweep across the code space and
 // plain memory growth from offer spam, without needing per-code state.
@@ -374,6 +390,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // resource cost: each call spawns a real execFile process).
 function makeRateLimiter(maxCount, windowMs) {
   const hits = new Map(); // key -> { count, windowStart }
+  allRateLimiters.push({ hits, windowMs });
   return function rateLimited(key) {
     const now = Date.now();
     const entry = hits.get(key);
@@ -1022,7 +1039,20 @@ async function handlePlay(req, res, url) {
   const polling = req.method === 'GET' && url.pathname === '/api/play/status';
   if (req.method === 'POST' && !/^application\/json/i.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'json only' });
   const opening = req.method === 'POST' && (url.pathname === '/api/play/open' || url.pathname === '/api/play/join');
-  if (polling ? playPollLimited(url.searchParams.get('token') || '') : opening && playRateLimited('play')) return busy(res, 429, 'rate', 20);
+  // CADS-webconference-demo#163: this used to key playPollLimited on the raw
+  // token BEFORE the TOKEN_RE check further down ever ran -- every distinct
+  // string an attacker sent (never mind whether it was even shaped like a
+  // real token) created its own permanent budget in that limiter's map,
+  // defeating the very rate limit it's meant to enforce. Reject a
+  // malformed token up front, same shape the status handler itself already
+  // uses below for a genuinely unknown token.
+  if (polling) {
+    const pollToken = url.searchParams.get('token') || '';
+    if (!TOKEN_RE.test(pollToken)) return json(res, 404, { error: 'invite gone', code: 'gone' });
+    if (playPollLimited(pollToken)) return busy(res, 429, 'rate', 20);
+  } else if (opening && playRateLimited('play')) {
+    return busy(res, 429, 'rate', 20);
+  }
   if (req.method === 'POST' && url.pathname === '/api/play/open') {
     const { holderPub, noisePub } = await readBody(req);
     if (!HEX64.test(holderPub || '') || !HEX64.test(noisePub || '')) return json(res, 400, { error: 'bad keys' });
@@ -1489,8 +1519,14 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/api/call') {
       // CADS-webconference-demo#12 (finding 8) -- see callRateLimited's own
-      // comment for why this is keyed by IP.
-      if (callRateLimited(clientIp(req))) return json(res, 429, { error: 'too many calls -- try again in a moment' });
+      // comment for why this falls back to IP. CADS-webconference-demo#163:
+      // prefer the gate-verified email when one exists, same reasoning as
+      // /api/ice-config's own limiter -- this bridge sits behind one tunnel
+      // address, so a pure per-IP key can bucket every distinct real user
+      // together into one shared budget. Falls back to IP exactly as
+      // before on an ungated deployment, which has no verified identity to
+      // key on at all.
+      if (callRateLimited(gateVerifiedEmail(req) || clientIp(req))) return json(res, 429, { error: 'too many calls -- try again in a moment' });
       const { fromEmail, toEmail, transport, kind } = await readBody(req);
       // CADS-webconference-demo#9: fromEmail used to be trusted outright --
       // a gate-verified caller could place a call "from" any registered
