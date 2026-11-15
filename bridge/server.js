@@ -1206,6 +1206,16 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/register') {
       const { email, holderPub, noisePub } = await readBody(req);
       if (!email || !holderPub || !noisePub) return json(res, 400, { error: 'email, holderPub, noisePub required' });
+      // CADS-webconference-demo#171: only ever truthy-checked before -- the
+      // play routes already apply HEX64 to the same shaped values
+      // (holderPub/noisePub). An invalid value stored here surfaces much
+      // later and far less clearly, as a 500 "grant minting failed" from
+      // whichever OTHER call tries to mint against it (or, worse, reaches
+      // the grant binary's own argv -- see video-call-grant's own
+      // from_hex32 fix alongside this one).
+      if (typeof email !== 'string' || !HEX64.test(holderPub) || !HEX64.test(noisePub)) {
+        return json(res, 400, { error: 'email must be a string; holderPub/noisePub must each be 64 lowercase hex characters' });
+      }
       // CADS-webconference-demo#9: registering overwrites directory[email]
       // with caller-supplied public keys, unconditionally -- a gate-verified
       // caller could register as anyone else, taking over future calls to
@@ -1548,6 +1558,13 @@ const server = http.createServer(async (req, res) => {
       const { channel, role, holderPub, noisePub, attestation } = await readBody(req);
       const call = pendingCalls.get(channel);
       if (!call) return json(res, 404, { error: 'no such pending call' });
+      // CADS-webconference-demo#171: these forwarded straight to the
+      // control plane (via tryRegister/cpFetch below) with no shape check
+      // at all -- the play routes already apply this same HEX64/128-hex
+      // validation to the identically-shaped fields on /api/play/attest.
+      if (!HEX64.test(holderPub || '') || !HEX64.test(noisePub || '') || !/^[0-9a-f]{128}$/i.test(attestation || '')) {
+        return json(res, 400, { error: 'bad attestation' });
+      }
       const rec = { holder: holderPub, noise_pubkey: noisePub, noise_attestation: attestation };
       if (role === 'caller') call.callerAttest = rec;
       else if (role === 'callee') call.calleeAttest = rec;
