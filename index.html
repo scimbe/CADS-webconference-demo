@@ -773,7 +773,7 @@
            (#69) machinery only reacts to signaling/media state changes,
            which a fully-offline browser never generates (nothing to time
            out on if no packets are even attempted). window.onoffline/
-           ononline (see app.js's module-scope updateOfflineIndicator --
+           ononline (see call-controls.js's module-scope updateOfflineIndicator --
            moved out of setupControls so the same instant signal also
            covers the dialer/messenger screens via #conn-trouble-banner)
            is a fast, cheap, ADDITIONAL signal for exactly this one case
