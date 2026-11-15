@@ -471,8 +471,11 @@ async function renderContacts(contacts) {
     preview.className = 'msg-row-preview';
     preview.textContent = 'No messages yet';
     if (dialerChatStore) {
-      const history = await dialerChatStore.history(email);
-      const last = history[history.length - 1];
+      // CADS-webconference-demo#159: lastMessage() reads (and for a file row,
+      // decrypts nothing at all) exactly one row instead of history()'s full
+      // decrypt of every row in the conversation -- see that method's own
+      // comment. This runs for every contact on a 5s poll.
+      const last = await dialerChatStore.lastMessage(email);
       if (last) {
         const time = document.createElement('span');
         time.className = 'msg-row-time';
