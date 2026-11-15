@@ -1102,7 +1102,19 @@ async function handlePlay(req, res, url) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://bridge');
+  // CADS-webconference-demo#161: this parse used to run before the try block
+  // below even starts -- a request target the WHATWG URL parser rejects
+  // (e.g. a scheme-relative target with an invalid host) threw here,
+  // becoming an unhandled rejection in this async handler that, on this
+  // Node version, terminates the whole process by default: one malformed
+  // request restarted the bridge, wiping the in-memory directory, pending
+  // calls, pairing offers, and rate-limit state for every connected client.
+  let url;
+  try {
+    url = new URL(req.url, 'http://bridge');
+  } catch (e) {
+    return json(res, 400, { error: 'invalid request URL' });
+  }
   try {
     if (url.pathname.startsWith('/api/play/')) { await handlePlay(req, res, url); return; }
     if (req.method === 'GET' && url.pathname === '/api/whoami') {
@@ -1824,6 +1836,13 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.on('upgrade', (req, socket, head) => {
+  // CADS-webconference-demo#161: this whole handler ran with no try/catch at
+  // all -- an uncaught exception here (starting with new URL() below, for
+  // the same malformed-target reason as the request handler's own fix)
+  // becomes an uncaught exception in Node's 'upgrade' event, which
+  // terminates the process by default, same bridge-wide impact as the
+  // request-handler case.
+  try {
   const url = new URL(req.url, 'http://bridge');
   const rawEmail = url.searchParams.get('email') || '';
   const email = rawEmail.toLowerCase();
@@ -1865,6 +1884,10 @@ server.on('upgrade', (req, socket, head) => {
   wsAttachReader(socket, () => {
     if (wsClients.get(email) === socket) wsClients.delete(email);
   });
+  } catch (e) {
+    console.error('bridge: unhandled error on WS upgrade:', e);
+    try { socket.destroy(); } catch (_) {}
+  }
 });
 
 // CADS-webconference-demo#12 (finding 7): Node has no default request
