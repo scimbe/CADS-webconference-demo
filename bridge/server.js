@@ -250,28 +250,76 @@ const SYNC_STORE_FILE = process.env.WEBCONFERENCE_SYNC_STORE_FILE || './sync-sto
 // client-side -- bounding it server-side too, FIFO-pruned oldest-revision-
 // first once exceeded, same reasoning.
 const MAX_SYNC_MESSAGES_PER_IDENTITY = 20_000;
+// CADS-webconference-demo#160: row COUNT alone doesn't bound total bytes --
+// a handful of real file/image attachments (each stored as a JSON number
+// array, ~3.5-4x the raw bytes) can still make one identity's state huge
+// well under the 20,000-row cap. Tracked incrementally (approxMessageBytes
+// below) rather than re-serializing the whole array on every push just to
+// check it.
+const MAX_SYNC_BYTES_PER_IDENTITY = 100 * 1024 * 1024; // 100MB of JSON-encoded message rows
 try {
   const raw = fs.readFileSync(SYNC_STORE_FILE, 'utf8');
   for (const [email, state] of Object.entries(JSON.parse(raw))) {
+    state.approxMessageBytes = state.messages.reduce((sum, m) => sum + JSON.stringify(m).length, 0);
     syncStore.set(email, state);
   }
   console.log(`loaded sync state for ${syncStore.size} identit(y/ies) from ${SYNC_STORE_FILE}`);
 } catch (e) {
   if (e.code !== 'ENOENT') console.log(`could not load ${SYNC_STORE_FILE}: ${e.message} -- starting with no sync state`);
 }
-function persistSyncStore() {
+// CADS-webconference-demo#160: this used to run synchronously (writeFileSync,
+// the whole store, for every identity) on EVERY /sync/push -- including each
+// individual chunk of a large file's chunked upload (sync.js's own
+// pushChunkedRow sends one /sync/push PER CHUNK, so a single big attachment
+// could mean thousands of full-store rewrites in a row). Debounced instead:
+// a push just marks the store dirty and schedules one write a short delay
+// later, coalescing a burst of pushes (the common case) into a single
+// rewrite; a process exit still flushes any pending write first.
+let persistTimer = null;
+let persistDirty = false;
+function writeSyncStoreNow() {
+  persistDirty = false;
   const tmp = `${SYNC_STORE_FILE}.tmp-${process.pid}`;
   try {
-    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(syncStore)));
+    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(syncStore), (k, v) => (k === 'approxMessageBytes' ? undefined : v)));
     fs.renameSync(tmp, SYNC_STORE_FILE);
   } catch (e) {
     console.log(`could not persist sync store to ${SYNC_STORE_FILE}: ${e.message}`);
   }
 }
+const SYNC_STORE_PERSIST_DEBOUNCE_MS = 2000;
+function persistSyncStore() {
+  persistDirty = true;
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    if (persistDirty) writeSyncStoreNow();
+  }, SYNC_STORE_PERSIST_DEBOUNCE_MS);
+  persistTimer.unref?.();
+}
+process.on('exit', () => {
+  if (persistDirty) writeSyncStoreNow();
+});
+// The 'exit' handler above only covers process.exit()/natural event-loop-
+// empty exits -- a SIGTERM (what `docker stop`/a container orchestrator
+// sends, and what start-webconference-on-boot.sh's own force-recreate-on-
+// every-boot ultimately triggers) has no listener installed by default,
+// so Node's default action terminates the process immediately WITHOUT
+// emitting 'exit' at all -- confirmed live: without this, up to
+// SYNC_STORE_PERSIST_DEBOUNCE_MS worth of pushes could be silently lost on
+// every single graceful restart, a real regression the debounce above
+// would otherwise introduce. SIGINT (Ctrl+C, local/manual runs) gets the
+// same treatment for the same reason.
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    if (persistDirty) writeSyncStoreNow();
+    process.exit(0);
+  });
+}
 function getSyncState(email) {
   let state = syncStore.get(email);
   if (!state) {
-    state = { nextRevision: 1, messages: [], contacts: { entries: {} }, blocked: { entries: {} } };
+    state = { nextRevision: 1, messages: [], contacts: { entries: {} }, blocked: { entries: {} }, approxMessageBytes: 0 };
     syncStore.set(email, state);
   }
   return state;
@@ -299,9 +347,41 @@ const pendingChunkedMessages = new Map();
 // legitimate retry-from-scratch), so this only bounds truly distinct,
 // still-incomplete uploads.
 const MAX_PENDING_CHUNKED_UPLOADS_PER_IDENTITY = 20;
+// CADS-webconference-demo#160: the count cap above bounds how many DISTINCT
+// incomplete uploads one identity can hold, but not for how LONG -- a
+// client that starts an upload (chunkIndex 0) and then goes away for good
+// (closed tab, uninstalled, dead device) left its buffer sitting in that
+// identity's small budget forever, right alongside genuinely in-progress
+// ones. 10 minutes is generous for a real multi-chunk upload (even a
+// slow/retrying one) and short relative to this bridge's day-scale sweep
+// intervals elsewhere.
+const PENDING_CHUNK_UPLOAD_TTL_MS = 10 * 60_000;
+function pruneExpiredChunkUploads() {
+  const cutoff = Date.now() - PENDING_CHUNK_UPLOAD_TTL_MS;
+  for (const [key, pending] of pendingChunkedMessages) {
+    if (pending.startedAt < cutoff) pendingChunkedMessages.delete(key);
+  }
+}
+setInterval(pruneExpiredChunkUploads, 60_000).unref();
+// CADS-webconference-demo#160 -- see MAX_SYNC_CHUNK_COUNT's own comment at
+// its one call site.
+const MAX_SYNC_CHUNK_COUNT = 20_000;
 function pendingChunkKeysFor(email) {
   const prefix = `${email}:`;
   return [...pendingChunkedMessages.keys()].filter((k) => k.startsWith(prefix));
+}
+// CADS-webconference-demo#160: state.approxMessageBytes is maintained
+// incrementally by these two instead of re-running
+// JSON.stringify(state.messages) on every push/evict just to enforce
+// MAX_SYNC_BYTES_PER_IDENTITY -- cheap even for a very large, long-lived
+// store.
+function pushSyncMessageRow(state, row) {
+  state.messages.push(row);
+  state.approxMessageBytes += JSON.stringify(row).length;
+}
+function popOldestSyncMessageRow(state) {
+  const [row] = state.messages.splice(0, 1);
+  if (row) state.approxMessageBytes -= JSON.stringify(row).length;
 }
 // Last-write-wins merge, identical rule to app.js's localSetFor.merge() --
 // the server has to converge on the SAME result the client would reach
@@ -1663,7 +1743,27 @@ const server = http.createServer(async (req, res) => {
           // a complete ciphertext -- reassembled across however many
           // /sync/push calls it takes before landing in state.messages
           // exactly like a normal (small, single-request) row does.
-          if (typeof row.chunkIndex === 'number' && typeof row.chunkCount === 'number' && row.chunkCount > 0) {
+          //
+          // CADS-webconference-demo#160: chunkCount/chunkIndex were only
+          // ever checked for being *a* number, with no upper bound --
+          // `new Array(row.chunkCount)` for an attacker-chosen huge or
+          // non-finite chunkCount (Infinity passes `> 0` outright) throws a
+          // RangeError. MAX_SYNC_CHUNK_COUNT is generous for any real
+          // upload (sync.js's own SYNC_CIPHERTEXT_CHUNK_BYTES means even
+          // MAX_FILE_BYTES's largest legitimate attachment needs well under
+          // this many chunks).
+          // CADS-webconference-demo#160 (fixed up after the bounds check
+          // below was added): a row carrying EITHER chunk field at all is
+          // unambiguously meant as a chunk, never a complete row -- falling
+          // through to the plain `pushSyncMessageRow(state, { ...row, ... })`
+          // below for one that FAILS the bounds check would store it as a
+          // bogus "complete" row anyway (chunkIndex/chunkCount/
+          // ciphertextChunk dangling, no real `ciphertext` field at all),
+          // not drop it as intended. Reject the whole row up front instead.
+          if (row.chunkIndex !== undefined || row.chunkCount !== undefined) {
+            if (!(Number.isInteger(row.chunkIndex) && row.chunkIndex >= 0 && Number.isInteger(row.chunkCount) && row.chunkCount > 0 && row.chunkCount <= MAX_SYNC_CHUNK_COUNT)) {
+              continue;
+            }
             const chunkKey = `${emailKey}:${row.conversation}:${row.seq}:${row.from}`;
             let pending = pendingChunkedMessages.get(chunkKey);
             if (row.chunkIndex === 0) {
@@ -1677,6 +1777,7 @@ const server = http.createServer(async (req, res) => {
               pending = {
                 parts: new Array(row.chunkCount),
                 received: 0,
+                startedAt: Date.now(), // CADS-webconference-demo#160 -- see pruneExpiredChunkUploads below
                 meta: { conversation: row.conversation, seq: row.seq, from: row.from, ts: row.ts, kind: row.kind, iv: row.iv, fileName: row.fileName, fileMimeType: row.fileMimeType, fileSize: row.fileSize },
               };
               pendingChunkedMessages.set(chunkKey, pending);
@@ -1687,13 +1788,21 @@ const server = http.createServer(async (req, res) => {
             if (pending.received < pending.parts.length) continue; // still waiting on more chunks
             const ciphertext = pending.parts.flat();
             pendingChunkedMessages.delete(chunkKey);
-            state.messages.push({ ...pending.meta, ciphertext, rev: state.nextRevision++ });
+            pushSyncMessageRow(state, { ...pending.meta, ciphertext, rev: state.nextRevision++ });
             continue;
           }
-          state.messages.push({ ...row, rev: state.nextRevision++ });
+          pushSyncMessageRow(state, { ...row, rev: state.nextRevision++ });
         }
-        const overflow = state.messages.length - MAX_SYNC_MESSAGES_PER_IDENTITY;
-        if (overflow > 0) state.messages.splice(0, overflow); // oldest-revision-first, same FIFO shape as #77's local cap
+        // CADS-webconference-demo#77's own precedent: oldest-revision-first
+        // eviction, extended by #160 to ALSO enforce a total-byte budget
+        // (row count alone doesn't bound bytes -- see MAX_SYNC_BYTES_PER_IDENTITY's
+        // own comment), not just a row count.
+        let overflow = state.messages.length - MAX_SYNC_MESSAGES_PER_IDENTITY;
+        while (overflow > 0 || state.approxMessageBytes > MAX_SYNC_BYTES_PER_IDENTITY) {
+          if (!state.messages.length) break;
+          popOldestSyncMessageRow(state);
+          overflow--;
+        }
       }
       if (contacts && typeof contacts.entries === 'object') mergeEntries(state.contacts.entries, contacts.entries);
       if (blocked && typeof blocked.entries === 'object') mergeEntries(state.blocked.entries, blocked.entries);
