@@ -1006,7 +1006,16 @@ function mintPlayGrants(holderAPub, holderBPub) {
 async function cpDelete(path) { return (await playCp('DELETE', path)).status; }
 function sweepPlay() {
   const now = Date.now();
-  for (const [token, inv] of playInvites) if (now - inv.createdAt > (inv.channel ? PLAY_GAME_TTL_MS : PLAY_INVITE_TTL_MS)) playInvites.delete(token);
+  // CADS-webconference-demo#165: an invite's own TTL switches from the
+  // generous 15-minute PLAY_INVITE_TTL_MS to the much shorter 5-minute
+  // PLAY_GAME_TTL_MS the moment it has a channel (join), but this used to
+  // keep measuring from the invite's original createdAt -- an invite
+  // joined when it was already older than 5 minutes (still well within
+  // its advertised 15-minute validity) got deleted by the very next sweep
+  // tick, out from under both peers while they were still polling
+  // /api/play/status to finish registration. Measure the game-phase TTL
+  // from joinedAt (set in /api/play/join, below) instead.
+  for (const [token, inv] of playInvites) if (now - (inv.channel ? inv.joinedAt : inv.createdAt) > (inv.channel ? PLAY_GAME_TTL_MS : PLAY_INVITE_TTL_MS)) playInvites.delete(token);
   for (const [channel, g] of playChannels) {
     if (now - g.createdAt <= PLAY_GAME_TTL_MS) continue;
     playChannels.delete(channel); pendingCalls.delete(channel);
@@ -1049,6 +1058,7 @@ async function handlePlay(req, res, url) {
     pendingCalls.set(call.channel, call);
     playChannels.set(call.channel, { createdAt: Date.now(), registered: false, token: token, holders: { caller: inv.a.holderPub, callee: holderPub.toLowerCase() }, attested: {}, ice: {} });
     inv.channel = call.channel;
+    inv.joinedAt = Date.now(); // CADS-webconference-demo#165 -- see sweepPlay's own comment
     return json(res, 200, { channel: call.channel, grant: call.grantForCallee, ws: PLAY_WS_URL, role: 'callee' });
   }
   if (req.method === 'GET' && url.pathname === '/api/play/status') {
