@@ -147,6 +147,19 @@ function hexToBytes(hex) {
   return new Uint8Array(hex.match(/.{2}/g).map((h) => parseInt(h, 16)));
 }
 
+// CADS-webconference-demo#167: the one check every peer-supplied `seq` has
+// to pass before it's trusted as an IndexedDB key component or rendered
+// into a CSS attribute selector (messenger-ui.js's appendConvMessage/
+// markConvMessageDelivered) -- a non-integer/negative/non-finite seq would
+// otherwise poison the numeric sync cursor and, worse, a string containing
+// quote/bracket characters would make querySelector throw on every later
+// render of that conversation. Shared by this file's own BroadcastChannel
+// check and every receive site across chat-glue.js/call-channel.js, so
+// there's exactly one definition of "valid seq" to keep in sync.
+export function isValidSeq(seq) {
+  return typeof seq === 'number' && Number.isInteger(seq) && Number.isSafeInteger(seq) && seq >= 0;
+}
+
 async function deriveKey(holderPrivHex) {
   const baseKey = await crypto.subtle.importKey('raw', hexToBytes(holderPrivHex), 'HKDF', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
@@ -196,7 +209,7 @@ export class ChatStore {
         || typeof d.peerEmail !== 'string' || !d.peerEmail
         || (d.from !== 'me' && d.from !== 'peer')
         || !contentValid
-        || !Number.isInteger(d.seq) || !Number.isSafeInteger(d.seq) || d.seq < 0
+        || !isValidSeq(d.seq)
         || !Number.isFinite(d.ts)
       ) {
         return;

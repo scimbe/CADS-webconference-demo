@@ -181,7 +181,12 @@ function appendConvMessage({ from, text, pending, corrupted, seq, kind, fileName
   // chatStore.js's own dedupeKey already uses for this exact purpose
   // (peerEmail is implicit: this is always the single currently-open
   // conversation's own pane).
-  if (seq != null && convMessages.querySelector(`.chat-msg.${from}[data-seq="${seq}"]`)) return;
+  // CADS-webconference-demo#167: seq ultimately originates from a peer
+  // envelope (validated upstream now, but belt-and-suspenders here too --
+  // CSS.escape keeps an unexpected value from breaking the selector's
+  // syntax instead of throwing and killing the receive loop that called
+  // this function).
+  if (seq != null && convMessages.querySelector(`.chat-msg.${from}[data-seq="${CSS.escape(String(seq))}"]`)) return;
   const div = document.createElement('div');
   div.className = `chat-msg ${from}${pending ? ' pending' : ''}`;
   if (seq != null) div.dataset.seq = seq;
@@ -241,7 +246,7 @@ function appendConvMessage({ from, text, pending, corrupted, seq, kind, fileName
 // already has the correct pending:false state either way; this only keeps
 // whatever's currently rendered in sync with it.
 function markConvMessageDelivered(seq) {
-  const bubble = convMessages.querySelector(`.chat-msg.me[data-seq="${seq}"]`);
+  const bubble = convMessages.querySelector(`.chat-msg.me[data-seq="${CSS.escape(String(seq))}"]`);
   if (!bubble) return;
   bubble.classList.remove('pending');
   const meta = bubble.querySelector('.meta');
