@@ -661,15 +661,26 @@ export class ChatStore {
     });
   }
 
-  // CADS-webconference-demo#87/#88: raw (still-encrypted) rows for a
-  // conversation past a given seq, for the cross-device sync push. Pending
-  // (not-yet-delivered) drafts are excluded -- a second device must never
-  // attempt to re-deliver an outgoing message the originating device
-  // hasn't actually sent yet; once it's genuinely sent, markDelivered()
-  // flips pending false and the next push picks it up normally.
-  async rowsSince(peerEmail, sinceSeq) {
+  // CADS-webconference-demo#87/#88/#166: raw (still-encrypted) rows for a
+  // conversation past a given cursor, for the cross-device sync push.
+  // Pending (not-yet-delivered) drafts are excluded -- a second device
+  // must never attempt to re-deliver an outgoing message the originating
+  // device hasn't actually sent yet; once it's genuinely sent,
+  // markDelivered() flips pending false and the next push picks it up
+  // normally.
+  //
+  // Cursor is this row's auto-increment `id` (its STRICT insertion order
+  // in this store), not `seq` (a Lamport seq -- causal order, not
+  // insertion order). A message queued offline and only delivered after
+  // newer rows were already pushed, or a peer message that happens to
+  // carry a lower seq than one already pushed, would fall below a
+  // seq-based cursor and never get pushed at all. `id` has no such gap:
+  // every row this device ever writes gets a strictly-increasing id the
+  // moment it's written, in the exact order a later push cycle will see
+  // it, regardless of what seq it carries or when it becomes non-pending.
+  async rowsSince(peerEmail, sinceId) {
     const records = await this._recordsForConversation(peerEmail);
-    return records.filter((r) => r.seq > (sinceSeq || 0) && !r.pending);
+    return records.filter((r) => r.id > (sinceId || 0) && !r.pending);
   }
 
   // CADS-webconference-demo#87/#88: writes a row that arrived ALREADY
