@@ -26,7 +26,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # admission-stall saga -- the edge parks a lone pairing member for a 30s
 # TTL, but the client's own ADMISSION_EXCHANGE_TIMEOUT was only 15s. v0.4.8
 # raises it to 45s. See Agent.Dockerfile's comment for the full story.
-CT_AGENT_REF="${CT_AGENT_REF:-09ac2eefb9500ee0122d7afb7ff7321bd8b4c3a6}"
+CT_AGENT_REF="${CT_AGENT_REF:-63e3d517297adfccdfba56e0900b1aac4075fdcf}"
 OUT_DIR="$REPO_ROOT/pkg"
 
 docker run --rm -m 2g --cpus 2 \
